@@ -9,6 +9,10 @@ The standalone package never commands motors. Its optional web-server survey
 hooks are disabled unless the consuming robot project supplies an explicit
 motion adapter.
 
+For architecture, physical-test context, configuration caveats, and the
+current next steps, read [`docs/LLM_HANDOFF.md`](docs/LLM_HANDOFF.md). It is the
+fastest orientation document for both human and LLM maintainers.
+
 ## Quick start
 
 Install the Python environment and launch the two-camera viewer:

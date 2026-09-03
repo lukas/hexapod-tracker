@@ -98,8 +98,14 @@ class PlanarPoseEstimator:
         anchor = self.anchors[tag_id]
         center = np.asarray(anchor["center"][:2], dtype=np.float64)
         half = self.tag_size_mm / 2.0
+        # OpenCV returns marker corners in canonical top-left, top-right,
+        # bottom-right, bottom-left order.  In the tag frame (+Y toward the
+        # printed top), that is (-X,+Y), (+X,+Y), (+X,-Y), (-X,-Y).
+        # Keeping the same handed ordering here is essential: the former
+        # bottom-left-first offsets mirrored every configured floor tag and
+        # forced the homography to absorb a roughly one-tag-width residual.
         offsets = np.asarray(
-            [[-half, -half], [half, -half], [half, half], [-half, half]],
+            [[-half, half], [half, half], [half, -half], [-half, -half]],
             dtype=np.float64,
         )
         yaw = math.radians(float(anchor["yaw_degrees"]))

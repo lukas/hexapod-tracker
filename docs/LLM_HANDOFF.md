@@ -154,18 +154,22 @@ about how each value was obtained.
 
 ## Configuration truth and caveats
 
-There are two deliberately different tag maps:
+There are three deliberately different tag maps:
 
 - `configs/apriltag_pose_config_20260831.json` is the full calibrated-tracker
   layout. It maps tag 0 to the chassis, tags 1/7 to L0, 4/14 to L1, 6/11 to
   L2, 5/9 to L3, 3/10 to L4, and 2/8 to L5. The paired values are hip/coxa and
   knee/femur tags.
-- `configs/hexapod_tag_map.json` is the later side-tag map used by the simple
-  planar flex viewer. L4 hip/knee are tags 31/25. L5 hip uses 16/20 and L5
-  knee uses 17/21; the L5 assignments remain provisional.
+- `configs/hexapod-1-apriltag-layout.json` is the 2026-09-03 photographed
+  physical inventory for Hexapod 1. It records 37 unique robot-tag mounts,
+  all per-tag orthogonal orientations, and seven one-foot-grid floor anchors.
+  Robot tag translations remain unmeasured.
+- `configs/hexapod_tag_map.json` is the side-tag grouping used by the simple
+  planar flex viewer. It now derives all 12 hip/knee pairs from the Hexapod 1
+  inventory; each pair is ordered `[+y face, -y face]`.
 
-All printed black squares were measured as 27 mm, excluding the white quiet
-zone.
+The photographed black squares are modeled as 27.2 mm, excluding the white
+quiet zone.
 
 Important limitations in the current checked-in configs:
 
@@ -174,11 +178,13 @@ Important limitations in the current checked-in configs:
 - Several `frame_from_tag` translations are zero/photo-inferred placeholders.
   Measure tag-to-joint-axis transforms before calling a tag center a mechanical
   joint center.
-- The planar floor map is provisional. Active anchors are tags 12, 13, and 15;
-  positions/yaws need a precise survey before millimeter-level claims.
-- There have been two physical prints with ID 13 in the garage. Offline gait
-  analysis tries self-consistent floor-tag subsets, but duplicate IDs are still
-  a setup defect and should be removed or relabeled.
+- The planar floor map is provisional. Active anchors are tags 100, 101, 102,
+  103, 104, 105, and 112. Their one-foot center spacing comes from the
+  operator's placement description, while yaw comes from two photographed
+  planar rectifications; survey the centers before millimeter-level claims.
+- The current Hexapod 1 and floor inventory has no duplicate IDs. Other loose
+  prints in the garage are outside this map and must not be introduced without
+  checking for collisions.
 - Camera indexes are not identities. iPhone Continuity Camera and reconnecting
   USB devices can reorder indexes. Confirm device names and live images after
   every rescan/restart.
@@ -257,8 +263,7 @@ In roughly descending value:
 1. Calibrate each Arducam's intrinsics at every capture mode actually used.
 2. Establish a measured common world/extrinsic calibration if true multi-view
    3-D or stereo claims are needed.
-3. Replace provisional floor coordinates/yaws with a surveyed map and eliminate
-   duplicate tag IDs.
+3. Replace the operator-described floor coordinates with a surveyed map.
 4. Measure tag-to-joint-axis mount transforms or add component-local markers
    before trying to localize flex within an assembly.
 5. Add recorded-camera regression clips with expected tag/pose summaries. Keep

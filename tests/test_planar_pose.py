@@ -9,7 +9,7 @@ from hexapod_tracker.planar_pose import PlanarPoseEstimator
 def corners(center, yaw_degrees, size=27.0):
     half = size / 2.0
     offsets = np.asarray(
-        [[-half, -half], [half, -half], [half, half], [-half, half]],
+        [[-half, half], [half, half], [half, -half], [-half, -half]],
         dtype=np.float32,
     )
     yaw = math.radians(yaw_degrees)

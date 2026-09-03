@@ -47,7 +47,10 @@ uv run hexapod-track configs/apriltag_pose_config_20260831.json \
   --annotated-output annotated.mp4
 ```
 
-The main calibration and tag-map files live in `configs/`. See
+The main calibration and tag-map files live in `configs/`.
+`hexapod-1-apriltag-layout.json` is the photographed physical inventory for
+Hexapod 1: 37 unique robot-tag mounts, seven floor anchors, and each tag's
+frame-relative orientation. See
 [`docs/HOUSING_POSE.md`](docs/HOUSING_POSE.md) for coordinate conventions,
 mount calibration, multi-camera behavior, and output formats.
 

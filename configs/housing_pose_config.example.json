@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "_comment": "Example only: replace every frame_from_tag with the measured/CAD mount transform. Quaternions are [x,y,z,w].",
+  "geometry": {
+    "chassis_apothem_m": 0.1,
+    "coxa_m": 0.0125,
+    "femur_m": 0.09,
+    "tibia_m": 0.15,
+    "hip_anchor_y_m": -0.02565
+  },
+  "cameras": {
+    "overhead": {
+      "world_from_camera": {
+        "translation_m": [0.0, 0.0, 0.0],
+        "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+      }
+    }
+  },
+  "tags": {
+    "0": {
+      "_comment": "One yaw-servo housing is fixed to the chassis and supplies body pose.",
+      "frame": "body",
+      "frame_from_tag": {
+        "translation_m": [0.0, 0.0, 0.0],
+        "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+      }
+    },
+    "1": {"frame": "L0_coxa", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "2": {"frame": "L1_coxa", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "3": {"frame": "L2_coxa", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "4": {"frame": "L3_coxa", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "5": {"frame": "L4_coxa", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "6": {"frame": "L5_coxa", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "7": {"frame": "L0_femur", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "8": {"frame": "L1_femur", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "9": {"frame": "L2_femur", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "10": {"frame": "L3_femur", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "11": {"frame": "L4_femur", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "12": {"frame": "L5_femur", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "13": {"frame": "L0_tibia", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "14": {"frame": "L1_tibia", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "15": {"frame": "L2_tibia", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "16": {"frame": "L3_tibia", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "17": {"frame": "L4_tibia", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}},
+    "18": {"frame": "L5_tibia", "frame_from_tag": {"translation_m": [0.0, 0.0, 0.0], "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]}}
+  }
+}

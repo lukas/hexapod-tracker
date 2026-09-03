@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "family": "tag36h11",
+  "tag_black_square_size_mm": 27.0,
+  "parts": [
+    {
+      "id": "leg4_hip_servo",
+      "display_name": "Leg 4 hip servo assembly",
+      "tag_ids": [31],
+      "pose_reference": "center of side-mount tag 31",
+      "surface": "vertical",
+      "yaw_period_degrees": 360.0
+    },
+    {
+      "id": "leg4_knee_servo",
+      "display_name": "Leg 4 knee servo assembly",
+      "tag_ids": [25],
+      "pose_reference": "center of side-mount tag 25",
+      "surface": "vertical",
+      "yaw_period_degrees": 360.0
+    },
+    {
+      "id": "leg5_hip_servo",
+      "display_name": "Leg 5 hip servo assembly",
+      "tag_ids": [16, 20],
+      "pose_reference": "centroid of the two opposing screw-mount tag centers",
+      "surface": "vertical",
+      "yaw_period_degrees": 180.0
+    },
+    {
+      "id": "leg5_knee_servo",
+      "display_name": "Leg 5 knee servo assembly",
+      "tag_ids": [17, 21],
+      "pose_reference": "centroid of the two opposing screw-mount tag centers",
+      "surface": "vertical",
+      "yaw_period_degrees": 180.0
+    }
+  ],
+  "notes": [
+    "IDs 31 and 25 were assigned to the L4 hip and knee respectively from the operator's placement plus rigid tracking during the 2026-09-02 stand/turn/lower video.",
+    "During that video, tag 31 stayed nearest the adjacent hip-lid tag (median 62.8 px, IQR 0.4 px) and tag 25 stayed nearest the adjacent knee-lid tag (median 57.6 px, IQR 11.6 px over 665 co-visible frames).",
+    "IDs 16/20 are provisionally assigned to the hip and 17/21 to the knee from their observed placement.",
+    "Measure tag-to-joint-axis transforms before treating the reported centroids as mechanical joint centers.",
+    "Tags not listed here are still returned by the API under markers and unassigned_tag_ids."
+  ]
+}

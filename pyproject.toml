@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hexapod-tracker"
+version = "0.1.0"
+description = "AprilTag camera tracking, pose estimation, and local camera UI for a hexapod"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "numpy>=1.24",
+  "opencv-contrib-python>=4.8,<6",
+  "scipy>=1.10",
+  "pyobjc-framework-AVFoundation>=12.2; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+hexapod-camera-server = "hexapod_tracker.camera_server:main"
+hexapod-track = "hexapod_tracker.track:main"
+hexapod-housing-pose = "hexapod_tracker.estimate_housing_pose:main"
+hexapod-gait-motion = "hexapod_tracker.gait_motion:main"
+hexapod-gait-video = "hexapod_tracker.telemetry_video:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

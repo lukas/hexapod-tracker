@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "family": "tag36h11",
+  "units": "millimeters",
+  "tag_black_square_size": 27.0,
+  "active_anchor_ids": [12, 13, 15],
+  "measurement_convention": "Reported gaps are edge-to-edge between black tag squares; coordinates are tag centers.",
+  "coordinate_frame": {
+    "origin": "center of tag 12",
+    "positive_y": "from tag 12 toward tag 13",
+    "positive_x": "from tag 12 toward tag 5; the side of the 12-to-13 line containing tag 15",
+    "positive_z": "up from the floor"
+  },
+  "measurements": {
+    "edge_gap_12_to_15": 304.8,
+    "edge_gap_12_to_13": 609.6,
+    "edge_gap_13_to_15": 609.6,
+    "edge_gap_between_inline_tags": 50.8,
+    "edge_gap_12_to_5": 50.8
+  },
+  "tags": [
+    {"id": 12, "center": [0.0, 0.0, 0.0], "yaw_degrees": -172.457, "yaw_uncertainty_degrees": 1.0},
+    {"id": 2, "center": [0.0, 77.8, 0.0]},
+    {"id": 1, "center": [0.0, 155.6, 0.0]},
+    {"id": 4, "center": [0.0, 233.4, 0.0]},
+    {"id": 5, "center": [77.8, 0.0, 0.0]},
+    {"id": 13, "center": [0.0, 636.6, 0.0], "yaw_degrees": 187.997, "yaw_uncertainty_degrees": 4.0},
+    {"id": 15, "center": [320.334, 86.469, 0.0], "yaw_degrees": 6.505, "yaw_uncertainty_degrees": 3.0}
+  ],
+  "provisional": true,
+  "notes": [
+    "The 2-inch inline gaps were described as approximate.",
+    "Tag 5 is provisionally modeled perpendicular to the 12-to-13 line.",
+    "Only IDs 12, 13, and 15 remain active floor anchors; IDs 1, 2, 4, and 5 were removed before the hexapod returned.",
+    "Active-anchor yaw was estimated from simultaneous camera 0/1 observations on 2026-09-02.",
+    "Confirm coordinates with a precise tape measurement before relying on millimeter-level world positions."
+  ]
+}

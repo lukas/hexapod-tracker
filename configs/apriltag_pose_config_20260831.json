@@ -1,0 +1,341 @@
+{
+  "schema_version": 1,
+  "tag_family": "tag36h11",
+  "marker_size_m": 0.027,
+  "marker_size_verified": true,
+  "_comment": "As-photographed layout from apriltags.jpeg on 2026-08-31. Lukas measured the printed black squares (excluding the white quiet zone) as 27 mm. Tag 1 is L0, confirmed by the handwritten physical 0. Floor coordinates are anchored at tag 12 and remain valid only while floor tags 12/13/15 do not move.",
+  "tracking": {
+    "max_occlusion_frames": 8,
+    "_comment": "Decoded tags and red boot tips may be bridged for at most eight video frames. Outputs always identify optical-flow and prediction sources."
+  },
+  "camera": {
+    "_comment": "Approximate iPhone 17 Pro main-camera intrinsics derived from EXIF 24 mm-equivalent focal length at 4284x5712. This is sufficient for a first overlay, not metrology; replace with a real calibration for accurate heights/angles.",
+    "image_size_px": [
+      4284,
+      5712
+    ],
+    "camera_matrix": [
+      [
+        3960.559401,
+        0.0,
+        2142.0
+      ],
+      [
+        0.0,
+        3960.559401,
+        2856.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "distortion_coefficients": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "approximate": true,
+    "allow_center_crop": true,
+    "allow_quarter_turn": true
+  },
+  "floor_tags": {
+    "12": {
+      "label": "floor origin",
+      "world_from_tag": {
+        "translation_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_xyz_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "13": {
+      "label": "floor lower-right in photo",
+      "world_from_tag": {
+        "translation_m": [
+          -0.658872514,
+          0.733057538,
+          0.0
+        ],
+        "euler_xyz_deg": [
+          0.0,
+          0.0,
+          2.140635
+        ]
+      }
+    },
+    "15": {
+      "label": "floor upper-right in photo",
+      "world_from_tag": {
+        "translation_m": [
+          -0.64939507,
+          0.015502443,
+          0.0
+        ],
+        "euler_xyz_deg": [
+          0.0,
+          0.0,
+          -179.086657
+        ]
+      }
+    }
+  },
+  "robot_pose": {
+    "_comment": "frame_from_tag rotations are photo-inferred mounting rotations. Translations are zero placeholders, so body translation is the center-tag position. Measure CAD/indexed mounts before using reported positions as metrology.",
+    "geometry": {
+      "chassis_apothem_m": 0.1,
+      "coxa_m": 0.0125,
+      "femur_m": 0.09,
+      "tibia_m": 0.15,
+      "hip_anchor_y_m": -0.02565
+    },
+    "tags": {
+      "0": {
+        "label": "chassis center",
+        "frame": "body",
+        "photo_center_px": [
+          1962.4,
+          2667.1
+        ],
+        "photo_tag_y_clockwise_from_up_deg": 68.3,
+        "frame_from_tag": {
+          "translation_m": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "euler_xyz_deg": [
+            0.0,
+            0.0,
+            159.2
+          ]
+        }
+      },
+      "1": {
+        "label": "L0 hip-servo lid (handwritten 0)",
+        "frame": "L0_coxa",
+        "photo_center_px": [
+          1635.1,
+          2615.5
+        ],
+        "photo_tag_y_clockwise_from_up_deg": 108.3,
+        "frame_from_tag": {
+          "euler_xyz_deg": [
+            0.0,
+            0.0,
+            90.0
+          ]
+        }
+      },
+      "7": {
+        "label": "L0 knee-servo lid",
+        "frame": "L0_femur",
+        "photo_center_px": [
+          1362.7,
+          2512.4
+        ],
+        "photo_tag_y_clockwise_from_up_deg": 109.7,
+        "frame_from_tag": {
+          "euler_xyz_deg": [
+            0.0,
+            0.0,
+            90.0
+          ]
+        }
+      },
+      "4": {
+        "label": "L1 hip-servo lid",
+        "frame": "L1_coxa",
+        "photo_center_px": [
+          1712.8,
+          2935.7
+        ],
+        "photo_tag_y_clockwise_from_up_deg": -138.1,
+        "frame_from_tag": {
+          "euler_xyz_deg": [
+            0.0,
+            0.0,
+            -90.0
+          ]
+        }
+      },
+      "14": {
+        "label": "L1 knee-servo lid",
+        "frame": "L1_femur",
+        "photo_center_px": [
+          1508.9,
+          3171.5
+        ],
+        "photo_tag_y_clockwise_from_up_deg": 39.2,
+        "frame_from_tag": {
+          "euler_xyz_deg": [
+            0.0,
+            0.0,
+            90.0
+          ]
+        }
+      },
+      "6": {
+        "label": "L2 hip-servo lid",
+        "frame": "L2_coxa",
+        "photo_center_px": [
+          2034.4,
+          3037.5
+        ],
+        "photo_tag_y_clockwise_from_up_deg": 76.5,
+        "frame_from_tag": {
+          "euler_xyz_deg": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "11": {
+        "label": "L2 knee-servo lid",
+        "frame": "L2_femur",
+        "photo_center_px": [
+          2091.7,
+          3355.9
+        ],
+        "photo_tag_y_clockwise_from_up_deg": 76.3,
+        "frame_from_tag": {
+          "euler_xyz_deg": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "5": {
+        "label": "L3 hip-servo lid",
+        "frame": "L3_coxa",
+        "photo_center_px": [
+          2286.2,
+          2817.0
+        ],
+        "photo_tag_y_clockwise_from_up_deg": -71.7,
+        "frame_from_tag": {
+          "euler_xyz_deg": [
+            0.0,
+            0.0,
+            90.0
+          ]
+        }
+      },
+      "9": {
+        "label": "L3 knee-servo lid",
+        "frame": "L3_femur",
+        "photo_center_px": [
+          2569.8,
+          2919.5
+        ],
+        "photo_tag_y_clockwise_from_up_deg": -161.2,
+        "frame_from_tag": {
+          "euler_xyz_deg": [
+            0.0,
+            0.0,
+            180.0
+          ]
+        }
+      },
+      "3": {
+        "label": "L4 hip-servo lid",
+        "frame": "L4_coxa",
+        "photo_center_px": [
+          2220.6,
+          2503.6
+        ],
+        "photo_tag_y_clockwise_from_up_deg": -131.1,
+        "frame_from_tag": {
+          "euler_xyz_deg": [
+            0.0,
+            0.0,
+            90.0
+          ]
+        }
+      },
+      "10": {
+        "label": "L4 knee-servo lid",
+        "frame": "L4_femur",
+        "photo_center_px": [
+          2448.7,
+          2312.7
+        ],
+        "photo_tag_y_clockwise_from_up_deg": 137.0,
+        "frame_from_tag": {
+          "euler_xyz_deg": [
+            0.0,
+            0.0,
+            180.0
+          ]
+        }
+      },
+      "2": {
+        "label": "L5 hip-servo lid",
+        "frame": "L5_coxa",
+        "photo_center_px": [
+          1898.8,
+          2401.2
+        ],
+        "photo_tag_y_clockwise_from_up_deg": 166.7,
+        "frame_from_tag": {
+          "euler_xyz_deg": [
+            0.0,
+            0.0,
+            90.0
+          ]
+        }
+      },
+      "8": {
+        "label": "L5 knee-servo lid",
+        "frame": "L5_femur",
+        "photo_center_px": [
+          1840.4,
+          2125.6
+        ],
+        "photo_tag_y_clockwise_from_up_deg": -11.8,
+        "frame_from_tag": {
+          "euler_xyz_deg": [
+            0.0,
+            0.0,
+            -90.0
+          ]
+        }
+      }
+    },
+    "visual_joint_bias_deg": {
+      "L0_hip": -2.785,
+      "L0_yaw": 0.599,
+      "L1_hip": 1.096,
+      "L1_yaw": 8.763,
+      "L2_hip": 0.57,
+      "L2_yaw": -0.038,
+      "L3_hip": -5.841,
+      "L3_yaw": 0.376,
+      "L4_hip": 0.489,
+      "L4_yaw": 0.177,
+      "L5_hip": 1.806,
+      "L5_yaw": 0.826
+    }
+  },
+  "visual_calibration": {
+    "applied_unix": 1788211492.49,
+    "kind": "visual_joint_bias",
+    "source_report": "artifacts/apriltag_pose/calibrations/visual_calibration_20260831_142151.json",
+    "joint_count": 12,
+    "camera_calibration_approximate": true,
+    "previous_visual_joint_bias_deg": {},
+    "servo_zeros_changed": false,
+    "motor_commands_sent": false
+  }
+}

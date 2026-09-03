@@ -24,6 +24,7 @@ hexapod-track = "hexapod_tracker.track:main"
 hexapod-housing-pose = "hexapod_tracker.estimate_housing_pose:main"
 hexapod-gait-motion = "hexapod_tracker.gait_motion:main"
 hexapod-gait-video = "hexapod_tracker.telemetry_video:main"
+hexapod-audit-layout = "hexapod_tracker.layout_audit:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -54,6 +54,22 @@ frame-relative orientation. See
 [`docs/HOUSING_POSE.md`](docs/HOUSING_POSE.md) for coordinate conventions,
 mount calibration, multi-camera behavior, and output formats.
 
+Audit a new photo set against that inventory with:
+
+```sh
+uv run hexapod-audit-layout \
+  --require-all-layout-ids \
+  --require-all-orientations \
+  --output-dir artifacts/apriltag-audit/annotated \
+  --report artifacts/apriltag-audit/report.json \
+  /path/to/photos/*.jpeg
+```
+
+The report preserves repeated detections of the same ID, cross-checks the
+floor and planar-viewer configs, and independently checks all robot/floor
+orientations when the photo set has enough geometry. Annotated images draw tag
+`+X` in red and `+Y` in green.
+
 ## Web UI and tests
 
 The React source and its checked-in production build are in `web/vision_ui`.

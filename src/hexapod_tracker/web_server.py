@@ -1195,8 +1195,8 @@ def wrap_handler_with_vision(
         def _vision_serve_static(self, path: str) -> None:
             if not ui_dir.is_dir():
                 message = (
-                    "Vision UI has not been built. Run `make vision-build` "
-                    "from prototype_sts3215."
+                    "Vision UI has not been built. Run `make web-build` "
+                    "from the hexapod-tracker repository."
                 )
                 self._vision_send_bytes(
                     HTTPStatus.SERVICE_UNAVAILABLE,

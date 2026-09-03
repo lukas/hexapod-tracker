@@ -1,7 +1,7 @@
 """Off-robot synthetic tests for housing-marker pose estimation.
 
 Run locally:
-    uv run pytest linux_control/test_housing_pose.py
+    uv run --extra dev pytest tests/test_housing_pose.py
 """
 from __future__ import annotations
 

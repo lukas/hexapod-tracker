@@ -1,7 +1,7 @@
 """Off-robot tests for calibrated AprilTag vision.
 
 Run locally:
-    uv run pytest linux_control/test_apriltag_vision.py
+    uv run --extra dev pytest tests/test_apriltag_vision.py
 """
 from __future__ import annotations
 

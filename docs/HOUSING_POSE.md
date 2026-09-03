@@ -111,7 +111,7 @@ small motion; the raw sample and a `tilt_glitch_ignored` event are still saved.
 After hardware motion ends, the Mac processes the raw video into AprilTag
 JSONL plus annotated MP4, replays the selected protocol in MuJoCo, renders a
 sim MP4, and writes `apriltag_motion.json`, a comparison report, and a manifest
-in the run directory
+in the consuming robot project's run directory. In `lukas/hexapod` these live
 under `rl_move/hardware_traces/`. The raw recordings remain available even if
 post-processing or a hardware trial fails.
 
@@ -131,7 +131,8 @@ direction and collect at least three complete surveys. Advance a candidate to
 Do not promote a gait from raw path length: sideways drift and turning can look
 fast. Use `commanded_axis_speed_mm_s` from `apriltag_motion.json`.
 
-Aggregate any number of completed run directories with:
+When this tracker is used from `lukas/hexapod`, aggregate any number of
+completed run directories with that repository's reliability command:
 
 ```sh
 uv run python -m rl_move.scripts.summarize_scripted_gait_reliability \
@@ -231,7 +232,8 @@ move those three floor tags after establishing the map.
 
 ## Photo, video, and live-camera use
 
-Run from `prototype_sts3215`. A still image produces one JSON record:
+Run from the `hexapod-tracker` repository root. A still image produces one
+JSON record:
 
 ```sh
 uv run hexapod-track \
@@ -315,7 +317,7 @@ Detector output looks like:
 }
 ```
 
-Run it from `prototype_sts3215`:
+Run it from the `hexapod-tracker` repository root:
 
 ```sh
 uv run hexapod-housing-pose \

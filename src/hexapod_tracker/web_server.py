@@ -1170,6 +1170,8 @@ def wrap_handler_with_vision(
 
         def _vision_read_json(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length", "0") or 0)
+            if length > 8_000_000:
+                raise ValueError("request body is too large")
             raw = self.rfile.read(length) if length else b"{}"
             value = json.loads(raw.decode("utf-8"))
             if not isinstance(value, dict):
@@ -1377,6 +1379,20 @@ def wrap_handler_with_vision(
                     self._vision_json(
                         HTTPStatus.ACCEPTED,
                         runtime.zero_survey.stop(),
+                    )
+                elif path == "/api/vision/zero-survey/resume":
+                    body = self._vision_read_json()
+                    if runtime.public_state()["camera"]["enabled"]:
+                        runtime.disable_camera()
+                    self._vision_json(
+                        HTTPStatus.ACCEPTED,
+                        runtime.zero_survey.resume(body),
+                    )
+                elif path == "/api/vision/zero-survey/wifi-frame":
+                    body = self._vision_read_json()
+                    self._vision_json(
+                        HTTPStatus.ACCEPTED,
+                        runtime.zero_survey.ingest_wifi_frame(body),
                     )
                 elif path == "/api/vision/zero-survey/save":
                     body = self._vision_read_json()

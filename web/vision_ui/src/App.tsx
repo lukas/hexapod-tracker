@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   CalibrationJoint,
   CalibrationReport,
@@ -9,6 +9,7 @@ import type {
   ZeroSurveyState,
   ZeroSurveyTag,
 } from './types'
+import SurveyScene from './SurveyScene'
 
 const POLL_MS = 350
 
@@ -194,10 +195,121 @@ function stateCopy(state: string) {
   return 'Find it'
 }
 
+type LooseRecord = Record<string, unknown>
+
+function objectValue(value: unknown): LooseRecord | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as LooseRecord
+    : null
+}
+
+function numberValue(record: LooseRecord | null, names: string[]) {
+  for (const name of names) {
+    const value = Number(record?.[name])
+    if (Number.isFinite(value)) return value
+  }
+  return null
+}
+
+function record3dPose(metadata: LooseRecord): number[] | null {
+  const sources = [
+    metadata,
+    objectValue(metadata.frame),
+    objectValue(metadata.camera),
+  ].filter(Boolean) as LooseRecord[]
+  const candidates = sources.flatMap((source) => [
+    source.camera_pose_xyzw_xyz,
+    source.cameraPose,
+    source.camera_pose,
+    source.pose,
+    source.extrinsics,
+  ])
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.length >= 7) {
+      const pose = candidate.slice(0, 7).map(Number)
+      if (pose.every(Number.isFinite)) return pose
+    }
+    const item = objectValue(candidate)
+    if (!item) continue
+    const quaternion = objectValue(item.quaternion)
+    const translation = objectValue(item.translation)
+    const quaternionArray = Array.isArray(item.quaternion) ? item.quaternion.map(Number) : []
+    const translationArray = Array.isArray(item.translation ?? item.position)
+      ? (item.translation ?? item.position) as unknown[]
+      : []
+    if (quaternionArray.length >= 4 && translationArray.length >= 3) {
+      const pose = [...quaternionArray.slice(0, 4), ...translationArray.slice(0, 3).map(Number)]
+      if (pose.every(Number.isFinite)) return pose
+    }
+    const pose = [
+      numberValue(item, ['qx', 'x']) ?? numberValue(quaternion, ['x', 'qx']),
+      numberValue(item, ['qy', 'y']) ?? numberValue(quaternion, ['y', 'qy']),
+      numberValue(item, ['qz', 'z']) ?? numberValue(quaternion, ['z', 'qz']),
+      numberValue(item, ['qw', 'w']) ?? numberValue(quaternion, ['w', 'qw']),
+      numberValue(item, ['tx']) ?? numberValue(translation, ['x', 'tx']),
+      numberValue(item, ['ty']) ?? numberValue(translation, ['y', 'ty']),
+      numberValue(item, ['tz']) ?? numberValue(translation, ['z', 'tz']),
+    ]
+    if (pose.every((value) => value !== null && Number.isFinite(value))) return pose as number[]
+  }
+  return null
+}
+
+function record3dMatrix(metadata: LooseRecord, staticMetadata: LooseRecord | null, width: number, height: number): number[][] | null {
+  const sources = [
+    metadata,
+    objectValue(metadata.frame),
+    objectValue(metadata.camera),
+    staticMetadata,
+  ].filter(Boolean) as LooseRecord[]
+  for (const source of sources) {
+    const matrixCandidate = source.camera_matrix ?? source.intrinsicMatrix ?? source.K
+    const flat = Array.isArray(matrixCandidate)
+      ? (Array.isArray(matrixCandidate[0]) ? (matrixCandidate as unknown[][]).flat() : matrixCandidate).map(Number)
+      : []
+    if (flat.length === 9 && flat.every(Number.isFinite)) {
+      const sourceWidth = numberValue(source, ['w', 'width', 'rgbWidth']) || width
+      const sourceHeight = numberValue(source, ['h', 'height', 'rgbHeight']) || height
+      // Record3D's K metadata is column-major; accept an already nested matrix too.
+      const nested = Array.isArray(matrixCandidate) && Array.isArray(matrixCandidate[0])
+      const rowMajor = nested
+        ? flat
+        : [flat[0], flat[3], flat[6], flat[1], flat[4], flat[7], flat[2], flat[5], flat[8]]
+      const sx = width / sourceWidth
+      const sy = height / sourceHeight
+      return [
+        [rowMajor[0] * sx, rowMajor[1], rowMajor[2] * sx],
+        [rowMajor[3], rowMajor[4] * sy, rowMajor[5] * sy],
+        [rowMajor[6], rowMajor[7], rowMajor[8]],
+      ]
+    }
+    const rawCoeffs = source.intrinsicCoeffs
+      ?? source.intrinsicMatrixCoeffs
+      ?? source.intrinsics
+      ?? source.perFrameIntrinsicCoeffs
+    const coeffArray = Array.isArray(rawCoeffs) ? rawCoeffs.map(Number) : []
+    const coeffs = objectValue(rawCoeffs)
+    const fx = numberValue(coeffs, ['fx']) ?? (Number.isFinite(coeffArray[0]) ? coeffArray[0] : null)
+    const fy = numberValue(coeffs, ['fy']) ?? (Number.isFinite(coeffArray[1]) ? coeffArray[1] : null)
+    const cx = numberValue(coeffs, ['tx', 'cx']) ?? (Number.isFinite(coeffArray[2]) ? coeffArray[2] : null)
+    const cy = numberValue(coeffs, ['ty', 'cy']) ?? (Number.isFinite(coeffArray[3]) ? coeffArray[3] : null)
+    if ([fx, fy, cx, cy].every((value) => value !== null)) {
+      const sourceWidth = numberValue(source, ['w', 'width', 'rgbWidth']) || width
+      const sourceHeight = numberValue(source, ['h', 'height', 'rgbHeight']) || height
+      return [
+        [(fx as number) * width / sourceWidth, 0, (cx as number) * width / sourceWidth],
+        [0, (fy as number) * height / sourceHeight, (cy as number) * height / sourceHeight],
+        [0, 0, 1],
+      ]
+    }
+  }
+  return null
+}
+
 function surveyStep(status?: string) {
   if (status === 'connecting') return 1
   if (status === 'locking_origin') return 2
-  if (['scanning', 'finishing', 'stopping'].includes(status || '')) return 3
+  if (['scanning', 'finishing', 'stopping', 'connection_lost', 'failed'].includes(status || '')) return 3
   if (['complete', 'incomplete'].includes(status || '')) return 4
   return 1
 }
@@ -208,6 +320,10 @@ function SurveySchematic({survey}: {survey: ZeroSurveyState}) {
   const tags = survey.records.filter((tag) => tag.world_from_tag?.translation_m)
   const path = survey.camera_path_m || []
   const selectedTag = tags.find((tag) => tag.tag_id === selected)
+  const targetPosition = survey.progress.robot_positions.find(
+    (item) => item.position === survey.guidance?.target_position,
+  )
+  const targetPoint = targetPosition?.expected_world_position_m || null
 
   if (!tags.length) {
     return (
@@ -237,6 +353,7 @@ function SurveySchematic({survey}: {survey: ZeroSurveyState}) {
   const rawPoints = [
     ...tags.map((tag) => projectRaw(tag.world_from_tag.translation_m)),
     ...path.map((point) => projectRaw(point)),
+    ...(targetPoint ? [projectRaw(targetPoint)] : []),
   ]
   const xs = rawPoints.map((point) => point[0])
   const ys = rawPoints.map((point) => point[1])
@@ -275,6 +392,7 @@ function SurveySchematic({survey}: {survey: ZeroSurveyState}) {
           return <line key={`${first.tag_id}-${second.tag_id}`} className="robot-link" x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} />
         })}
         {path.length > 1 && <polyline className="phone-path" points={pathPoints} />}
+        {targetPoint && (() => { const target = project(targetPoint); return <g className="target-beacon" transform={`translate(${target[0]} ${target[1]})`}><circle r="19"/><circle r="7"/><text x="25" y="5">Next: {targetPosition?.position}</text></g> })()}
         {tags.map((tag) => {
           const point = tag.world_from_tag.translation_m
           const center = project(point)
@@ -284,9 +402,13 @@ function SurveySchematic({survey}: {survey: ZeroSurveyState}) {
             point[1] + orientation[1] * 0.045,
             point[2] + orientation[2] * 0.045,
           ]) : null
-          const role = tag.role === 'robot' ? 'robot' : tag.role === 'unknown' ? 'extra' : 'floor'
+          const role = tag.role === 'robot'
+            ? 'robot'
+            : ['ground', 'calibration_anchor'].includes(tag.role)
+              ? 'floor'
+              : 'extra'
           return (
-            <g key={tag.tag_id} className={`map-tag ${role} ${tag.stable ? 'stable' : 'warming'} ${selected === tag.tag_id ? 'selected' : ''}`} transform={`translate(${center[0]} ${center[1]})`} onClick={() => setSelected(tag.tag_id)}>
+            <g key={tag.tag_id} className={`map-tag ${role} ${tag.stable ? 'stable' : 'warming'} ${selected === tag.tag_id ? 'selected' : ''} ${survey.guidance?.target_tag_id === tag.tag_id ? 'targeted' : ''}`} transform={`translate(${center[0]} ${center[1]})`} onClick={() => setSelected(tag.tag_id)}>
               {view === 'iso' && point[2] > 0.015 && <line className="height-stem" x1="0" y1="0" x2="0" y2={Math.min(80, point[2] * scale * 1.4)} />}
               {arrow && <line className="orientation-arrow" x1="0" y1="0" x2={arrow[0] - center[0]} y2={arrow[1] - center[1]} />}
               <rect x="-12" y="-9" width="24" height="18" rx="4" filter="url(#tagShadow)" />
@@ -318,7 +440,14 @@ function ZeroSurveyWorkspace({
   bodyAnchorConfirmed,
   setBodyAnchorConfirmed,
   notice,
+  connectionMode,
+  setConnectionMode,
+  wifiAddress,
+  setWifiAddress,
+  wifiStatus,
   onStart,
+  onResume,
+  onConnectWifi,
   onStop,
   onSave,
   onPublish,
@@ -336,7 +465,14 @@ function ZeroSurveyWorkspace({
   bodyAnchorConfirmed: boolean
   setBodyAnchorConfirmed: (value: boolean) => void
   notice: string | null
+  connectionMode: 'usb' | 'wifi'
+  setConnectionMode: (value: 'usb' | 'wifi') => void
+  wifiAddress: string
+  setWifiAddress: (value: string) => void
+  wifiStatus: string
   onStart: () => void
+  onResume: () => void
+  onConnectWifi: () => void
   onStop: () => void
   onSave: () => void
   onPublish: () => void
@@ -347,9 +483,17 @@ function ZeroSurveyWorkspace({
   const active = survey?.active || false
   const measuredRobot = survey?.progress.robot_positions.filter((item) => item.state === 'measured').length || 0
   const measuredFloor = survey?.progress.ground_tag_status.filter((item) => item.state === 'measured').length || 0
-  const totalRobot = survey?.progress.robot_positions.length || 13
+  const totalRobot = survey?.progress.robot_positions.length || 37
   const totalFloor = survey?.progress.ground_tag_status.length || 7
+  const topPositions = survey?.progress.robot_positions.filter((item) => item.kind !== 'yoke_face') || []
+  const anglePositions = survey?.progress.robot_positions.filter((item) => item.kind === 'yoke_face') || []
+  const topMeasured = topPositions.filter((item) => item.state === 'measured').length
+  const angleMeasured = anglePositions.filter((item) => item.state === 'measured').length
+  const qualityGate = survey?.progress.quality_gate
   const complete = survey?.status === 'complete'
+  const interrupted = survey?.status === 'connection_lost' || survey?.status === 'incomplete' || (survey?.status === 'failed' && survey.can_resume)
+  const targetPosition = survey?.guidance?.target_position
+  const targetTagId = survey?.guidance?.target_tag_id
 
   return (
     <main className="calibration-app">
@@ -366,8 +510,8 @@ function ZeroSurveyWorkspace({
           <div className="rail-intro"><span>Guided setup</span><b>About 3–5 minutes</b></div>
           {[
             ['Connect', 'Start the iPhone stream'],
-            ['Set origin', `Lock floor tag #${survey?.defaults.origin_tag_id ?? 104}`],
-            ['Walk around', 'Record every position'],
+            ['Set origin', 'Lock the mapped floor grid'],
+            ['Walk around', 'Record 13 top + 24 side tags'],
             ['Review', 'Save and sync'],
           ].map(([title, detail], index) => {
             const number = index + 1
@@ -379,15 +523,17 @@ function ZeroSurveyWorkspace({
         <section className="survey-main">
           <div className={`guide-card status-${survey?.status || 'idle'}`}>
             <div className="guide-icon">{complete ? '✓' : active ? <span className="pulse-rings" /> : '◎'}</div>
-            <div><span className="guide-kicker">Step {step} of 4 · {(survey?.status || 'ready').replaceAll('_', ' ')}</span><h2>{survey?.instruction || 'Put the robot in zero pose and start when ready.'}</h2><p>{survey?.message || 'The scan records tag identity, position, orientation, floor spacing, and the geometry identifiable from this pose.'}</p></div>
+            <div><span className="guide-kicker">Step {step} of 4 · {(survey?.status || 'ready').replaceAll('_', ' ')}</span><h2>{survey?.guidance?.headline || survey?.instruction || 'Put the robot in zero pose and start when ready.'}</h2><p>{survey?.guidance?.detail || survey?.message || 'The scan records tag identity, position, orientation, floor spacing, and the geometry identifiable from this pose.'}</p>{active && survey?.guidance?.action && <div className="next-action"><b>Do this now</b><span>{survey.guidance.action}</span></div>}{active && survey?.message && <small className="tracking-note">Tracking: {survey.message}</small>}</div>
             {active && <button className="stop-survey" disabled={busy} onClick={onStop}>Stop & save partial</button>}
           </div>
 
-          {!active && !complete && survey?.status !== 'incomplete' && (
+          {!active && !complete && !interrupted && (
             <section className="setup-grid">
               <div className="setup-card primary-setup">
                 <div className="eyebrow">Before you start</div><h2>Robot down. Tags up. Phone ready.</h2>
-                <div className="prep-list"><span><i>1</i>Place the stationary robot in its zero pose.</span><span><i>2</i>Spread floor tags 100–105 and 112 around it.</span><span><i>3</i>Connect the iPhone by USB and open Record3D.</span><span><i>4</i>When the phone says “waiting for connection,” press Start below, then tap its red stream button.</span></div>
+                <div className="transport-picker"><button className={connectionMode === 'usb' ? 'active' : ''} onClick={() => setConnectionMode('usb')}><b>USB</b><span>Best LiDAR precision</span></button><button className={connectionMode === 'wifi' ? 'active' : ''} onClick={() => setConnectionMode('wifi')}><b>Wi‑Fi</b><span>No cable · lower depth quality</span></button></div>
+                <div className="prep-list"><span><i>1</i>Place the stationary robot in its zero pose.</span><span><i>2</i>Leave floor tags 100–105 and 112 in their mapped one-foot grid.</span><span><i>3</i>In Record3D, select {connectionMode === 'usb' ? 'USB' : 'Wi‑Fi'} under Live RGBD Video Streaming.</span><span><i>4</i>Tap the red button so the phone says “Started, Waiting for Connection.”</span></div>
+                {connectionMode === 'wifi' && <div className="wifi-connect"><label>iPhone address<input value={wifiAddress} placeholder="for example 192.168.1.100 or myiPhone.local" onChange={(event) => setWifiAddress(event.target.value)} /></label><button disabled={busy || !wifiAddress.trim()} onClick={onConnectWifi}>Connect phone</button><small>{wifiStatus}. Requires Record3D 1.11+ and its Wi‑Fi Streaming extension; USB remains more accurate.</small></div>}
                 <button className="launch-survey" disabled={busy || !survey?.available} onClick={onStart}>{busy ? 'Starting…' : 'Start iPhone LiDAR calibration'}<span>→</span></button>
               </div>
               <div className="setup-card settings-card">
@@ -397,30 +543,44 @@ function ZeroSurveyWorkspace({
                 <label>L0 hip identity tag<input value={l0Id} inputMode="numeric" onChange={(event) => setL0Id(event.target.value)} /></label>
                 <p>The other robot IDs may change. Calibration fills each named physical position with whichever stable tag is actually there.</p>
                 <div className={`lab-preflight ${survey?.robot_lab.status === 'ready' ? 'ready' : ''}`}><i />
-                  <span><b>{survey?.robot_lab.status === 'ready' ? 'Robot Lab ready' : 'Robot Lab token needed'}</b><small>{survey?.robot_lab.status === 'ready' ? 'The reviewed config will publish automatically.' : 'Set HEXAPOD_LAB_TOKEN for automatic publication; the scan can still run now.'}</small></span>
+                  <span><b>{survey?.robot_lab.status === 'ready' ? 'Robot Lab ready' : 'Robot Lab credential needed'}</b><small>{survey?.robot_lab.status === 'ready' ? `Credential loaded from ${survey.robot_lab.credential_source || 'the server environment'}; the reviewed config will publish automatically.` : survey?.robot_lab.error || 'Use 1Password, a protected credential file, or the server environment; the scan can still run now.'}</small></span>
                 </div>
               </div>
             </section>
           )}
 
-          {(active || complete || survey?.status === 'incomplete') && survey && (
+          {!active && !complete && interrupted && survey && (
+            <section className="resume-card">
+              <div><div className="eyebrow">Saved checkpoint</div><h2>Your scan is intact</h2><p>{measuredRobot}/{totalRobot} robot positions and {measuredFloor}/{totalFloor} floor tags are saved. Reconnect the phone; you will briefly re-lock any visible mapped floor tag, then continue with only the highlighted target.</p></div>
+              <div className="resume-controls">
+                <div className="transport-picker compact"><button className={connectionMode === 'usb' ? 'active' : ''} onClick={() => setConnectionMode('usb')}><b>USB</b><span>Recommended</span></button><button className={connectionMode === 'wifi' ? 'active' : ''} onClick={() => setConnectionMode('wifi')}><b>Wi‑Fi</b><span>Wireless</span></button></div>
+                {connectionMode === 'wifi' && <div className="wifi-connect compact"><label>iPhone address<input value={wifiAddress} placeholder="myiPhone.local" onChange={(event) => setWifiAddress(event.target.value)} /></label><button disabled={busy || !wifiAddress.trim()} onClick={onConnectWifi}>Reconnect phone</button><small>{wifiStatus}</small></div>}
+                <button className="launch-survey" disabled={busy || !survey.can_resume} onClick={onResume}>{busy ? 'Reconnecting…' : 'Continue calibration'}<span>→</span></button>
+                <button className="text-action" disabled={busy} onClick={onStart}>Discard checkpoint and start over</button>
+              </div>
+            </section>
+          )}
+
+          {(active || complete || interrupted) && survey && (
             <>
               <div className="live-grid">
                 <section className="camera-card">
                   <div className="map-heading"><div><span>Record3D RGB + LiDAR</span><b>What the phone sees</b></div><em>{survey.detected_tag_ids.length ? `IDs ${survey.detected_tag_ids.join(', ')}` : 'Looking for tags…'}</em></div>
                   <div className="survey-camera">
-                    {survey.camera_frame_available ? <img src={`/api/vision/zero-survey/frame.jpg?v=${survey.camera_frame_version}`} alt="Live iPhone view with identified AprilTags" /> : <div className="waiting-camera"><div className="phone-glyph">▯</div><b>Waiting for the iPhone</b><span>Start USB streaming in Record3D. The first frame will appear here.</span></div>}
+                    {survey.camera_frame_available ? <img src={`/api/vision/zero-survey/frame.jpg?v=${survey.camera_frame_version}`} alt="Live iPhone view with identified AprilTags" /> : <div className="waiting-camera"><div className="phone-glyph">▯</div><b>Waiting for the iPhone</b><span>Start {connectionMode === 'wifi' ? 'Wi‑Fi' : 'USB'} streaming in Record3D. The first frame will appear here.</span></div>}
                   </div>
                   <div className="camera-stats"><span><b>{survey.frame_sequence}</b> frames</span><span><b>{survey.detected_tag_ids.length}</b> IDs now</span><span><b>{survey.elapsed_s.toFixed(0)}s</b> elapsed</span></div>
+                  {survey.quality && <div className={`quality-coach ${survey.quality.level}`}><div className="quality-head"><i /><span><b>{survey.quality.headline}</b><small>{survey.quality.suggestion}</small></span></div><div className="quality-metrics"><span><b>{survey.quality.reprojection_rms_px === null ? '—' : `${survey.quality.reprojection_rms_px.toFixed(2)} px`}</b>corner error</span><span><b>{survey.quality.depth_plane_rms_mm === null ? '—' : `${survey.quality.depth_plane_rms_mm.toFixed(1)} mm`}</b>LiDAR plane</span><span><b>{survey.quality.translation_spread_mm === null ? '—' : `${survey.quality.translation_spread_mm.toFixed(1)} mm`}</b>position spread</span><span><b>{survey.quality.rotation_spread_deg === null ? '—' : `${survey.quality.rotation_spread_deg.toFixed(1)}°`}</b>angle spread</span><span><b>{survey.quality.camera_speed_m_s === null ? '—' : `${survey.quality.camera_speed_m_s.toFixed(2)} m/s`}</b>phone speed</span></div></div>}
                 </section>
-                <SurveySchematic survey={survey} />
+                <SurveyScene survey={survey} />
               </div>
 
               <section className="coverage-board">
-                <div className="coverage-heading"><div><div className="eyebrow">Position-based coverage</div><h2>{measuredRobot}/{totalRobot} robot positions · {measuredFloor}/{totalFloor} floor tags</h2></div><div className="coverage-total"><span style={{width: `${((measuredRobot + measuredFloor) / Math.max(1, totalRobot + totalFloor)) * 100}%`}} /></div></div>
+                <div className="coverage-heading"><div><div className="eyebrow">Position-based coverage</div><h2>{topMeasured}/{topPositions.length || 13} top + chassis · {angleMeasured}/{anglePositions.length || 24} vertical angle tags · {measuredFloor}/{totalFloor} floor</h2></div><div className="coverage-total"><span style={{width: `${((measuredRobot + measuredFloor) / Math.max(1, totalRobot + totalFloor)) * 100}%`}} /></div></div>
+                {qualityGate && <div className={`geometry-gate ${qualityGate.passed ? 'passed' : 'checking'}`}><div><b>{qualityGate.passed ? 'Geometry quality passed' : 'Geometry quality checking'}</b><span>{qualityGate.passed ? 'The mapped floor residuals and all required positions meet the save limits.' : qualityGate.failing_checks[0]}</span></div><div><span><b>{qualityGate.joint_floor_reprojection_rms_px == null ? '—' : `${qualityGate.joint_floor_reprojection_rms_px.toFixed(2)} px`}</b>floor grid fit</span><span><b>{qualityGate.floor_position_rms_mm === null ? '—' : `${qualityGate.floor_position_rms_mm.toFixed(1)} mm`}</b>floor position RMS</span><span><b>{qualityGate.floor_height_rms_mm === null ? '—' : `${qualityGate.floor_height_rms_mm.toFixed(1)} mm`}</b>floor height RMS</span><span><b>{qualityGate.floor_rotation_rms_deg === null ? '—' : `${qualityGate.floor_rotation_rms_deg.toFixed(1)}°`}</b>floor angle RMS</span></div></div>}
                 <div className="position-groups">
-                  <div><h3>Robot positions</h3><div className="position-list">{survey.progress.robot_positions.map((item) => <div key={item.position} className={`position-item ${item.state}`}><i>{item.state === 'measured' ? '✓' : item.state === 'seen_needs_another_view' ? '↻' : '·'}</i><span><b>{item.position}</b><small>{item.tag_id === null ? 'No tag seen yet' : `tag #${item.tag_id}${item.replacement ? ' · replacement' : ''}`}</small></span><em>{stateCopy(item.state)}</em></div>)}</div></div>
-                  <div><h3>Floor tags</h3><div className="floor-list">{survey.progress.ground_tag_status.map((item) => <div key={item.tag_id} className={`floor-item ${item.state}`}><b>#{item.tag_id}</b><span>{stateCopy(item.state)}</span><small>{item.observations} views</small></div>)}</div>{survey.progress.discovered_unexpected_tag_ids.length > 0 && <div className="extra-tags"><b>Also discovered</b><span>{survey.progress.discovered_unexpected_tag_ids.map((id) => `#${id}`).join(', ')}</span></div>}</div>
+                  <div className="robot-position-sections"><div><h3>Top + chassis tags <small>{topMeasured}/{topPositions.length}</small></h3><div className="position-list">{topPositions.map((item) => <div key={item.position} className={`position-item ${item.state} ${targetPosition === item.position ? 'targeted' : ''}`}><i>{item.state === 'measured' ? '✓' : item.state === 'seen_needs_another_view' ? '↻' : '·'}</i><span><b>{item.position}</b><small>{item.tag_id === null ? 'No tag seen yet' : `tag #${item.tag_id}${item.replacement ? ' · replacement' : ''}`}</small></span><em>{targetPosition === item.position ? 'Do now' : stateCopy(item.state)}</em></div>)}</div></div><div><h3>Vertical angle tags <small>{angleMeasured}/{anglePositions.length} · four per leg</small></h3><div className="position-list angle-list">{anglePositions.map((item) => <div key={item.position} className={`position-item ${item.state} ${targetPosition === item.position ? 'targeted' : ''}`}><i>{item.state === 'measured' ? '✓' : item.state === 'seen_needs_another_view' ? '↻' : '·'}</i><span><b>{item.position}</b><small>{item.tag_id === null ? 'No tag seen yet' : `tag #${item.tag_id}${item.replacement ? ' · replacement' : ''}`}</small></span><em>{targetPosition === item.position ? 'Do now' : stateCopy(item.state)}</em></div>)}</div></div></div>
+                  <div><h3>Floor tags</h3><div className="floor-list">{survey.progress.ground_tag_status.map((item) => <div key={item.tag_id} className={`floor-item ${item.state} ${targetTagId === item.tag_id ? 'targeted' : ''}`}><b>#{item.tag_id}</b><span>{targetTagId === item.tag_id ? 'Do now' : stateCopy(item.state)}</span><small>{item.observations} views</small></div>)}</div>{survey.progress.discovered_unexpected_tag_ids.length > 0 && <div className="extra-tags"><b>Also discovered</b><span>{survey.progress.discovered_unexpected_tag_ids.map((id) => `#${id}`).join(', ')}</span></div>}</div>
                 </div>
               </section>
             </>
@@ -432,8 +592,8 @@ function ZeroSurveyWorkspace({
               {complete && <div className="finalize-grid"><label className="anchor-confirm"><input type="checkbox" checked={bodyAnchorConfirmed} onChange={(event) => setBodyAnchorConfirmed(event.target.checked)} /><span><b>Chassis tag #0 is still in its original mount and orientation.</b><small>This is the one fixed reference needed to learn all other tag mounts.</small></span></label><button className="save-config" disabled={busy || !bodyAnchorConfirmed || survey.reviewed_config_available} onClick={onSave}>{survey.reviewed_config_available ? 'Configuration saved' : 'Save configuration & update Robot Lab'}<span>→</span></button></div>}
               {notice && <div className="success-notice">{notice}</div>}
               {survey.robot_lab.status === 'published' && <div className="lab-sync published"><b>Robot Lab updated</b><span>Survey and calibrated tracker configuration are saved as durable artifacts.</span>{survey.robot_lab.url && <a href={survey.robot_lab.url} target="_blank" rel="noreferrer">Open result ↗</a>}</div>}
-              {['failed', 'not_configured'].includes(survey.robot_lab.status) && survey.reviewed_config_available && <div className="lab-sync failed"><div><b>Robot Lab still needs this update</b><span>{survey.robot_lab.error || 'The vision server needs HEXAPOD_LAB_TOKEN.'}</span></div><button disabled={busy} onClick={onPublish}>Retry sync</button></div>}
-              {survey.status === 'incomplete' && <button className="secondary restart" disabled={busy} onClick={onStart}>Start a fresh scan</button>}
+              {['failed', 'not_configured'].includes(survey.robot_lab.status) && survey.reviewed_config_available && <div className="lab-sync failed"><div><b>Robot Lab still needs this update</b><span>{survey.robot_lab.error || 'The vision server needs the Robot Lab credential.'}</span></div><button disabled={busy} onClick={onPublish}>Retry sync</button></div>}
+              {survey.status === 'incomplete' && <button className="secondary restart" disabled={busy || !survey.can_resume} onClick={onResume}>Continue this calibration</button>}
             </section>
           )}
         </section>
@@ -464,6 +624,17 @@ export default function App() {
   const [zeroDefaultsLoaded, setZeroDefaultsLoaded] = useState(false)
   const [bodyAnchorConfirmed, setBodyAnchorConfirmed] = useState(false)
   const [zeroNotice, setZeroNotice] = useState<string | null>(null)
+  const [zeroConnectionMode, setZeroConnectionMode] = useState<'usb' | 'wifi'>('usb')
+  const [zeroWifiAddress, setZeroWifiAddress] = useState('')
+  const [wifiStatus, setWifiStatus] = useState('Not connected')
+  const wifiPeer = useRef<RTCPeerConnection | null>(null)
+  const wifiVideo = useRef<HTMLVideoElement | null>(null)
+  const wifiMetadata = useRef(new Map<number, LooseRecord>())
+  const wifiStaticMetadata = useRef<LooseRecord | null>(null)
+  const wifiUploadEnabled = useRef(false)
+  const wifiUploadPending = useRef(false)
+  const wifiLastUpload = useRef(0)
+  const wifiSequence = useRef(0)
 
   useEffect(() => {
     let cancelled = false
@@ -501,8 +672,136 @@ export default function App() {
     setZeroFloorIds(state.zero_survey.defaults.floor_tag_ids.join(', '))
     setZeroOriginId(String(state.zero_survey.defaults.origin_tag_id))
     setZeroL0Id(String(state.zero_survey.defaults.leg_zero_anchor_tag_id))
+    setZeroConnectionMode(state.zero_survey.connection_mode || state.zero_survey.defaults.connection_mode || 'usb')
+    setZeroWifiAddress(state.zero_survey.wifi_address || state.zero_survey.defaults.wifi_address || '')
     setZeroDefaultsLoaded(true)
   }, [state?.zero_survey?.defaults, zeroDefaultsLoaded])
+
+  useEffect(() => () => {
+    wifiUploadEnabled.current = false
+    wifiPeer.current?.close()
+    wifiPeer.current = null
+  }, [])
+
+  useEffect(() => {
+    if (state?.zero_survey && !state.zero_survey.active) {
+      wifiUploadEnabled.current = false
+    }
+  }, [state?.zero_survey?.active])
+
+  const connectRecord3dWifi = async () => {
+    const host = zeroWifiAddress.trim().replace(/\/$/, '')
+    if (!host) throw new Error('Enter the address shown by Record3D')
+    const baseUrl = /^https?:\/\//i.test(host) ? host : `http://${host}`
+    setWifiStatus('Connecting to Record3D…')
+    wifiPeer.current?.close()
+    wifiVideo.current = null
+    const staticResponse = await fetch(`${baseUrl}/metadata`, {cache: 'no-store'})
+    if (!staticResponse.ok) throw new Error(`Record3D metadata returned ${staticResponse.status}`)
+    wifiStaticMetadata.current = await staticResponse.json() as LooseRecord
+    const offerResponse = await fetch(`${baseUrl}/getOffer`, {cache: 'no-store'})
+    if (!offerResponse.ok) throw new Error(offerResponse.status === 403 ? 'Another viewer is already connected to the phone' : `Record3D offer returned ${offerResponse.status}`)
+    const rawOffer = await offerResponse.json() as LooseRecord
+    const offer = {
+      type: String(rawOffer.type || 'offer') as RTCSdpType,
+      sdp: String(rawOffer.sdp || rawOffer.data || ''),
+    }
+    if (!offer.sdp) throw new Error('Record3D returned an offer without SDP')
+    const Transform = (window as unknown as {RTCRtpScriptTransform?: new (worker: Worker, options: LooseRecord) => unknown}).RTCRtpScriptTransform
+    if (!Transform) throw new Error('This browser cannot read Record3D pose metadata; use USB or a current Chromium browser')
+    const peer = new RTCPeerConnection()
+    wifiPeer.current = peer
+    const connected = new Promise<void>((resolve, reject) => {
+      const timeout = window.setTimeout(() => reject(new Error('Timed out waiting for the Record3D video track')), 12000)
+      peer.ontrack = (event) => {
+        window.clearTimeout(timeout)
+        const worker = new Worker(new URL('./record3dMetadataWorker.ts', import.meta.url), {type: 'module'})
+        worker.onmessage = (message: MessageEvent<{frameTimestamp?: number; metadata?: LooseRecord; error?: string}>) => {
+          if (message.data.frameTimestamp !== undefined && message.data.metadata) {
+            wifiMetadata.current.set(message.data.frameTimestamp, message.data.metadata)
+            if (wifiMetadata.current.size > 120) {
+              const oldest = wifiMetadata.current.keys().next().value
+              if (oldest !== undefined) wifiMetadata.current.delete(oldest)
+            }
+          } else if (message.data.error) {
+            setWifiStatus(`Metadata warning: ${message.data.error}`)
+          }
+        }
+        ;(event.receiver as unknown as {transform: unknown}).transform = new Transform(worker, {name: 'receiverTransform'})
+        const video = document.createElement('video')
+        video.playsInline = true
+        video.autoplay = true
+        video.muted = true
+        video.srcObject = event.streams[0]
+        wifiVideo.current = video
+        void video.play()
+        const canvas = document.createElement('canvas')
+        const sendFrame: VideoFrameRequestCallback = (_now, frameMetadata) => {
+          if (wifiPeer.current !== peer) return
+          video.requestVideoFrameCallback(sendFrame)
+          const rtpTimestamp = frameMetadata.rtpTimestamp
+          const metadata = rtpTimestamp === undefined ? undefined : wifiMetadata.current.get(rtpTimestamp)
+          if (rtpTimestamp !== undefined && metadata) wifiMetadata.current.delete(rtpTimestamp)
+          if (!wifiUploadEnabled.current || !metadata || wifiUploadPending.current || performance.now() - wifiLastUpload.current < 250) return
+          if (!video.videoWidth || !video.videoHeight) return
+          canvas.width = video.videoWidth
+          canvas.height = video.videoHeight
+          canvas.getContext('2d', {alpha: false})?.drawImage(video, 0, 0)
+          const rgbWidth = Math.floor(video.videoWidth / 2)
+          const pose = record3dPose(metadata)
+          const matrix = record3dMatrix(metadata, wifiStaticMetadata.current, rgbWidth, video.videoHeight)
+          if (!pose || !matrix) {
+            setWifiStatus('Video connected; waiting for Record3D 1.11 pose metadata')
+            return
+          }
+          const maxDepth = numberValue(metadata, ['maxDepth', 'maxDepthM', 'max_depth_m'])
+            ?? numberValue(wifiStaticMetadata.current, ['maxDepth', 'maxDepthM', 'max_depth_m'])
+            ?? 3
+          wifiUploadPending.current = true
+          wifiLastUpload.current = performance.now()
+          wifiSequence.current += 1
+          void api('/api/vision/zero-survey/wifi-frame', {
+            method: 'POST',
+            body: JSON.stringify({
+              sequence: wifiSequence.current,
+              captured_unix: Date.now() / 1000,
+              rgbd_jpeg_base64: canvas.toDataURL('image/jpeg', 0.9),
+              camera_matrix: matrix,
+              camera_pose_xyzw_xyz: pose,
+              max_depth_m: maxDepth,
+            }),
+          }).then(() => setWifiStatus('Streaming RGB-D, pose, and intrinsics')).catch((caught) => {
+            setWifiStatus(caught instanceof Error ? caught.message : String(caught))
+          }).finally(() => { wifiUploadPending.current = false })
+        }
+        video.requestVideoFrameCallback(sendFrame)
+        resolve()
+      }
+    })
+    peer.onconnectionstatechange = () => {
+      if (['failed', 'disconnected', 'closed'].includes(peer.connectionState)) {
+        wifiVideo.current = null
+        setWifiStatus('Phone connection lost — restart its stream, then reconnect here')
+      }
+    }
+    await peer.setRemoteDescription(offer)
+    await peer.setLocalDescription(await peer.createAnswer())
+    if (peer.iceGatheringState !== 'complete') {
+      await new Promise<void>((resolve) => {
+        peer.addEventListener('icegatheringstatechange', () => {
+          if (peer.iceGatheringState === 'complete') resolve()
+        })
+      })
+    }
+    const answerResponse = await fetch(`${baseUrl}/answer`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({type: 'answer', data: peer.localDescription?.sdp}),
+    })
+    if (!answerResponse.ok) throw new Error(`Record3D answer returned ${answerResponse.status}`)
+    await connected
+    setWifiStatus('Phone connected; ready to calibrate')
+  }
 
   const switchCamera = async (index: number) => {
     setBusy(true)
@@ -627,12 +926,17 @@ export default function App() {
     setZeroNotice(null)
     setBodyAnchorConfirmed(false)
     try {
+      if (zeroConnectionMode === 'wifi' && !wifiVideo.current) {
+        await connectRecord3dWifi()
+      }
       const floor_tag_ids = zeroFloorIds.split(',').map((value) => Number(value.trim())).filter(Number.isFinite)
       if (!floor_tag_ids.length) throw new Error('Enter at least one floor tag ID')
       await api('/api/vision/zero-survey/start', {
         method: 'POST',
         body: JSON.stringify({
           record3d_device: state?.zero_survey.defaults.record3d_device ?? 0,
+          connection_mode: zeroConnectionMode,
+          wifi_address: zeroWifiAddress,
           origin_tag_id: Number(zeroOriginId),
           floor_tag_ids,
           marker_size_mm: state?.zero_survey.defaults.marker_size_mm ?? 27,
@@ -640,6 +944,7 @@ export default function App() {
           leg_zero_anchor_tag_id: Number(zeroL0Id),
         }),
       })
+      wifiUploadEnabled.current = zeroConnectionMode === 'wifi'
       setError(null)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught))
@@ -652,8 +957,46 @@ export default function App() {
     setBusy(true)
     try {
       await api('/api/vision/zero-survey/stop', {method: 'POST', body: '{}'})
+      wifiUploadEnabled.current = false
       setError(null)
     } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const resumeZeroSurvey = async () => {
+    setBusy(true)
+    setZeroNotice(null)
+    try {
+      if (zeroConnectionMode === 'wifi' && !wifiVideo.current) {
+        await connectRecord3dWifi()
+      }
+      await api('/api/vision/zero-survey/resume', {
+        method: 'POST',
+        body: JSON.stringify({
+          connection_mode: zeroConnectionMode,
+          wifi_address: zeroWifiAddress,
+          record3d_device: state?.zero_survey.defaults.record3d_device ?? 0,
+        }),
+      })
+      wifiUploadEnabled.current = zeroConnectionMode === 'wifi'
+      setError(null)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const prepareRecord3dWifi = async () => {
+    setBusy(true)
+    try {
+      await connectRecord3dWifi()
+      setError(null)
+    } catch (caught) {
+      setWifiStatus(caught instanceof Error ? caught.message : String(caught))
       setError(caught instanceof Error ? caught.message : String(caught))
     } finally {
       setBusy(false)
@@ -705,7 +1048,14 @@ export default function App() {
       bodyAnchorConfirmed={bodyAnchorConfirmed}
       setBodyAnchorConfirmed={setBodyAnchorConfirmed}
       notice={zeroNotice}
+      connectionMode={zeroConnectionMode}
+      setConnectionMode={setZeroConnectionMode}
+      wifiAddress={zeroWifiAddress}
+      setWifiAddress={setZeroWifiAddress}
+      wifiStatus={wifiStatus}
       onStart={() => void startZeroSurvey()}
+      onResume={() => void resumeZeroSurvey()}
+      onConnectWifi={() => void prepareRecord3dWifi()}
       onStop={() => void stopZeroSurvey()}
       onSave={() => void saveZeroSurvey()}
       onPublish={() => void publishZeroSurvey()}

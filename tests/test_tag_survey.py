@@ -1,6 +1,7 @@
 """Synthetic tests for handheld tag discovery and zero-pose mount learning."""
 from __future__ import annotations
 
+import base64
 import json
 import math
 
@@ -25,8 +26,15 @@ from hexapod_tracker.tag_survey import (
     apply_survey_to_config,
     arkit_world_from_opencv_camera,
     learn_zero_pose_mounts,
+    merge_robot_layout_into_config,
 )
-from hexapod_tracker.zero_pose_survey import main as zero_pose_survey_main
+from hexapod_tracker.paths import CONFIG_DIR
+from hexapod_tracker.zero_pose_survey import (
+    _guidance,
+    _quality_feedback,
+    _wifi_frames,
+    main as zero_pose_survey_main,
+)
 
 
 CAMERA_MATRIX = np.asarray([
@@ -34,6 +42,30 @@ CAMERA_MATRIX = np.asarray([
     [0.0, 900.0, 360.0],
     [0.0, 0.0, 1.0],
 ])
+
+
+def test_full_robot_layout_has_six_legs_and_four_vertical_tags_each() -> None:
+    tracker = json.loads(
+        (CONFIG_DIR / "apriltag_pose_config_20260831.json").read_text()
+    )
+    layout = json.loads(
+        (CONFIG_DIR / "hexapod-1-apriltag-layout.json").read_text()
+    )
+
+    merged = merge_robot_layout_into_config(tracker, layout)
+    tags = merged["robot_pose"]["tags"]
+    vertical = [spec for spec in tags.values() if spec.get("kind") == "yoke_face"]
+
+    assert len(tags) == 37
+    assert len(vertical) == 24
+    assert len({spec["position"] for spec in tags.values()}) == 37
+    for leg in range(6):
+        leg_tags = [spec for spec in vertical if spec.get("leg") == leg]
+        assert len(leg_tags) == 4
+        assert {(spec["joint"], spec["mount_side"]) for spec in leg_tags} == {
+            ("hip", "+y"), ("hip", "-y"),
+            ("knee", "+y"), ("knee", "-y"),
+        }
 
 
 def _detection(
@@ -101,6 +133,69 @@ def test_handheld_alignment_converts_opengl_camera_trajectory() -> None:
         )) < 1e-6
 
 
+def test_wifi_frame_spool_decodes_packed_rgbd_and_pose(tmp_path) -> None:
+    hsv_depth = np.zeros((40, 50, 3), dtype=np.uint8)
+    hsv_depth[:, :, 0] = 60
+    hsv_depth[:, :, 1:] = 255
+    depth_bgr = cv2.cvtColor(hsv_depth, cv2.COLOR_HSV2BGR)
+    rgb_bgr = np.full((40, 50, 3), (20, 100, 220), dtype=np.uint8)
+    packed = np.concatenate([depth_bgr, rgb_bgr], axis=1)
+    ok, encoded = cv2.imencode(".jpg", packed, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    assert ok
+    (tmp_path / "latest.json").write_text(json.dumps({
+        "sequence": 1,
+        "rgbd_jpeg_base64": base64.b64encode(encoded.tobytes()).decode(),
+        "camera_matrix": CAMERA_MATRIX.tolist(),
+        "camera_pose_xyzw_xyz": [0, 0, 0, 1, 0.1, 0.2, 0.3],
+        "max_depth_m": 3.0,
+    }))
+
+    frame = next(_wifi_frames(tmp_path, timeout_s=0.1))
+
+    assert frame.source_label == "Record3D Wi-Fi WebRTC"
+    assert frame.rgb_bgr.shape == (40, 50, 3)
+    assert np.isclose(float(np.median(frame.depth_m)), 3.0 * 60 / 179, atol=0.08)
+    assert np.allclose(
+        frame.arkit_world_from_opengl_camera.translation_m, [0.1, 0.2, 0.3]
+    )
+
+
+def test_live_guidance_picks_one_target_and_coaches_camera_speed() -> None:
+    progress = {
+        "robot_positions": [
+            {"position": "L0 knee", "state": "not_seen", "tag_id": None},
+            {
+                "position": "L2 knee",
+                "state": "seen_needs_another_view",
+                "tag_id": 10,
+                "observations": 3,
+            },
+        ],
+        "ground_tag_status": [],
+        "missing_robot_positions": ["L0 knee", "L2 knee"],
+        "missing_ground_tag_ids": [],
+    }
+
+    guidance = _guidance(
+        "survey", progress, [104], min_observations=5, resumed=False
+    )
+    quality = _quality_feedback(
+        guidance,
+        [],
+        {10},
+        camera_speed_m_s=0.62,
+        tracking_message="Landmark lock",
+        anchor_reprojection_rms_px=None,
+        depth_plane_rms_mm=None,
+    )
+
+    assert guidance["target_position"] == "L2 knee"
+    assert guidance["target_tag_id"] == 10
+    assert "2 more clean views" in guidance["action"]
+    assert quality["level"] == "caution"
+    assert quality["headline"] == "You are moving too quickly"
+
+
 def test_world_reference_supports_mixed_floor_tag_sizes() -> None:
     world_from_camera = RigidTransform(
         np.asarray([0.02, -0.03, 0.78]),
@@ -141,6 +236,46 @@ def test_world_reference_supports_mixed_floor_tag_sizes() -> None:
             * world_from_camera.rotation
         ).magnitude()
     )) < 2e-4
+
+
+def test_accuracy_gate_requires_joint_multi_tag_floor_validation() -> None:
+    world_from_camera = RigidTransform(
+        np.asarray([0.0, 0.0, 0.75]),
+        Rotation.from_euler("x", 180.0, degrees=True),
+    )
+    floor_tags = {
+        12: RigidTransform(np.asarray([0.10, 0.08, 0.0]), Rotation.identity()),
+        40: RigidTransform(np.asarray([-0.14, -0.06, 0.0]), Rotation.identity()),
+    }
+    accumulator = TagSurveyAccumulator(
+        robot_tags={},
+        expected_ground_ids=[12, 40],
+        marker_size_m=0.027,
+        reference_floor_tags=floor_tags,
+        options=TagSurveyOptions(min_observations=4),
+    )
+    for _index in range(6):
+        accumulator.observe_frame(
+            [
+                _detection(tag_id, 0.027, transform, world_from_camera)
+                for tag_id, transform in floor_tags.items()
+            ],
+            world_from_camera,
+            CAMERA_MATRIX,
+            np.zeros(5),
+        )
+
+    before_validation = accumulator.summary()
+    assert before_validation["coverage_complete"] is True
+    assert before_validation["complete"] is False
+    for _index in range(6):
+        accumulator.observe_floor_reference(
+            [12, 40], reprojection_rms_px=0.4, depth_plane_rms_mm=4.0
+        )
+
+    after_validation = accumulator.summary()
+    assert after_validation["quality_gate"]["passed"] is True
+    assert after_validation["complete"] is True
 
 
 def test_survey_records_roles_orientations_distances_and_learns_mounts() -> None:
@@ -304,6 +439,49 @@ def test_survey_rejects_two_consistent_poses_for_the_same_id() -> None:
         {},
     )
     assert "12" not in updated["floor_tags"]
+
+
+def test_survey_restores_only_stable_records_after_reconnect() -> None:
+    transform = RigidTransform(
+        np.asarray([0.12, -0.04, 0.18]),
+        Rotation.from_euler("z", 17.0, degrees=True),
+    )
+    original = TagSurveyAccumulator(
+        robot_tags={1: {"label": "L0 hip", "frame": "L0_coxa"}},
+        expected_ground_ids=[104],
+        marker_size_m=0.027,
+        options=TagSurveyOptions(min_observations=3),
+    )
+    stable_record = {
+        "tag_id": 1,
+        "stable": True,
+        "marker_size_m": 0.027,
+        "world_from_tag": transform.to_dict(),
+        "observations": 8,
+        "used_observations": 7,
+        "translation_spread_mm": 2.5,
+        "rotation_spread_deg": 0.8,
+        "mean_reprojection_rms_px": 0.45,
+    }
+    unstable_record = {
+        **stable_record,
+        "tag_id": 104,
+        "stable": False,
+    }
+
+    restored = original.restore_stable_records(
+        [stable_record, unstable_record], frames=72
+    )
+    summary = original.summary()
+
+    assert restored == [1]
+    assert summary["frames"] == 72
+    assert summary["stable_tag_ids"] == [1]
+    assert summary["missing_ground_tag_ids"] == [104]
+    record = summary["tags"][0]
+    assert record["observations"] == 8
+    assert record["used_observations"] == 7
+    assert record["translation_spread_mm"] == 2.5
 
 
 def test_robot_completion_uses_physical_positions_and_accepts_replacement_ids() -> None:

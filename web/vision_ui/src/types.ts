@@ -104,19 +104,32 @@ export interface ZeroSurveyPosition {
   observations?: number
   used_observations?: number
   expected_world_position_m?: [number, number, number] | null
+  kind?: 'chassis_tag' | 'servo_lid' | 'yoke_face' | string | null
+  surface?: 'horizontal' | 'vertical' | string | null
+  leg?: number | null
+  joint?: 'hip' | 'knee' | string | null
+  mount_side?: '+y' | '-y' | string | null
 }
 
 export interface ZeroSurveyTag {
   tag_id: number
-  role: 'robot' | 'ground' | 'calibration_anchor' | 'unknown'
+  role: 'robot' | 'ground' | 'calibration_anchor' | 'unassigned' | 'unknown'
   label?: string
   robot_frame?: string
+  kind?: 'chassis_tag' | 'servo_lid' | 'yoke_face' | string
+  surface?: 'horizontal' | 'vertical' | string
+  leg?: number
+  joint?: string
+  mount_side?: string
+  marker_size_m?: number
   world_from_tag: {
     translation_m: [number, number, number]
     quaternion_xyzw?: [number, number, number, number]
   }
   euler_xyz_deg?: [number, number, number]
+  tag_x_world?: [number, number, number]
   tag_y_world?: [number, number, number]
+  tag_normal_world?: [number, number, number]
   height_above_ground_mm?: number
   observations: number
   used_observations: number
@@ -129,11 +142,36 @@ export interface ZeroSurveyTag {
 export interface ZeroSurveyState {
   available: boolean
   active: boolean
-  status: 'idle' | 'connecting' | 'locking_origin' | 'scanning' | 'finishing' | 'stopping' | 'complete' | 'incomplete' | 'failed'
+  status: 'idle' | 'connecting' | 'locking_origin' | 'scanning' | 'finishing' | 'stopping' | 'complete' | 'incomplete' | 'connection_lost' | 'failed'
   phase: 'setup' | 'connect' | 'anchor' | 'survey' | 'review'
   message: string
   instruction: string
+  guidance: {
+    headline: string
+    detail: string
+    action: string
+    target_kind: 'robot' | 'floor' | null
+    target_tag_id: number | null
+    target_position: string | null
+    target_state: string
+    remaining_targets: number
+  } | null
+  quality: {
+    level: 'good' | 'caution' | 'poor'
+    headline: string
+    suggestion: string
+    visible_tag_count: number
+    target_visible: boolean | null
+    reprojection_rms_px: number | null
+    depth_plane_rms_mm: number | null
+    translation_spread_mm: number | null
+    rotation_spread_deg: number | null
+    camera_speed_m_s: number | null
+  } | null
   error: string | null
+  can_resume: boolean
+  connection_mode: 'usb' | 'wifi'
+  wifi_address: string
   started_unix: number | null
   completed_unix: number | null
   run_dir: string | null
@@ -150,6 +188,24 @@ export interface ZeroSurveyState {
   frame_sequence: number
   progress: {
     complete: boolean
+    coverage_complete?: boolean
+    robot_position_counts?: {
+      top_and_chassis: {measured: number; required: number}
+      vertical_angle: {measured: number; required: number}
+    }
+    quality_gate?: {
+      passed: boolean
+      failing_checks: string[]
+      reference_floor_tag_count: number
+      required_reference_floor_tag_count: number
+      floor_position_rms_mm: number | null
+      floor_height_rms_mm: number | null
+      floor_rotation_rms_deg: number | null
+      joint_floor_reference_frames?: number
+      jointly_validated_floor_tag_ids?: number[]
+      joint_floor_reprojection_rms_px?: number | null
+      joint_floor_depth_plane_rms_mm?: number | null
+    }
     robot_positions: ZeroSurveyPosition[]
     ground_tag_status: Array<{
       tag_id: number
@@ -174,6 +230,8 @@ export interface ZeroSurveyState {
   } | null
   defaults: {
     record3d_device: number
+    connection_mode: 'usb' | 'wifi'
+    wifi_address: string
     origin_tag_id: number
     floor_tag_ids: number[]
     marker_size_mm: number
@@ -185,6 +243,7 @@ export interface ZeroSurveyState {
     status: 'ready' | 'not_configured' | 'publishing' | 'published' | 'failed'
     url: string | null
     error: string | null
+    credential_source?: 'environment' | 'credential_file' | '1password' | null
     experiment_id?: string
     artifacts?: string[]
   }

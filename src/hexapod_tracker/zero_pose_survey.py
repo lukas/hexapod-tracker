@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from collections.abc import Iterator, Sequence
 from datetime import datetime, timezone
 import json
@@ -35,6 +36,7 @@ from .tag_survey import (
     apply_survey_to_config,
     arkit_world_from_opencv_camera,
     learn_zero_pose_mounts,
+    merge_robot_layout_into_config,
 )
 
 
@@ -97,31 +99,302 @@ def _camera_preview(
     return output
 
 
-def _next_instruction(
+def _guidance(
     phase: str,
     progress: dict[str, Any],
     anchor_ids: Sequence[int],
-) -> str:
+    *,
+    min_observations: int,
+    resumed: bool,
+) -> dict[str, Any]:
+    """Choose one concrete target and one physical action for the operator."""
     if phase == "anchor":
         ids = ", ".join(f"#{tag_id}" for tag_id in sorted(anchor_ids))
-        return f"Hold the phone still with floor tag {ids} centered."
-    if progress["unseen_robot_positions"]:
-        return "Walk toward " + ", ".join(progress["unseen_robot_positions"][:3]) + "."
-    if progress["robot_positions_needing_another_view"]:
-        return (
-            "Show another angle of "
-            + ", ".join(progress["robot_positions_needing_another_view"][:3])
-            + "."
-        )
-    if progress["unseen_ground_tag_ids"]:
-        ids = ", ".join(f"#{tag_id}" for tag_id in progress["unseen_ground_tag_ids"])
-        return f"Walk toward floor tags {ids}."
-    if progress["ground_tags_needing_another_view"]:
-        ids = ", ".join(
-            f"#{tag_id}" for tag_id in progress["ground_tags_needing_another_view"]
-        )
-        return f"Show floor tags {ids} from another angle."
-    return "Everything is recorded. Hold still while the scan finishes."
+        mapped = len(anchor_ids) > 1
+        return {
+            "headline": (
+                f"Point down at any mapped floor tag ({ids})"
+                if mapped else f"Point down at floor origin {ids}"
+            ),
+            "detail": (
+                "Keep at least one whole square visible—two or more is even "
+                "better—and hold the phone still until the metric floor grid locks."
+                if mapped else
+                "Keep the entire black square visible, fill roughly a quarter "
+                "of the image, and hold the phone still until the origin locks."
+            ),
+            "action": "Hold still over the mapped floor tags.",
+            "target_kind": "floor",
+            "target_tag_id": int(sorted(anchor_ids)[0]),
+            "target_position": None,
+            "target_state": "relock" if resumed else "not_seen",
+            "remaining_targets": 0,
+        }
+
+    positions = list(progress.get("robot_positions", []))
+    needs_view = next((
+        item for item in positions
+        if item.get("state") == "seen_needs_another_view"
+    ), None)
+    if needs_view is not None:
+        observed = int(needs_view.get("observations", 0))
+        remaining = max(1, min_observations - observed)
+        tag_id = needs_view.get("tag_id")
+        position = str(needs_view["position"])
+        is_side = needs_view.get("kind") == "yoke_face"
+        return {
+            "headline": f"Finish {position} — keep tag #{tag_id} in view",
+            "detail": (
+                f"It has {observed} clean view{'s' if observed != 1 else ''}. "
+                "Lower the phone and aim squarely at the vertical face; take a "
+                "small arc around that joint, then hold for about one second."
+                if is_side else
+                "Take one small step sideways (20–30 cm), aim squarely at it, "
+                "then hold for about one second."
+            ),
+            "action": f"Move sideways, then hold steady for {remaining} more clean view{'s' if remaining != 1 else ''}.",
+            "target_kind": "robot",
+            "target_tag_id": tag_id,
+            "target_position": position,
+            "target_state": "seen_needs_another_view",
+            "remaining_targets": len(progress.get("missing_robot_positions", [])),
+        }
+
+    unseen = next((
+        item for item in positions if item.get("state") == "not_seen"
+    ), None)
+    if unseen is not None:
+        position = str(unseen["position"])
+        is_side = unseen.get("kind") == "yoke_face"
+        return {
+            "headline": f"Find the tag mounted at {position}",
+            "detail": (
+                "Move to the named side of that joint and lower the phone until "
+                "the vertical square is nearly face-on. Keep a floor tag near "
+                "the edge of frame when possible."
+                if is_side else
+                "Circle slowly around the robot until that physical mount is "
+                "unobstructed. The tag ID may be new; keep the whole square in "
+                "frame until this highlighted row turns green."
+            ),
+            "action": "Walk slowly around the robot; stop as soon as the tag is outlined.",
+            "target_kind": "robot",
+            "target_tag_id": None,
+            "target_position": position,
+            "target_state": "not_seen",
+            "remaining_targets": len(progress.get("missing_robot_positions", [])),
+        }
+
+    ground_status = list(progress.get("ground_tag_status", []))
+    ground_needs_view = next((
+        item for item in ground_status
+        if item.get("state") == "seen_needs_another_view"
+    ), None)
+    if ground_needs_view is not None:
+        tag_id = int(ground_needs_view["tag_id"])
+        return {
+            "headline": f"Finish floor tag #{tag_id}",
+            "detail": (
+                "Point the phone down, keep all four corners visible, step a "
+                "little to one side, and hold until the floor card turns green."
+            ),
+            "action": "Take a second oblique view, then hold still for one second.",
+            "target_kind": "floor",
+            "target_tag_id": tag_id,
+            "target_position": None,
+            "target_state": "seen_needs_another_view",
+            "remaining_targets": len(progress.get("missing_ground_tag_ids", [])),
+        }
+
+    ground_unseen = next((
+        item for item in ground_status if item.get("state") == "not_seen"
+    ), None)
+    if ground_unseen is not None:
+        tag_id = int(ground_unseen["tag_id"])
+        return {
+            "headline": f"Find floor tag #{tag_id}",
+            "detail": (
+                "Walk toward that printed floor tag and point down. Keep the "
+                "whole square visible until its card turns green."
+            ),
+            "action": "Point down at the floor tag and hold for one second.",
+            "target_kind": "floor",
+            "target_tag_id": tag_id,
+            "target_position": None,
+            "target_state": "not_seen",
+            "remaining_targets": len(progress.get("missing_ground_tag_ids", [])),
+        }
+
+    quality_gate = progress.get("quality_gate") or {}
+    if quality_gate and not quality_gate.get("passed"):
+        return {
+            "headline": "Coverage is complete—tighten the floor lock",
+            "detail": "; ".join(quality_gate.get("failing_checks", [])) or (
+                "The global geometry check has not passed yet."
+            ),
+            "action": (
+                "Frame two or more floor tags together, hold still, then take "
+                "one slow arc with a floor tag kept in view."
+            ),
+            "target_kind": "floor",
+            "target_tag_id": None,
+            "target_position": None,
+            "target_state": "quality_check",
+            "remaining_targets": 0,
+        }
+
+    return {
+        "headline": "Everything is recorded — hold still",
+        "detail": "Keep the phone steady while the last measurements are checked.",
+        "action": "Do not move the robot or phone.",
+        "target_kind": None,
+        "target_tag_id": None,
+        "target_position": None,
+        "target_state": "complete",
+        "remaining_targets": 0,
+    }
+
+
+def _quality_feedback(
+    guidance: dict[str, Any],
+    records: Sequence[dict[str, Any]],
+    detected_ids: set[int],
+    *,
+    camera_speed_m_s: float | None,
+    tracking_message: str,
+    anchor_reprojection_rms_px: float | None,
+    depth_plane_rms_mm: float | None,
+) -> dict[str, Any]:
+    target_id = guidance.get("target_tag_id")
+    target_record = next((
+        item for item in records if int(item["tag_id"]) == target_id
+    ), None)
+    reprojection = anchor_reprojection_rms_px
+    translation_spread = None
+    rotation_spread = None
+    if target_record is not None:
+        reprojection = float(target_record.get("mean_reprojection_rms_px", 0.0))
+        translation_spread = float(target_record.get("translation_spread_mm", 0.0))
+        rotation_spread = float(target_record.get("rotation_spread_deg", 0.0))
+    target_visible = target_id in detected_ids if target_id is not None else None
+
+    level = "good"
+    headline = "Good capture — keep moving smoothly"
+    suggestion = "Use a slow arc and pause for one second whenever a tag is outlined."
+    lower_message = tracking_message.lower()
+    if "drift warning" in lower_message:
+        level = "poor"
+        headline = "Tracking drift is too high"
+        suggestion = "Walk back to the floor origin tag and hold it centered until tracking recovers."
+    elif "rejected" in lower_message:
+        level = "poor"
+        headline = "This angle was rejected"
+        suggestion = "Hold steadier, move slightly closer, and keep all four tag corners visible."
+    elif not detected_ids:
+        level = "caution"
+        headline = "No tag is visible right now"
+        suggestion = "Slow down and tilt the phone toward the highlighted target; avoid motion blur."
+    elif camera_speed_m_s is not None and camera_speed_m_s > 0.25:
+        level = "caution"
+        headline = "You are moving too quickly"
+        suggestion = "Walk at about half this speed, then pause for one second on the target."
+    elif target_visible is False:
+        level = "caution"
+        headline = "The target is outside the camera view"
+        suggestion = "Continue the slow arc toward the highlighted target and tilt the phone to keep the square face-on."
+    elif reprojection is not None and reprojection > 1.0:
+        level = "caution"
+        headline = "Corner fit is noisy"
+        suggestion = "Move a little closer, reduce glare, and hold until the error drops below about 1.0 px."
+    elif translation_spread is not None and translation_spread > 8.0:
+        level = "caution"
+        headline = "Position estimates are still spread out"
+        suggestion = "Hold still for one second, then take one clean view from 20–30 cm to the side."
+    elif guidance.get("target_state") == "seen_needs_another_view":
+        headline = "Target visible — add a different angle"
+        suggestion = "Step 20–30 cm sideways without rushing, aim at the same tag, and hold still."
+
+    return {
+        "level": level,
+        "headline": headline,
+        "suggestion": suggestion,
+        "visible_tag_count": len(detected_ids),
+        "target_visible": target_visible,
+        "reprojection_rms_px": (
+            None if reprojection is None else round(reprojection, 3)
+        ),
+        "depth_plane_rms_mm": (
+            None if depth_plane_rms_mm is None else round(depth_plane_rms_mm, 2)
+        ),
+        "translation_spread_mm": (
+            None if translation_spread is None else round(translation_spread, 2)
+        ),
+        "rotation_spread_deg": (
+            None if rotation_spread is None else round(rotation_spread, 3)
+        ),
+        "camera_speed_m_s": (
+            None if camera_speed_m_s is None else round(camera_speed_m_s, 3)
+        ),
+    }
+
+
+def _wifi_frames(directory: Path, *, timeout_s: float = 8.0) -> Iterator[RGBDFrame]:
+    """Consume browser-relayed Record3D WebRTC frames from an atomic spool."""
+    latest_path = directory / "latest.json"
+    last_sequence = -1
+    last_frame_time = time.monotonic()
+    while True:
+        try:
+            payload = json.loads(latest_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            sequence = int(payload.get("sequence", -1))
+            if sequence > last_sequence:
+                encoded = str(payload.get("rgbd_jpeg_base64", ""))
+                if "," in encoded:
+                    encoded = encoded.split(",", 1)[1]
+                packed = cv2.imdecode(
+                    np.frombuffer(base64.b64decode(encoded), dtype=np.uint8),
+                    cv2.IMREAD_COLOR,
+                )
+                if packed is None or packed.shape[1] < 4:
+                    raise ValueError("Wi-Fi frame did not contain a decodable RGB-D image")
+                half = packed.shape[1] // 2
+                depth_bgr = packed[:, :half]
+                rgb_bgr = packed[:, packed.shape[1] - half:]
+                hsv = cv2.cvtColor(depth_bgr, cv2.COLOR_BGR2HSV)
+                max_depth_m = float(payload.get("max_depth_m", 3.0))
+                depth_m = hsv[:, :, 0].astype(np.float32) * (
+                    max_depth_m / 179.0
+                )
+                # The hue wheel wraps maximum-range red to zero. Treat highly
+                # saturated near-red values as the configured far/invalid depth.
+                red = (hsv[:, :, 0] <= 2) & (hsv[:, :, 1] >= 160)
+                depth_m[red] = max_depth_m
+                matrix = np.asarray(payload["camera_matrix"], dtype=float).reshape(3, 3)
+                pose = np.asarray(
+                    payload["camera_pose_xyzw_xyz"], dtype=float
+                ).reshape(7)
+                last_sequence = sequence
+                last_frame_time = time.monotonic()
+                yield RGBDFrame(
+                    rgb_bgr=rgb_bgr,
+                    depth_m=depth_m,
+                    confidence=None,
+                    camera_matrix=matrix,
+                    source_label="Record3D Wi-Fi WebRTC",
+                    arkit_world_from_opengl_camera=RigidTransform.from_dict({
+                        "quaternion_xyzw": pose[:4],
+                        "translation_m": pose[4:],
+                    }),
+                )
+                continue
+        if time.monotonic() - last_frame_time >= timeout_s:
+            raise TimeoutError(
+                "Record3D Wi-Fi stream stopped; reconnect the phone and continue calibration"
+            )
+        time.sleep(0.04)
 
 
 def _tag_size_map(
@@ -527,9 +800,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tracker_config", type=Path)
     parser.add_argument("--board", type=Path, required=True)
+    parser.add_argument(
+        "--robot-layout",
+        type=Path,
+        help="full photographed robot-tag inventory, including vertical angle tags",
+    )
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--npz-dir", type=Path)
     source.add_argument("--record3d-device", type=int, default=0)
+    source.add_argument(
+        "--wifi-frame-dir",
+        type=Path,
+        help="consume Record3D WebRTC RGB-D frames relayed by the calibration webpage",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--updated-config", type=Path)
     parser.add_argument("--preview-output", type=Path)
@@ -543,8 +826,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="periodically write an atomic machine-readable progress snapshot",
     )
+    parser.add_argument(
+        "--resume-progress",
+        type=Path,
+        help="restore stable tag landmarks from an earlier progress snapshot",
+    )
     parser.add_argument("--anchor-frames", type=int, default=8)
-    parser.add_argument("--min-observations", type=int, default=5)
+    parser.add_argument("--min-observations", type=int, default=8)
     parser.add_argument(
         "--expected-floor-ids",
         type=_parse_ids,
@@ -592,6 +880,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("settle frames and max seconds must be positive")
 
     tracker_config = _load_json(args.tracker_config)
+    if args.robot_layout is not None:
+        tracker_config = merge_robot_layout_into_config(
+            tracker_config, _load_json(args.robot_layout)
+        )
     board_manifest = _load_json(args.board)
     anchors, anchor_marker_size_m = _calibration_target(
         tracker_config, board_manifest
@@ -640,21 +932,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         marker_size_m=unknown_marker_size_m,
         marker_sizes_m=marker_sizes,
         position_tag_overrides=position_tag_overrides,
+        geometry=tracker_config.get("robot_pose", {}).get("geometry"),
+        body_anchor_tag_id=args.body_anchor_tag_id,
+        reference_floor_tags=anchors if len(anchors) >= 2 else {},
         options=TagSurveyOptions(
             min_observations=args.min_observations,
-            freeze_stable_tags=True,
+            max_reprojection_rms_px=(
+                1.5 if args.robot_layout is not None else 2.5
+            ),
+            max_translation_spread_m=(
+                0.010 if args.robot_layout is not None else 0.020
+            ),
+            max_rotation_spread_deg=(
+                2.0 if args.robot_layout is not None else 5.0
+            ),
+            freeze_stable_tags=False,
         ),
     )
+    resume_snapshot: dict[str, Any] = {}
+    if args.resume_progress is not None and args.resume_progress.is_file():
+        resume_snapshot = _load_json(args.resume_progress)
+    restored_ids = survey.restore_stable_records(
+        resume_snapshot.get("records", []),
+        frames=int(resume_snapshot.get("frame_sequence", 0)),
+    )
+    resumed = bool(restored_ids)
     small_single_tag_anchor = (
         len(anchors) == 1 and anchor_marker_size_m <= 0.035
     )
     alignment = HandheldWorldAlignment(
         min_observations=args.anchor_frames,
         max_translation_spread_m=(
-            0.100 if small_single_tag_anchor else 0.025
+            0.050 if small_single_tag_anchor else 0.015
         ),
         max_rotation_spread_deg=(
-            10.0 if small_single_tag_anchor else 2.5
+            5.0 if small_single_tag_anchor else 1.5
         ),
     )
     rgbd_options = RGBDCalibrationOptions(
@@ -663,41 +975,80 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     previous_anchor_pose: RigidTransform | None = None
     reader: Record3DReader | None = None
-    if args.npz_dir is None:
-        reader = Record3DReader(args.record3d_device)
-
-        def live_frames() -> Iterator[RGBDFrame]:
-            assert reader is not None
-            while True:
-                yield reader.next_frame()
-
-        frames: Iterator[RGBDFrame] = live_frames()
-    else:
-        frames = _npz_frames(args.npz_dir)
-
     start = time.monotonic()
     last_status_time = -float("inf")
     completed_frames = 0
     last_preview: np.ndarray | None = None
-    camera_path: list[np.ndarray] = []
+    camera_path = [
+        np.asarray(item, dtype=float).reshape(3)
+        for item in resume_snapshot.get("camera_path_m", [])[-240:]
+    ]
     phase = "anchor"
-    last_message = "Find the calibration board"
+    last_message = (
+        f"Saved {len(restored_ids)} stable tags; re-lock the floor origin"
+        if resumed else "Find the calibration board"
+    )
     last_camera_matrix: np.ndarray | None = None
+    last_quality: dict[str, Any] | None = None
+    camera_speed_m_s: float | None = None
+    previous_camera_sample: tuple[np.ndarray, float] | None = None
+    connection_mode = "wifi" if args.wifi_frame_dir is not None else "usb"
+    initial_progress = survey.progress()
+    initial_guidance = _guidance(
+        phase,
+        initial_progress,
+        sorted(anchors),
+        min_observations=args.min_observations,
+        resumed=resumed,
+    )
     _write_progress(args.progress_output, {
+        "calibration_model_version": 2,
         "status": "connecting",
         "phase": "connect",
-        "message": "Waiting for the Record3D stream from the iPhone.",
-        "instruction": "In Record3D, leave USB mode on and tap the red stream button.",
+        "message": (
+            "Waiting for Wi-Fi frames from this webpage."
+            if connection_mode == "wifi"
+            else "Waiting for the Record3D USB stream from the iPhone."
+        ),
+        "instruction": (
+            "Connect the phone's Record3D Wi-Fi stream in this webpage."
+            if connection_mode == "wifi"
+            else "In Record3D, select USB and tap the red stream button."
+        ),
+        "guidance": initial_guidance,
+        "connection_mode": connection_mode,
+        "resumed": resumed,
+        "restored_tag_ids": restored_ids,
         "anchor_ids": sorted(anchors),
         "alignment_count": 0,
         "anchor_frames": args.anchor_frames,
         "detected_tag_ids": [],
-        "frame_sequence": 0,
+        "frame_sequence": int(resume_snapshot.get("frame_sequence", 0)),
         "elapsed_s": 0.0,
+        "progress": initial_progress,
+        "records": survey.tag_records(),
+        "camera_path_m": [item.tolist() for item in camera_path],
+        "camera_position_m": None,
     })
+    connection_error: str | None = None
     try:
+        if args.wifi_frame_dir is not None:
+            frames: Iterator[RGBDFrame] = _wifi_frames(args.wifi_frame_dir)
+        elif args.npz_dir is not None:
+            frames = _npz_frames(args.npz_dir)
+        else:
+            reader = Record3DReader(args.record3d_device)
+
+            def live_frames() -> Iterator[RGBDFrame]:
+                assert reader is not None
+                while True:
+                    yield reader.next_frame()
+
+            frames = live_frames()
         for frame_index, frame in enumerate(frames):
             current_world_from_camera: RigidTransform | None = None
+            anchor_reprojection_rms_px: float | None = None
+            depth_plane_rms_mm: float | None = None
             if frame.arkit_world_from_opengl_camera is None:
                 raise RuntimeError(
                     f"{frame.source_label} has no ARKit camera pose; handheld "
@@ -738,6 +1089,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                         options=rgbd_options,
                     )
                     previous_anchor_pose = direct_anchor_pose.world_from_camera
+                    anchor_reprojection_rms_px = float(
+                        direct_anchor_pose.reprojection_rms_px
+                    )
+                    depth_plane_rms_mm = float(
+                        direct_anchor_pose.depth_plane_rms_m * 1000.0
+                    )
+                    survey.observe_floor_reference(
+                        direct_anchor_pose.floor_tag_ids,
+                        reprojection_rms_px=anchor_reprojection_rms_px,
+                        depth_plane_rms_mm=depth_plane_rms_mm,
+                    )
                     if phase == "anchor":
                         alignment.add(
                             direct_anchor_pose.world_from_camera,
@@ -756,66 +1118,65 @@ def main(argv: Sequence[str] | None = None) -> int:
                 predicted_world_from_camera = alignment.world_from_camera(
                     frame.arkit_world_from_opengl_camera
                 )
-                landmark_reference = survey.estimate_world_from_camera(
-                    detections,
-                    predicted_world_from_camera,
-                    frame.camera_matrix,
-                    np.zeros(5),
-                )
                 world_from_camera = predicted_world_from_camera
-                if (
-                    landmark_reference is not None
-                    and landmark_reference.stable
-                    and landmark_reference.used_count >= 2
-                ):
-                    landmark_drift_m = float(np.linalg.norm(
-                        landmark_reference.transform.translation_m
+                if direct_anchor_pose is not None:
+                    world_from_camera = direct_anchor_pose.world_from_camera
+                    direct_correction_m = float(np.linalg.norm(
+                        world_from_camera.translation_m
                         - predicted_world_from_camera.translation_m
                     ))
-                    landmark_drift_deg = _rotation_error_deg(
-                        landmark_reference.transform,
-                        predicted_world_from_camera,
+                    last_message = (
+                        f"Mapped-floor lock {len(anchor_detections)} tag(s); "
+                        f"corrected {direct_correction_m * 1000.0:.0f}mm"
                     )
-                    if landmark_drift_m <= 0.250 and landmark_drift_deg <= 20.0:
-                        world_from_camera = landmark_reference.transform
-                        last_message = (
-                            f"Landmark lock {landmark_reference.used_count} tags; "
-                            f"corrected {landmark_drift_m * 1000.0:.0f}mm"
-                        )
-                current_world_from_camera = world_from_camera
-                if direct_anchor_pose is not None:
-                    drift_m = float(np.linalg.norm(
-                        direct_anchor_pose.world_from_camera.translation_m
-                        - world_from_camera.translation_m
-                    ))
-                    drift_deg = _rotation_error_deg(
-                        direct_anchor_pose.world_from_camera, world_from_camera
-                    )
-                    translation_limit_m = (
-                        0.100 if small_single_tag_anchor else 0.060
-                    )
-                    rotation_limit_deg = (
-                        10.0 if small_single_tag_anchor else 5.0
-                    )
-                    if drift_m > translation_limit_m or drift_deg > rotation_limit_deg:
-                        last_message = (
-                            f"ARKit drift warning: {drift_m * 1000.0:.0f}mm / "
-                            f"{drift_deg:.1f}deg; return to board"
-                        )
-                    else:
-                        survey.observe_frame(
-                            detections,
-                            world_from_camera,
-                            frame.camera_matrix,
-                            np.zeros(5),
-                        )
                 else:
-                    survey.observe_frame(
+                    landmark_reference = survey.estimate_world_from_camera(
                         detections,
-                        world_from_camera,
+                        predicted_world_from_camera,
                         frame.camera_matrix,
                         np.zeros(5),
                     )
+                    if (
+                        landmark_reference is not None
+                        and landmark_reference.stable
+                        and landmark_reference.used_count >= 2
+                    ):
+                        landmark_drift_m = float(np.linalg.norm(
+                            landmark_reference.transform.translation_m
+                            - predicted_world_from_camera.translation_m
+                        ))
+                        landmark_drift_deg = _rotation_error_deg(
+                            landmark_reference.transform,
+                            predicted_world_from_camera,
+                        )
+                        if landmark_drift_m <= 0.080 and landmark_drift_deg <= 8.0:
+                            world_from_camera = landmark_reference.transform
+                            last_message = (
+                                f"Landmark lock {landmark_reference.used_count} tags; "
+                                f"corrected {landmark_drift_m * 1000.0:.0f}mm"
+                            )
+                current_world_from_camera = world_from_camera
+                sample_time = time.monotonic()
+                if previous_camera_sample is not None:
+                    distance = float(np.linalg.norm(
+                        world_from_camera.translation_m - previous_camera_sample[0]
+                    ))
+                    delta_time = sample_time - previous_camera_sample[1]
+                    if delta_time > 1e-3:
+                        instant_speed = distance / delta_time
+                        camera_speed_m_s = (
+                            instant_speed if camera_speed_m_s is None
+                            else 0.72 * camera_speed_m_s + 0.28 * instant_speed
+                        )
+                previous_camera_sample = (
+                    world_from_camera.translation_m.copy(), sample_time
+                )
+                survey.observe_frame(
+                    detections,
+                    world_from_camera,
+                    frame.camera_matrix,
+                    np.zeros(5),
+                )
 
                 if (
                     not camera_path
@@ -908,23 +1269,45 @@ def main(argv: Sequence[str] | None = None) -> int:
                         str(args.camera_preview_output),
                         _camera_preview(frame.rgb_bgr, detections),
                     )
+                guidance = _guidance(
+                    phase,
+                    progress,
+                    sorted(anchors),
+                    min_observations=args.min_observations,
+                    resumed=resumed,
+                )
+                records = survey.tag_records()
+                quality = _quality_feedback(
+                    guidance,
+                    records,
+                    {item.tag_id for item in detections},
+                    camera_speed_m_s=camera_speed_m_s,
+                    tracking_message=last_message,
+                    anchor_reprojection_rms_px=anchor_reprojection_rms_px,
+                    depth_plane_rms_mm=depth_plane_rms_mm,
+                )
+                last_quality = quality
                 _write_progress(args.progress_output, {
+                    "calibration_model_version": 2,
                     "status": "locking_origin" if phase == "anchor" else (
                         "finishing" if progress["complete"] else "scanning"
                     ),
                     "phase": phase,
                     "message": last_message,
-                    "instruction": _next_instruction(
-                        phase, progress, sorted(anchors)
-                    ),
+                    "instruction": guidance["headline"],
+                    "guidance": guidance,
+                    "quality": quality,
+                    "connection_mode": connection_mode,
+                    "resumed": resumed,
+                    "restored_tag_ids": restored_ids,
                     "anchor_ids": sorted(anchors),
                     "alignment_count": alignment.observation_count,
                     "anchor_frames": args.anchor_frames,
                     "detected_tag_ids": sorted(item.tag_id for item in detections),
-                    "frame_sequence": frame_index + 1,
+                    "frame_sequence": int(resume_snapshot.get("frame_sequence", 0)) + frame_index + 1,
                     "elapsed_s": round(now - start, 2),
                     "progress": progress,
-                    "records": survey.tag_records(),
+                    "records": records,
                     "camera_path_m": [item.tolist() for item in camera_path[-240:]],
                     "camera_position_m": (
                         None if current_world_from_camera is None
@@ -939,6 +1322,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 break
     except KeyboardInterrupt:
         last_message = "operator stopped; saving partial survey"
+    except (OSError, RuntimeError, TimeoutError) as error:
+        connection_error = str(error)
+        last_message = connection_error
     finally:
         if reader is not None:
             reader.close()
@@ -956,7 +1342,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         body_anchor_tag_id=args.body_anchor_tag_id,
     )
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "calibration_model_version": 2,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "source_tracker_config": str(args.tracker_config),
         "source_board_manifest": str(args.board),
@@ -996,17 +1383,40 @@ def main(argv: Sequence[str] | None = None) -> int:
     final_ok = bool(survey_payload["complete"]) and (
         not robot_tags or bool(geometry_report.get("ok"))
     )
+    final_progress = survey.progress()
+    final_guidance = _guidance(
+        "survey",
+        final_progress,
+        sorted(anchors),
+        min_observations=args.min_observations,
+        resumed=resumed,
+    )
     _write_progress(args.progress_output, {
-        "status": "complete" if final_ok else "incomplete",
-        "phase": "review",
+        "calibration_model_version": 2,
+        "status": (
+            "connection_lost" if connection_error is not None
+            else "complete" if final_ok else "incomplete"
+        ),
+        "phase": "connect" if connection_error is not None else "review",
         "message": (
-            "Survey complete. Review the geometry and tag assignments."
-            if final_ok else "Partial survey saved. Continue with another scan when ready."
+            f"Connection lost. {survey_payload['stable_tag_count']} stable tags are saved."
+            if connection_error is not None
+            else "Survey complete. Review the geometry and tag assignments."
+            if final_ok
+            else "Partial survey saved. Continue this calibration when ready."
         ),
         "instruction": (
-            "Review the 3D survey map."
-            if final_ok else "Review the missing positions below."
+            "Reconnect the phone, then continue this calibration."
+            if connection_error is not None
+            else "Review the 3D survey map."
+            if final_ok
+            else final_guidance["headline"]
         ),
+        "guidance": final_guidance,
+        "quality": last_quality,
+        "connection_mode": connection_mode,
+        "resumed": resumed,
+        "restored_tag_ids": restored_ids,
         "anchor_ids": sorted(anchors),
         "alignment_count": alignment.observation_count,
         "anchor_frames": args.anchor_frames,
@@ -1015,16 +1425,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         "frame_sequence": survey_payload.get("frames", 0),
         "elapsed_s": round(time.monotonic() - start, 2),
-        "progress": survey.progress(),
+        "progress": final_progress,
         "records": survey_payload["tags"],
         "camera_path_m": [item.tolist() for item in camera_path[-240:]],
         "camera_position_m": None,
         "result_path": str(args.output),
         "mount_learning": geometry_report,
+        "connection_error": connection_error,
     })
     print(f"wrote survey: {args.output}")
     if args.updated_config is not None:
         print(f"wrote updated config: {args.updated_config}")
+    if connection_error is not None:
+        print(f"connection lost; stable observations saved: {connection_error}")
+        return 4
     if not survey_payload["complete"]:
         print(
             "survey incomplete; robot positions still needing work: "

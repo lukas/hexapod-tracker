@@ -136,8 +136,7 @@ Its default light Tag survey workflow wraps `hexapod-zero-survey`, publishes
 atomic live progress and a clean labelled camera JPEG, renders the tag geometry
 in SVG, and only creates the reviewed config after the operator confirms the
 unchanged chassis anchor. The final action publishes the survey and config to
-Robot Lab using its first-class calibration endpoint, with the older completed-
-result artifact API as a compatibility fallback.
+Robot Lab using only its first-class versioned calibration endpoint.
 
 Do not add robot-control HTTP calls here to make the standalone UI's survey
 buttons work. That would break the intentional safety and ownership boundary.
@@ -158,10 +157,13 @@ when mapped floor tags leave the image. `hexapod-track --record3d-device` keeps
 using Record3D and refreshes RGB intrinsics on every frame, avoiding a silent
 switch to a different Continuity Camera crop. See `docs/RGBD_CALIBRATION.md`.
 
-`hexapod-zero-survey` is the moving-phone companion. A repeated board sighting
-aligns Record3D's OpenGL/ARKit camera trajectory to the board world frame. A
-slow walk then aggregates every decoded tag's 6-D transform. Completion is one
-stable tag per named robot mount position plus every expected floor ID, not the
+`hexapod-zero-survey` is the moving-phone companion. The production web flow
+merges `configs/hexapod-1-apriltag-layout.json`, yielding 37 named robot mounts:
+13 horizontal chassis/lid tags and 24 vertical yoke tags (four on each leg).
+The seven mapped floor tags jointly align Record3D's OpenGL/ARKit trajectory;
+their direct RGB-D solution takes precedence whenever visible. A slow walk then
+aggregates every decoded tag's 6-D transform. Completion is one stable tag per
+named robot mount position plus every expected floor ID, not the
 continued presence of every old robot ID. A missing configured robot ID may be
 replaced by a nearby stable newly discovered ID after fitting the original
 calibration-photo layout to recognized tags. The configured L0 hip tag is the
@@ -172,6 +174,17 @@ replaces surveyed floor poses and learns robot `frame_from_tag` values from a
 known stationary pose. One explicitly trusted body tag remains unchanged as the
 unavoidable body-frame gauge. A one-pose result is mount calibration plus
 static baselines, not independently identified link lengths or joint axes.
+Coverage is necessary but not sufficient: the quality gate requires every floor
+tag to be co-visible with another mapped tag, at least six multi-tag reference
+frames, and bounded grid, LiDAR-plane, position, height, and orientation
+residuals. Estimates continue refining after first becoming stable. Known yoke
+faces use their +Y/-Y surface normal to select the planar PnP branch.
+The web workflow can receive the same synchronized RGB-D/pose data over
+Record3D 1.11+ WebRTC Wi-Fi through a browser relay, though USB remains the
+precision path. Atomic stable-landmark checkpoints survive stream loss; a
+continued run re-locks the mapped floor grid because every new ARKit session has
+a new arbitrary world frame. Live guidance selects one target and reports fit
+error, tag spread, camera speed, and a concrete corrective movement.
 
 ## Data flow
 

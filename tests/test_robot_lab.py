@@ -2,8 +2,13 @@
 from __future__ import annotations
 
 import json
+import io
+from types import SimpleNamespace
+from urllib import error
 
-from hexapod_tracker.robot_lab import RobotLabPublisher
+import pytest
+
+from hexapod_tracker.robot_lab import RobotLabHTTPError, RobotLabPublisher
 
 
 class _Response:
@@ -18,6 +23,56 @@ class _Response:
 
     def read(self) -> bytes:
         return json.dumps(self.payload).encode("utf-8")
+
+
+def test_publisher_accepts_hexipod_token_spelling(monkeypatch) -> None:
+    monkeypatch.setenv("HEXIPOD_LAB_TOKEN", "from-keychain-export")
+    monkeypatch.delenv("HEXAPOD_LAB_TOKEN", raising=False)
+
+    publisher = RobotLabPublisher.from_env()
+
+    assert publisher.token == "from-keychain-export"
+    assert publisher.credential_source == "environment"
+
+
+def test_publisher_reads_protected_token_file_without_logging_it(
+    tmp_path, monkeypatch
+) -> None:
+    token_path = tmp_path / "robot-lab-token.txt"
+    token_path.write_text("HEXIPOD_LAB_TOKEN=secret-token-from-file\n")
+    monkeypatch.delenv("HEXIPOD_LAB_TOKEN", raising=False)
+    monkeypatch.delenv("HEXAPOD_LAB_TOKEN", raising=False)
+    monkeypatch.setenv("HEXIPOD_LAB_TOKEN_FILE", str(token_path))
+    monkeypatch.setattr("hexapod_tracker.robot_lab.shutil.which", lambda _name: None)
+
+    publisher = RobotLabPublisher.from_env()
+
+    assert publisher.token == "secret-token-from-file"
+    assert publisher.credential_source == "credential_file"
+
+
+def test_publisher_can_read_onepassword_reference(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("HEXIPOD_LAB_TOKEN", raising=False)
+    monkeypatch.delenv("HEXAPOD_LAB_TOKEN", raising=False)
+    monkeypatch.setenv("HEXIPOD_LAB_TOKEN_FILE", str(tmp_path / "missing"))
+    monkeypatch.setattr(
+        "hexapod_tracker.robot_lab.shutil.which", lambda _name: "/usr/local/bin/op"
+    )
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="secret-token-from-1password\n")
+
+    monkeypatch.setattr("hexapod_tracker.robot_lab.subprocess.run", fake_run)
+
+    publisher = RobotLabPublisher.from_env()
+
+    assert publisher.token == "secret-token-from-1password"
+    assert publisher.credential_source == "1password"
+    assert calls == [[
+        "/usr/local/bin/op", "read", "op://Private/Hexapod Lab API/credential"
+    ]]
 
 
 def test_publisher_uses_first_class_calibration_endpoint(
@@ -51,7 +106,6 @@ def test_publisher_uses_first_class_calibration_endpoint(
     published = publisher.publish_zero_pose_calibration(
         result_path=result_path,
         config_path=config_path,
-        duration_seconds=4.2,
     )
 
     assert published["status"] == "published"
@@ -66,3 +120,31 @@ def test_publisher_uses_first_class_calibration_endpoint(
     assert body["robot_id"] == "hexapod-1"
     assert body["configuration"]["floor_tags"] == {"104": {}}
     assert body["survey"]["survey"]["stable_tag_count"] == 2
+
+
+def test_publisher_does_not_fall_back_to_legacy_result_api(
+    tmp_path, monkeypatch
+) -> None:
+    result_path = tmp_path / "survey.json"
+    config_path = tmp_path / "tracker.json"
+    result_path.write_text(json.dumps({"survey": {"robot_positions": []}}))
+    config_path.write_text(json.dumps({"floor_tags": {}}))
+    calls = []
+
+    def fake_urlopen(outgoing, timeout):
+        calls.append((outgoing, timeout))
+        raise error.HTTPError(
+            outgoing.full_url, 404, "not found", {}, io.BytesIO(b"not found")
+        )
+
+    monkeypatch.setattr("hexapod_tracker.robot_lab.request.urlopen", fake_urlopen)
+    publisher = RobotLabPublisher("https://robot-lab.example", "secret")
+
+    with pytest.raises(RobotLabHTTPError):
+        publisher.publish_zero_pose_calibration(
+            result_path=result_path,
+            config_path=config_path,
+        )
+
+    assert len(calls) == 1
+    assert calls[0][0].full_url.endswith("/api/calibrations")

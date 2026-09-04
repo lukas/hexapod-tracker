@@ -232,7 +232,9 @@ def test_shared_server_worker_leaves_camera_off_until_explicit_start() -> None:
         assert state["zero_survey"]["defaults"]["floor_tag_ids"] == [
             100, 101, 102, 103, 104, 105, 112
         ]
-        assert len(state["zero_survey"]["progress"]["robot_positions"]) == 13
+        positions = state["zero_survey"]["progress"]["robot_positions"]
+        assert len(positions) == 37
+        assert sum(item.get("kind") == "yoke_face" for item in positions) == 24
         assert state["zero_survey"]["motor_commands_sent"] is False
 
         runtime.enable_camera(1)

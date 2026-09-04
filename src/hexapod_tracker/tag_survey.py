@@ -7,6 +7,7 @@ It contains no capture or robot I/O.
 """
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import math
 from typing import Any, Mapping, Sequence
@@ -271,6 +272,77 @@ def _euler_xyz_deg(rotation: Rotation) -> list[float]:
     ]
 
 
+def _layout_position(spec: Mapping[str, Any], tag_id: int) -> str:
+    """Give every physical mount a stable, operator-facing position name."""
+    frame = str(spec.get("frame", ""))
+    if frame == "body":
+        return "chassis top"
+    leg = spec.get("leg")
+    joint = str(spec.get("joint", "mount"))
+    kind = str(spec.get("kind", ""))
+    if leg is not None and kind == "servo_lid":
+        return f"L{int(leg)} {joint} top"
+    if leg is not None and kind == "yoke_face":
+        return f"L{int(leg)} {joint} {spec.get('mount_side', 'side')} side"
+    return str(spec.get("label", frame or f"tag {tag_id}"))
+
+
+def merge_robot_layout_into_config(
+    tracker_config: Mapping[str, Any],
+    robot_layout: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Merge the photographed 37-tag inventory into a tracker configuration.
+
+    The layout is identity/orientation evidence.  Its null translations are not
+    measurements, so new tags receive a zero placeholder until this survey
+    writes a measured ``frame_from_tag`` transform.
+    """
+    updated = copy.deepcopy(dict(tracker_config))
+    robot_pose = updated.setdefault("robot_pose", {})
+    tags = robot_pose.setdefault("tags", {})
+    marker_size_m = float(
+        robot_layout.get("tag_geometry", {}).get(
+            "black_square_m", updated.get("marker_size_m", 0.027)
+        )
+    )
+    for raw in robot_layout.get("robot_tags", []):
+        if not isinstance(raw, Mapping):
+            continue
+        tag_id = int(raw["id"])
+        key = str(tag_id)
+        existing = copy.deepcopy(tags.get(key, {}))
+        kind = str(raw.get("kind", existing.get("kind", "")))
+        surface = str(raw.get(
+            "surface",
+            "vertical" if kind == "yoke_face" else "horizontal",
+        ))
+        for field in ("kind", "leg", "joint", "frame", "mount_side"):
+            if field in raw:
+                existing[field] = copy.deepcopy(raw[field])
+        existing["surface"] = surface
+        existing["position"] = _layout_position(raw, tag_id)
+        existing.setdefault("label", existing["position"])
+        existing.setdefault("marker_size_m", marker_size_m)
+        if "frame_from_tag" not in existing:
+            transform = copy.deepcopy(raw.get("frame_from_tag", {}))
+            if transform.get("translation_m") is None:
+                transform.pop("translation_m", None)
+                existing["mount_translation_placeholder"] = True
+            existing["frame_from_tag"] = transform
+            existing["mount_source"] = "photographed_layout_identity"
+        tags[key] = existing
+    robot_pose["tag_inventory"] = {
+        "source": str(robot_layout.get("name", "robot AprilTag layout")),
+        "expected_total": len(robot_layout.get("robot_tags", [])),
+        "expected_vertical_angle_tags": sum(
+            str(item.get("kind")) == "yoke_face"
+            for item in robot_layout.get("robot_tags", [])
+            if isinstance(item, Mapping)
+        ),
+    }
+    return updated
+
+
 class TagSurveyAccumulator:
     """Aggregate all tag IDs and orientations during a stationary-scene walk."""
 
@@ -283,6 +355,9 @@ class TagSurveyAccumulator:
         marker_size_m: float,
         marker_sizes_m: Mapping[int, float] | None = None,
         position_tag_overrides: Mapping[str, int] | None = None,
+        geometry: HexapodGeometry | Mapping[str, Any] | None = None,
+        body_anchor_tag_id: int | None = None,
+        reference_floor_tags: Mapping[int, RigidTransform] | None = None,
         options: TagSurveyOptions | None = None,
     ) -> None:
         marker_object_corners(marker_size_m)
@@ -299,12 +374,104 @@ class TagSurveyAccumulator:
             str(frame): int(tag_id)
             for frame, tag_id in (position_tag_overrides or {}).items()
         }
+        self.geometry = (
+            geometry if isinstance(geometry, HexapodGeometry)
+            else HexapodGeometry.from_dict(geometry)
+        )
+        self.body_anchor_tag_id = (
+            None if body_anchor_tag_id is None else int(body_anchor_tag_id)
+        )
+        self.reference_floor_tags = {
+            int(tag_id): transform
+            for tag_id, transform in (reference_floor_tags or {}).items()
+        }
         for size in self.marker_sizes_m.values():
             marker_object_corners(size)
         self.options = options or TagSurveyOptions()
         self._observations: dict[int, list[TagSurveyObservation]] = {}
         self._frozen: dict[int, TransformConsensus] = {}
+        self._replacement_specs: dict[int, dict[str, Any]] = {}
+        self._multi_floor_reference_frames: list[
+            tuple[tuple[int, ...], float, float]
+        ] = []
         self.frames = 0
+
+    def observe_floor_reference(
+        self,
+        tag_ids: Sequence[int],
+        *,
+        reprojection_rms_px: float,
+        depth_plane_rms_mm: float,
+    ) -> None:
+        """Record a joint floor-grid check that cannot self-validate one tag."""
+        visible = tuple(sorted({int(tag_id) for tag_id in tag_ids}))
+        if len(visible) < 2:
+            return
+        self._multi_floor_reference_frames.append((
+            visible,
+            float(reprojection_rms_px),
+            float(depth_plane_rms_mm),
+        ))
+        if len(self._multi_floor_reference_frames) > 180:
+            del self._multi_floor_reference_frames[0]
+
+    def restore_stable_records(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        *,
+        frames: int = 0,
+    ) -> list[int]:
+        """Restore accepted landmarks from an atomic progress snapshot.
+
+        A reconnected Record3D session has a new ARKit origin, so camera
+        alignment must be acquired again. Stable tag transforms are already in
+        the survey board's world frame, however, and can safely remain frozen.
+        Unstable records are deliberately not restored: their compact status
+        lacks the individual observations needed to re-evaluate consensus.
+        """
+        restored: list[int] = []
+        for raw in records:
+            if not raw.get("stable"):
+                continue
+            try:
+                tag_id = int(raw["tag_id"])
+                transform = RigidTransform.from_dict(raw["world_from_tag"])
+                marker_size_m = float(raw.get(
+                    "marker_size_m",
+                    self.marker_sizes_m.get(tag_id, self.marker_size_m),
+                ))
+                input_count = max(1, int(raw.get("observations", 1)))
+                used_count = max(1, int(raw.get("used_observations", input_count)))
+                translation_spread_mm = float(raw.get("translation_spread_mm", 0.0))
+                rotation_spread_deg = float(raw.get("rotation_spread_deg", 0.0))
+                mean_reprojection_rms_px = float(
+                    raw.get("mean_reprojection_rms_px", 0.0)
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if tag_id < 0 or not math.isfinite(marker_size_m) or marker_size_m <= 0.0:
+                continue
+            self._observations[tag_id] = [TagSurveyObservation(
+                tag_id=tag_id,
+                world_from_tag=transform,
+                marker_size_m=marker_size_m,
+                reprojection_rms_px=max(0.0, mean_reprojection_rms_px),
+                image_heading_deg=0.0,
+                confidence=1.0,
+            )]
+            self._frozen[tag_id] = TransformConsensus(
+                transform=transform,
+                input_count=input_count,
+                used_count=min(input_count, used_count),
+                translation_spread_mm=max(0.0, translation_spread_mm),
+                rotation_spread_deg=max(0.0, rotation_spread_deg),
+                stable=True,
+                ambiguous_cluster=False,
+                mean_reprojection_rms_px=max(0.0, mean_reprojection_rms_px),
+            )
+            restored.append(tag_id)
+        self.frames = max(self.frames, max(0, int(frames)))
+        return sorted(restored)
 
     @staticmethod
     def _friendly_robot_position(frame: str, label: str) -> str:
@@ -343,6 +510,11 @@ class TagSurveyAccumulator:
                 "identity_reference": frame in self.position_tag_overrides,
                 "label": label,
                 "photo_center_px": photo_center,
+                "kind": spec.get("kind"),
+                "surface": spec.get("surface"),
+                "leg": spec.get("leg"),
+                "joint": spec.get("joint"),
+                "mount_side": spec.get("mount_side"),
             })
         return slots
 
@@ -389,6 +561,32 @@ class TagSurveyAccumulator:
             )[0]
         return transform
 
+    def _world_robot_frames_from_records(
+        self,
+        records: Mapping[int, Mapping[str, Any]],
+    ) -> dict[str, RigidTransform] | None:
+        body_ids = [
+            tag_id for tag_id, spec in self.robot_tags.items()
+            if str(spec.get("frame")) == "body"
+        ]
+        if self.body_anchor_tag_id is not None:
+            body_ids.sort(key=lambda tag_id: tag_id != self.body_anchor_tag_id)
+        for tag_id in body_ids:
+            record = records.get(tag_id)
+            if record is None or not record.get("stable"):
+                continue
+            world_from_tag = RigidTransform.from_dict(record["world_from_tag"])
+            body_from_tag = RigidTransform.from_dict(
+                self.robot_tags[tag_id].get("frame_from_tag", {})
+            )
+            world_from_body = world_from_tag.compose(body_from_tag.inverse())
+            return forward_frame_transforms(
+                world_from_body,
+                {name: 0.0 for name in JOINT_NAMES},
+                geometry=self.geometry,
+            )
+        return None
+
     def _robot_position_records(
         self,
         records: Mapping[int, Mapping[str, Any]],
@@ -423,6 +621,11 @@ class TagSurveyAccumulator:
                 "tag_id": tag_id,
                 "replacement": tag_id is not None and tag_id != configured_id,
                 "identity_reference": bool(slot["identity_reference"]),
+                "kind": slot.get("kind"),
+                "surface": slot.get("surface"),
+                "leg": slot.get("leg"),
+                "joint": slot.get("joint"),
+                "mount_side": slot.get("mount_side"),
                 "state": state,
                 "expected_world_position_m": (
                     None if expected_world is None
@@ -435,6 +638,37 @@ class TagSurveyAccumulator:
                     0 if record is None else int(record["used_observations"])
                 ),
             })
+
+        # The photographed layout has no metric side-tag translations.  A
+        # missing/replaced yoke tag can still be localized to its physical
+        # mount from the other tags surrounding the same hip or knee.
+        for item in positions:
+            if (
+                item["state"] != "not_seen"
+                or item.get("expected_world_position_m") is not None
+                or item.get("kind") != "yoke_face"
+            ):
+                continue
+            sibling_points = []
+            for sibling in positions:
+                if (
+                    sibling is item
+                    or sibling.get("leg") != item.get("leg")
+                    or sibling.get("joint") != item.get("joint")
+                    or sibling.get("tag_id") is None
+                ):
+                    continue
+                sibling_record = records.get(int(sibling["tag_id"]))
+                if sibling_record is not None and sibling_record.get("stable"):
+                    sibling_points.append(np.asarray(
+                        sibling_record["world_from_tag"]["translation_m"],
+                        dtype=float,
+                    ))
+            if sibling_points:
+                item["expected_world_position_m"] = [
+                    round(float(value), 7)
+                    for value in np.mean(np.stack(sibling_points), axis=0)
+                ]
 
         # Only substitute a new ID when the configured ID was never seen.  A
         # noisy configured tag should ask for another view, not be silently
@@ -451,24 +685,63 @@ class TagSurveyAccumulator:
             if tag_id not in configured_ids
             and tag_id not in self.expected_ground_ids
             and tag_id not in self.anchor_ids
-            and item.get("role") == "unassigned"
+            and (
+                item.get("role") == "unassigned"
+                or tag_id in self._replacement_specs
+            )
             and item.get("stable")
         ]
         if empty_indexes and replacement_candidates:
-            distances = np.asarray([
+            world_frames = self._world_robot_frames_from_records(records)
+
+            def match_metrics(
+                position: Mapping[str, Any], candidate: Mapping[str, Any]
+            ) -> tuple[float, float | None, float]:
+                distance = float(np.linalg.norm(
+                    np.asarray(position["expected_world_position_m"])
+                    - np.asarray(candidate["world_from_tag"]["translation_m"])
+                ))
+                expected_normal = self._robot_normal_world(
+                    self.robot_tags[int(position["configured_tag_id"])],
+                    world_frames,
+                )
+                raw_normal = candidate.get("tag_normal_world")
+                if expected_normal is None or raw_normal is None:
+                    return distance, None, distance
+                candidate_normal = np.asarray(raw_normal, dtype=float)
+                denominator = float(
+                    np.linalg.norm(expected_normal)
+                    * np.linalg.norm(candidate_normal)
+                )
+                if denominator <= 1e-9:
+                    return distance, None, distance
+                angle = math.degrees(math.acos(float(np.clip(
+                    np.dot(expected_normal, candidate_normal) / denominator,
+                    -1.0,
+                    1.0,
+                ))))
+                # The normal distinguishes opposing +Y/-Y yoke faces even when
+                # their tag centers are only a few centimetres apart.
+                cost = distance + min(angle, 90.0) / 90.0 * 0.040
+                return distance, angle, cost
+
+            metrics = [
                 [
-                    np.linalg.norm(
-                        np.asarray(positions[index]["expected_world_position_m"])
-                        - np.asarray(candidate["world_from_tag"]["translation_m"])
-                    )
+                    match_metrics(positions[index], candidate)
                     for candidate in replacement_candidates
                 ]
                 for index in empty_indexes
+            ]
+            costs = np.asarray([
+                [item[2] for item in row] for row in metrics
             ])
-            rows, columns = linear_sum_assignment(distances)
+            rows, columns = linear_sum_assignment(costs)
             for row, column in zip(rows, columns):
-                distance = float(distances[row, column])
-                if distance > self.options.robot_slot_match_tolerance_m:
+                distance, normal_error, _cost = metrics[int(row)][int(column)]
+                if (
+                    distance > self.options.robot_slot_match_tolerance_m
+                    or (normal_error is not None and normal_error > 35.0)
+                ):
                     continue
                 index = empty_indexes[int(row)]
                 candidate = replacement_candidates[int(column)]
@@ -477,15 +750,27 @@ class TagSurveyAccumulator:
                     "replacement": True,
                     "state": "measured",
                     "match_distance_mm": round(distance * 1000.0, 2),
+                    "match_normal_error_deg": (
+                        None if normal_error is None else round(normal_error, 2)
+                    ),
                     "observations": int(candidate["observations"]),
                     "used_observations": int(candidate["used_observations"]),
                 })
+        replacement_specs: dict[int, dict[str, Any]] = {}
+        for item in positions:
+            if not item.get("replacement") or item.get("tag_id") is None:
+                continue
+            spec = dict(self.robot_tags[int(item["configured_tag_id"])])
+            spec["label"] = str(item["position"])
+            spec["position"] = str(item["position"])
+            replacement_specs[int(item["tag_id"])] = spec
+        self._replacement_specs = replacement_specs
         return positions
 
     def _known_role(self, tag_id: int) -> str | None:
         if tag_id in self.anchor_ids:
             return "calibration_anchor"
-        if tag_id in self.robot_tags:
+        if tag_id in self.robot_tags or tag_id in self._replacement_specs:
             return "robot"
         if tag_id in self.position_tag_overrides.values():
             return "robot"
@@ -501,6 +786,86 @@ class TagSurveyAccumulator:
             <= self.options.ground_normal_tolerance_deg
         )
 
+    def _world_robot_frames(
+        self,
+        detections: Sequence[TagCorners],
+        world_from_camera: RigidTransform,
+        camera_matrix: np.ndarray,
+        distortion: np.ndarray,
+        floor_normal_camera: np.ndarray,
+    ) -> dict[str, RigidTransform] | None:
+        body_ids = [
+            tag_id for tag_id, spec in self.robot_tags.items()
+            if str(spec.get("frame")) == "body"
+        ]
+        if self.body_anchor_tag_id is not None:
+            body_ids.sort(key=lambda tag_id: tag_id != self.body_anchor_tag_id)
+        by_id = {item.tag_id: item for item in detections}
+        for tag_id in body_ids:
+            spec = self.robot_tags[tag_id]
+            world_from_tag = None
+            detection = by_id.get(tag_id)
+            if detection is not None:
+                try:
+                    pose = estimate_tag_pose(
+                        detection,
+                        camera_matrix,
+                        distortion,
+                        marker_size_m=self.marker_sizes_m.get(
+                            tag_id, self.marker_size_m
+                        ),
+                        preferred_normal_camera=floor_normal_camera,
+                    )
+                except (ValueError, cv2.error):
+                    pose = None
+                if (
+                    pose is not None
+                    and pose.reprojection_rms_px
+                    <= self.options.max_reprojection_rms_px
+                ):
+                    world_from_tag = world_from_camera.compose(
+                        pose.camera_from_tag
+                    )
+            elif tag_id in self._observations:
+                consensus = self._consensus_for(tag_id)
+                if consensus.stable:
+                    world_from_tag = consensus.transform
+            if world_from_tag is None:
+                continue
+            body_from_tag = RigidTransform.from_dict(
+                spec.get("frame_from_tag", {})
+            )
+            world_from_body = world_from_tag.compose(body_from_tag.inverse())
+            return forward_frame_transforms(
+                world_from_body,
+                {name: 0.0 for name in JOINT_NAMES},
+                geometry=self.geometry,
+            )
+        return None
+
+    @staticmethod
+    def _robot_normal_world(
+        spec: Mapping[str, Any],
+        world_frames: Mapping[str, RigidTransform] | None,
+    ) -> np.ndarray | None:
+        surface = str(spec.get("surface", ""))
+        if surface == "horizontal" or str(spec.get("frame")) == "body":
+            return np.asarray([0.0, 0.0, 1.0])
+        if world_frames is None:
+            return None
+        frame = str(spec.get("frame", ""))
+        world_from_frame = world_frames.get(frame)
+        if world_from_frame is None:
+            return None
+        mount_side = str(spec.get("mount_side", ""))
+        if mount_side == "+y":
+            normal_frame = np.asarray([0.0, 1.0, 0.0])
+        elif mount_side == "-y":
+            normal_frame = np.asarray([0.0, -1.0, 0.0])
+        else:
+            return None
+        return world_from_frame.rotation.apply(normal_frame)
+
     def observe_frame(
         self,
         detections: Sequence[TagCorners],
@@ -512,9 +877,20 @@ class TagSurveyAccumulator:
         floor_normal_camera = world_from_camera.rotation.inv().apply(
             [0.0, 0.0, 1.0]
         )
+        world_frames = self._world_robot_frames(
+            detections,
+            world_from_camera,
+            camera_matrix,
+            distortion,
+            floor_normal_camera,
+        )
         for detection in detections:
             if detection.tag_id in self._frozen:
-                continue
+                if self.options.freeze_stable_tags:
+                    continue
+                # A restored checkpoint remains immediately usable, then starts
+                # refining again as soon as the operator revisits this tag.
+                self._frozen.pop(detection.tag_id, None)
             marker_size = self.marker_sizes_m.get(
                 detection.tag_id, self.marker_size_m
             )
@@ -523,6 +899,18 @@ class TagSurveyAccumulator:
             preferred_normal = None
             if role in ("ground", "calibration_anchor"):
                 preferred_normal = floor_normal_camera
+            elif role == "robot":
+                normal_world = self._robot_normal_world(
+                    self.robot_tags.get(
+                        detection.tag_id,
+                        self._replacement_specs.get(detection.tag_id, {}),
+                    ),
+                    world_frames,
+                )
+                if normal_world is not None:
+                    preferred_normal = world_from_camera.rotation.inv().apply(
+                        normal_world
+                    )
             elif previous:
                 prior_normal_world = previous[-1].world_from_tag.rotation.apply(
                     [0.0, 0.0, 1.0]
@@ -664,12 +1052,19 @@ class TagSurveyAccumulator:
             tag_x = transform.rotation.apply([1.0, 0.0, 0.0])
             tag_y = transform.rotation.apply([0.0, 1.0, 0.0])
             heading = math.degrees(math.atan2(float(tag_y[0]), float(tag_y[1])))
-            metadata = self.robot_tags.get(tag_id, {})
+            metadata = self.robot_tags.get(
+                tag_id, self._replacement_specs.get(tag_id, {})
+            )
             records.append({
                 "tag_id": tag_id,
                 "role": role,
                 "label": metadata.get("label", f"discovered tag {tag_id}"),
                 "robot_frame": metadata.get("frame"),
+                "kind": metadata.get("kind"),
+                "surface": metadata.get("surface"),
+                "leg": metadata.get("leg"),
+                "joint": metadata.get("joint"),
+                "mount_side": metadata.get("mount_side"),
                 "marker_size_m": self._observations[tag_id][0].marker_size_m,
                 "world_from_tag": transform.to_dict(),
                 "euler_xyz_deg": _euler_xyz_deg(transform.rotation),
@@ -698,6 +1093,136 @@ class TagSurveyAccumulator:
                 "stable": consensus.stable,
             })
         return records
+
+    def _quality_gate(
+        self,
+        records: Mapping[int, Mapping[str, Any]],
+        *,
+        coverage_complete: bool,
+        ambiguous_ids: Sequence[int],
+    ) -> dict[str, Any]:
+        reference_errors: list[tuple[float, float, float]] = []
+        for tag_id, reference in self.reference_floor_tags.items():
+            record = records.get(tag_id)
+            if record is None or not record.get("stable"):
+                continue
+            measured = RigidTransform.from_dict(record["world_from_tag"])
+            translation_error = measured.translation_m - reference.translation_m
+            reference_errors.append((
+                float(np.linalg.norm(translation_error)),
+                abs(float(translation_error[2])),
+                math.degrees(float(
+                    (reference.rotation.inv() * measured.rotation).magnitude()
+                )),
+            ))
+        floor_position_rms_mm = None
+        floor_height_rms_mm = None
+        floor_rotation_rms_deg = None
+        if reference_errors:
+            values = np.asarray(reference_errors, dtype=float)
+            floor_position_rms_mm = math.sqrt(float(np.mean(values[:, 0] ** 2))) * 1000.0
+            floor_height_rms_mm = math.sqrt(float(np.mean(values[:, 1] ** 2))) * 1000.0
+            floor_rotation_rms_deg = math.sqrt(float(np.mean(values[:, 2] ** 2)))
+
+        jointly_validated_ids = sorted({
+            tag_id
+            for tag_ids, _reprojection, _depth in self._multi_floor_reference_frames
+            for tag_id in tag_ids
+        })
+        joint_reprojection = (
+            None if not self._multi_floor_reference_frames else float(np.median([
+                item[1] for item in self._multi_floor_reference_frames
+            ]))
+        )
+        joint_depth = (
+            None if not self._multi_floor_reference_frames else float(np.median([
+                item[2] for item in self._multi_floor_reference_frames
+            ]))
+        )
+
+        checks = {
+            "coverage": coverage_complete,
+            "no_ambiguous_ids": not ambiguous_ids,
+            "mapped_floor_tags": (
+                not self.reference_floor_tags
+                or len(reference_errors) == len(self.reference_floor_tags)
+            ),
+            "joint_floor_grid_frames": (
+                len(self._multi_floor_reference_frames) >= 6
+            ) if self.reference_floor_tags else True,
+            "joint_floor_grid_coverage": (
+                set(jointly_validated_ids) >= set(self.reference_floor_tags)
+            ) if self.reference_floor_tags else True,
+            "joint_floor_reprojection": (
+                joint_reprojection is not None and joint_reprojection <= 1.25
+            ) if self.reference_floor_tags else True,
+            "joint_floor_depth_plane": (
+                joint_depth is not None and joint_depth <= 12.0
+            ) if self.reference_floor_tags else True,
+            "floor_position_rms": (
+                floor_position_rms_mm is not None
+                and floor_position_rms_mm <= 10.0
+            ) if self.reference_floor_tags else True,
+            "floor_height_rms": (
+                floor_height_rms_mm is not None
+                and floor_height_rms_mm <= 6.0
+            ) if self.reference_floor_tags else True,
+            "floor_rotation_rms": (
+                floor_rotation_rms_deg is not None
+                and floor_rotation_rms_deg <= 3.0
+            ) if self.reference_floor_tags else True,
+        }
+        descriptions = {
+            "coverage": "some required robot or floor mounts still need views",
+            "no_ambiguous_ids": "a tag ID formed two incompatible pose clusters",
+            "mapped_floor_tags": "not every mapped floor tag has a stable measurement",
+            "joint_floor_grid_frames": "show pairs of floor tags together for at least six clean frames",
+            "joint_floor_grid_coverage": "each floor tag must be seen together with another floor tag",
+            "joint_floor_reprojection": "the measured floor grid does not fit below 1.25 px RMS",
+            "joint_floor_depth_plane": "the LiDAR floor plane residual exceeds 12 mm RMS",
+            "floor_position_rms": "floor-grid position residual exceeds 10 mm RMS",
+            "floor_height_rms": "floor-grid height residual exceeds 6 mm RMS",
+            "floor_rotation_rms": "floor-tag orientation residual exceeds 3 degrees RMS",
+        }
+        return {
+            "passed": all(checks.values()),
+            "checks": checks,
+            "failing_checks": [
+                descriptions[name] for name, passed in checks.items() if not passed
+            ],
+            "reference_floor_tag_count": len(reference_errors),
+            "required_reference_floor_tag_count": len(self.reference_floor_tags),
+            "joint_floor_reference_frames": len(
+                self._multi_floor_reference_frames
+            ),
+            "jointly_validated_floor_tag_ids": jointly_validated_ids,
+            "joint_floor_reprojection_rms_px": (
+                None if joint_reprojection is None else round(joint_reprojection, 4)
+            ),
+            "joint_floor_depth_plane_rms_mm": (
+                None if joint_depth is None else round(joint_depth, 3)
+            ),
+            "floor_position_rms_mm": (
+                None if floor_position_rms_mm is None
+                else round(floor_position_rms_mm, 3)
+            ),
+            "floor_height_rms_mm": (
+                None if floor_height_rms_mm is None
+                else round(floor_height_rms_mm, 3)
+            ),
+            "floor_rotation_rms_deg": (
+                None if floor_rotation_rms_deg is None
+                else round(floor_rotation_rms_deg, 4)
+            ),
+            "thresholds": {
+                "floor_position_rms_mm": 10.0,
+                "floor_height_rms_mm": 6.0,
+                "floor_rotation_rms_deg": 3.0,
+                "joint_floor_reprojection_rms_px": 1.25,
+                "joint_floor_depth_plane_rms_mm": 12.0,
+                "joint_floor_reference_frames": 6,
+            },
+        }
 
     def progress(self) -> dict[str, Any]:
         records = {item["tag_id"]: item for item in self.tag_records()}
@@ -739,8 +1264,36 @@ class TagSurveyAccumulator:
                     0 if record is None else record["used_observations"]
                 ),
             })
+        coverage_complete = not missing_robot_positions and not missing_ground
+        quality_gate = self._quality_gate(
+            records,
+            coverage_complete=coverage_complete,
+            ambiguous_ids=ambiguous,
+        )
+        angle_positions = [
+            item for item in robot_positions if item.get("kind") == "yoke_face"
+        ]
+        top_positions = [
+            item for item in robot_positions if item.get("kind") != "yoke_face"
+        ]
         return {
-            "complete": not missing_robot_positions and not missing_ground,
+            "complete": bool(quality_gate["passed"]),
+            "coverage_complete": coverage_complete,
+            "quality_gate": quality_gate,
+            "robot_position_counts": {
+                "top_and_chassis": {
+                    "measured": sum(
+                        item["state"] == "measured" for item in top_positions
+                    ),
+                    "required": len(top_positions),
+                },
+                "vertical_angle": {
+                    "measured": sum(
+                        item["state"] == "measured" for item in angle_positions
+                    ),
+                    "required": len(angle_positions),
+                },
+            },
             "expected_robot_tag_ids": sorted(self.expected_robot_ids),
             "expected_robot_positions": [
                 str(item["position"]) for item in robot_positions
@@ -770,6 +1323,7 @@ class TagSurveyAccumulator:
             "discovered_unexpected_tag_ids": sorted(
                 set(records) - self.expected_robot_ids
                 - self.expected_ground_ids - self.anchor_ids
+                - set(self._replacement_specs)
             ),
         }
 
@@ -975,11 +1529,11 @@ def learn_zero_pose_mounts(
         "not_identifiable_from_one_static_pose": [
             "joint-axis locations versus tag-center offsets",
             "coxa/femur/tibia link lengths independently of mount translations",
-            "signed knee geometry without tibia-fixed tags",
+            "joint-axis direction and linkage geometry without joint excitation",
         ],
         "next_capture_for_geometry_fit": (
             "Record several stationary, encoder-known poses spanning each joint; "
-            "add one tibia-fixed tag per leg and keep one trusted body datum."
+            "keep the trusted body datum and the existing tibia-fixed side tags."
         ),
     }
     return learned, report

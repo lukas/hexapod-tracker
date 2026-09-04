@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 from typing import Any, Mapping
 from urllib import error, request
 
@@ -18,18 +20,117 @@ class RobotLabHTTPError(RuntimeError):
 
 
 class RobotLabPublisher:
-    """Small stdlib client for Robot Lab's completed-result/artifact API."""
+    """Small client for Robot Lab's versioned calibration API."""
 
-    def __init__(self, base_url: str, token: str | None, timeout_s: float = 20.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        token: str | None,
+        timeout_s: float = 20.0,
+        *,
+        credential_source: str | None = None,
+        credential_error: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout_s = timeout_s
+        self.credential_source = credential_source
+        self.credential_error = credential_error
+
+    @staticmethod
+    def _token_from_text(value: str) -> str | None:
+        candidates: list[str] = []
+        for raw_line in value.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            for prefix in (
+                "HEXIPOD_LAB_TOKEN=", "HEXAPOD_LAB_TOKEN=", "token:", "Token:"
+            ):
+                if line.startswith(prefix):
+                    line = line[len(prefix):].strip().strip('"\'')
+                    break
+            if line.lower().startswith("bearer "):
+                line = line[7:].strip()
+            if len(line) >= 16 and not any(character.isspace() for character in line):
+                candidates.append(line)
+        return candidates[0] if len(candidates) == 1 else None
+
+    @classmethod
+    def _token_from_file(cls, path: Path) -> str | None:
+        if not path.is_file():
+            return None
+        if path.suffix.lower() == ".rtf" and Path("/usr/bin/textutil").is_file():
+            completed = subprocess.run(
+                ["/usr/bin/textutil", "-convert", "txt", "-stdout", str(path)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+            )
+            if completed.returncode != 0:
+                return None
+            return cls._token_from_text(completed.stdout)
+        return cls._token_from_text(path.read_text(encoding="utf-8"))
 
     @classmethod
     def from_env(cls) -> "RobotLabPublisher":
+        token = os.getenv("HEXIPOD_LAB_TOKEN") or os.getenv("HEXAPOD_LAB_TOKEN")
+        source = "environment" if token else None
+        diagnostic: str | None = None
+        raw_token_path = os.getenv("HEXIPOD_LAB_TOKEN_FILE")
+        token_paths = (
+            [Path(raw_token_path).expanduser()]
+            if raw_token_path else [
+                Path.home() / "Documents" / "hexapod.rtf",
+                Path.home() / "Library" / "Mobile Documents"
+                / "com~apple~TextEdit" / "Documents" / "hexapod.rtf",
+            ]
+        )
+        for token_path in token_paths:
+            if token or not token_path.is_file():
+                continue
+            try:
+                token = cls._token_from_file(token_path)
+            except (OSError, subprocess.SubprocessError, UnicodeError):
+                token = None
+            if token:
+                source = "credential_file"
+            else:
+                diagnostic = f"could not read one token from {token_path}"
+        if not token:
+            op_path = shutil.which("op")
+            op_ref = os.getenv(
+                "HEXIPOD_LAB_TOKEN_OP_REF",
+                "op://Private/Hexapod Lab API/credential",
+            )
+            if op_path:
+                try:
+                    completed = subprocess.run(
+                        [op_path, "read", op_ref],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=4.0,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    completed = None
+                if completed is not None and completed.returncode == 0:
+                    token = completed.stdout.strip() or None
+                if token:
+                    source = "1password"
+                elif diagnostic is None:
+                    diagnostic = "1Password CLI could not read the configured item"
+            elif diagnostic is None:
+                diagnostic = (
+                    "1Password CLI is not installed and no credential file "
+                    "was found in Documents or TextEdit Documents"
+                )
         return cls(
             os.getenv("HEXAPOD_LAB_URL", DEFAULT_ROBOT_LAB_URL),
-            os.getenv("HEXAPOD_LAB_TOKEN"),
+            token,
+            credential_source=source,
+            credential_error=diagnostic,
         )
 
     @property
@@ -46,7 +147,7 @@ class RobotLabPublisher:
         content_type: str = "application/json",
     ) -> dict[str, Any]:
         if not self.token:
-            raise RuntimeError("HEXAPOD_LAB_TOKEN is not available to the vision server")
+            raise RuntimeError("Robot Lab token is not available to the vision server")
         data = body
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
@@ -77,7 +178,6 @@ class RobotLabPublisher:
         *,
         result_path: Path,
         config_path: Path,
-        duration_seconds: float,
     ) -> dict[str, Any]:
         result = json.loads(result_path.read_text(encoding="utf-8"))
         configuration = json.loads(config_path.read_text(encoding="utf-8"))
@@ -97,64 +197,18 @@ class RobotLabPublisher:
             "The robot remained stationary and no motor commands were sent.\n\n"
             f"Replacement assignments: {replacements or 'none'}.\n"
         )
-        try:
-            saved = self._request_json("POST", "/api/calibrations", payload={
-                "robot_id": "hexapod-1",
-                "scope": "combined",
-                "source": "iphone_lidar_zero_pose_survey",
-                "configuration": configuration,
-                "survey": result,
-                "summary": summary,
-            })
-        except RobotLabHTTPError as caught:
-            if caught.status not in {404, 405}:
-                raise
-        else:
-            return {
-                "status": "published",
-                "calibration_id": saved.get("id"),
-                "url": saved.get("url") or f"{self.base_url}/calibrations/{saved.get('id')}",
-                "artifacts": ["configuration", "survey"],
-                "transport": "calibration_config",
-            }
-
-        # Compatibility with Robot Lab versions deployed before the dedicated
-        # calibration-config endpoint: register a durable result and attach
-        # the same two JSON documents as immutable artifacts.
-        registered = self._request_json("POST", "/api/results", payload={
-            "name": "iPhone LiDAR zero-pose calibration",
-            "description": (
-                "Surveyed AprilTag identities, 6-DoF mounts, orientations, and floor distances"
-            ),
-            "duration_seconds": max(0.001, float(duration_seconds)),
-            "parameters": {
-                "kind": "apriltag_zero_pose_calibration",
-                "schema_version": result.get("schema_version"),
-                "robot_position_count": len(positions),
-                "floor_tag_ids": survey.get("expected_ground_tag_ids", []),
-                "stable_tag_count": survey.get("stable_tag_count"),
-                "leg_zero_reference": result.get("leg_zero_reference"),
-                "motor_commands_sent": False,
-            },
-            "status": "succeeded",
-            "summary_markdown": summary,
+        saved = self._request_json("POST", "/api/calibrations", payload={
+            "robot_id": "hexapod-1",
+            "scope": "combined",
+            "source": "iphone_lidar_zero_pose_survey",
+            "configuration": configuration,
+            "survey": result,
+            "summary": summary,
         })
-        experiment_id = str(registered["id"])
-        uploaded: list[str] = []
-        for filename, path in (
-            ("zero-pose-survey.json", result_path),
-            ("apriltag-tracker-config.json", config_path),
-        ):
-            self._request_json(
-                "PUT",
-                f"/api/experiments/{experiment_id}/artifacts/{filename}",
-                body=path.read_bytes(),
-            )
-            uploaded.append(filename)
         return {
             "status": "published",
-            "experiment_id": experiment_id,
-            "url": f"{self.base_url}/experiments/{experiment_id}",
-            "artifacts": uploaded,
-            "transport": "result_artifacts_compatibility",
+            "calibration_id": saved.get("id"),
+            "url": saved.get("url") or f"{self.base_url}/calibrations/{saved.get('id')}",
+            "artifacts": ["configuration", "survey"],
+            "transport": "calibration_config",
         }

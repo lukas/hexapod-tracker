@@ -90,6 +90,7 @@ uv run --with cmake uv sync --extra dev --extra rgbd
 uv run hexapod-rgbd-calibrate \
   configs/apriltag_pose_config_20260831.json \
   --board configs/rgbd_calibration_board.json \
+  --robot-layout configs/hexapod-1-apriltag-layout.json \
   --frames 30 \
   --output artifacts/rgbd-calibration.json \
   --updated-config artifacts/apriltag_pose_config_rgbd.json \
@@ -128,7 +129,9 @@ uv run hexapod-zero-survey \
   --updated-config artifacts/apriltag_pose_config_surveyed.json
 ```
 
-The preview first asks for a stable board lock, then becomes a scan dashboard
+The production layout expands the checklist to 37 robot mounts: the chassis and
+12 servo-lid tags plus four vertical angle tags on each of six legs. The preview
+first asks for a stable mapped-floor lock, then becomes a scan dashboard
 with the live camera, an isometric 3-D tag map, the phone path, tracking health,
 and a physical-position checklist (`L0 hip`, `L0 knee`, and so on). It clearly
 separates a position that has never been seen from a tag that was decoded but
@@ -146,11 +149,14 @@ L0 hip is protected because it defines leg numbering; if that particular tag
 was replaced, declare the new identity with `--leg-zero-anchor-tag-id NEW_ID`.
 
 This captures every configured robot position and expected floor tag, but it cannot
-know that an unlisted, never-visible physical tag exists. One zero-pose capture
+know that an unlisted, never-visible physical tag exists. The seven known floor
+tags are solved jointly whenever two or more are visible, and Save stays disabled
+until the floor-grid, LiDAR-plane, per-tag spread, and full coverage checks pass.
+One zero-pose capture
 can relearn tag mounts against the current kinematic model and measure static
 inter-tag baselines. It cannot uniquely separate link lengths, joint-axis
 locations, and tag offsets; exact geometry fitting needs several stationary,
-encoder-known poses and preferably a rigid tibia tag on each leg. See
+encoder-known poses using the existing tibia-fixed side tags. See
 [`docs/RGBD_CALIBRATION.md`](docs/RGBD_CALIBRATION.md#handheld-zero-pose-tag-survey).
 
 ## Web UI and tests
@@ -163,11 +169,26 @@ uv run --extra rgbd hexapod-vision-web
 # open http://127.0.0.1:8898/vision
 ```
 
-The default **Tag survey** page walks through Record3D connection, floor-origin
-lock, position-based robot/floor coverage, a live 3-D schematic, reviewed config
-creation, and Robot Lab publication. It never commands the robot. The server
-uses `HEXAPOD_LAB_TOKEN` and optional `HEXAPOD_LAB_URL` for the final authenticated
-upload; without the token it keeps the result locally and offers a retry.
+The default **Tag survey** page walks through Record3D connection, mapped-floor
+lock, 13 top/chassis + 24 vertical robot mounts, a live 3-D schematic, reviewed config
+creation, and Robot Lab publication. USB is the precision path. Record3D 1.11+
+can also relay its WebRTC Wi-Fi RGB-D stream, synchronized intrinsics, and ARKit
+pose through the page; the app's paid Wi-Fi extension is required and its lossy
+depth is expected to be noisier. The live quality coach reports corner error,
+position/angle spread, phone speed, and corrective guidance. Stable observations
+are checkpointed so an unplugged or dropped connection can be continued after
+re-locking any mapped floor tag instead of starting over.
+
+The workflow never commands the robot. Robot Lab publication uses only the
+versioned `/api/calibrations` endpoint. The server first reads
+`HEXIPOD_LAB_TOKEN` (or `HEXAPOD_LAB_TOKEN`), then a protected path from
+`HEXIPOD_LAB_TOKEN_FILE` (by default it checks both `~/Documents/hexapod.rtf`
+and TextEdit's sandboxed Documents folder), then the
+`HEXIPOD_LAB_TOKEN_OP_REF` 1Password reference (default
+`op://Private/Hexapod Lab API/credential`). The `op` CLI must be installed and
+signed in for 1Password lookup. `HEXAPOD_LAB_URL` selects another server.
+Without a token the survey stays local and the page shows a specific retry
+diagnostic.
 
 ```sh
 make check

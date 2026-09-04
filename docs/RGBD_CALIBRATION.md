@@ -107,15 +107,27 @@ calibration, the phone is meant to move during this workflow.
    been seen; `VIEW` means its tag was decoded but needs another clean angle;
    `OK` means its 6-D pose was recorded. Vary the viewing angle rather than
    collecting all samples from one oblique direction.
-6. Revisit the board periodically. If the board-visible pose disagrees with the
-   ARKit trajectory by more than 60 mm or 5 degrees, that frame is rejected and
-   the preview reports drift. Restart the capture after an ARKit relocalization
-   or if the warning persists.
+6. Keep a mapped floor tag in frame whenever practical. A direct RGB-D solution
+   from the seven-tag metric grid overrides accumulated ARKit drift. Each floor
+   tag must also appear together with another mapped floor tag so the grid
+   geometry is genuinely checked rather than self-validating one tag at a time.
+
+The web studio supports both Record3D USB and Wi-Fi. USB keeps the uncompressed
+depth/confidence stream and remains the recommended metric-calibration path.
+Wi-Fi uses Record3D 1.11+'s WebRTC stream and synchronized per-frame pose and
+intrinsics metadata; it requires Record3D's Wi-Fi Streaming extension and its
+video-encoded depth can be noisier. The page highlights exactly one next target
+in the checklist and 3-D map, displays reprojection/translation/rotation error
+and phone speed, and suggests when to slow down, move closer, step sideways, or
+return to the mapped floor grid. If either transport drops, stable world-frame
+tag records remain in the atomic progress checkpoint. Continue the same run and
+re-lock any visible mapped floor tag to align the new ARKit session.
 
 ```sh
 uv run hexapod-zero-survey \
   configs/apriltag_pose_config_20260831.json \
   --board configs/rgbd_calibration_board.json \
+  --robot-layout configs/hexapod-1-apriltag-layout.json \
   --body-anchor-tag-id 0 \
   --expected-floor-ids 12,13,15 \
   --output artifacts/zero-pose-tag-survey.json \
@@ -123,8 +135,12 @@ uv run hexapod-zero-survey \
   --preview-output artifacts/zero-pose-tag-survey.jpg
 ```
 
-The completion checklist has a finite definition: every physical position in
-`robot_pose.tags` and every expected floor ID must have a stable estimate.
+The production completion checklist has a finite definition: 13 horizontal
+lid/chassis tags, 24 vertical angle tags (four per leg), and all seven mapped
+floor tags must have stable estimates. It additionally requires multi-tag floor
+views to fit below 1.25 px RMS, a LiDAR plane below 12 mm RMS, mapped floor
+positions below 10 mm RMS, heights below 6 mm RMS, and orientations below 3
+degrees RMS. Coverage alone cannot enable Save.
 The configured ID fills its position directly. If that ID is absent, a stable
 unconfigured robot tag can fill the empty position when it is close to the
 calibration-photo layout fitted from the recognized tags. The output records
@@ -175,7 +191,7 @@ tag's mount translation, nor locate an unmarked knee axis. The generated
 them as exact geometry.
 
 A future exact-geometry fit needs several stationary captures with independently
-known encoder angles spanning each joint, one rigid tibia-fixed tag per leg,
+known encoder angles spanning each joint, the existing tibia-fixed side tags,
 and at least one trusted chassis datum. Those observations make joint axes,
 link lengths, and mount offsets separable. The current output preserves the
 per-tag poses and static baselines needed to inspect such a dataset, but does

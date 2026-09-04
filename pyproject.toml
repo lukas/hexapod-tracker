@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+rgbd = ["record3d>=1.4.1"]
 
 [project.scripts]
 hexapod-camera-server = "hexapod_tracker.camera_server:main"
@@ -25,6 +26,10 @@ hexapod-housing-pose = "hexapod_tracker.estimate_housing_pose:main"
 hexapod-gait-motion = "hexapod_tracker.gait_motion:main"
 hexapod-gait-video = "hexapod_tracker.telemetry_video:main"
 hexapod-audit-layout = "hexapod_tracker.layout_audit:main"
+hexapod-calibration-board = "hexapod_tracker.calibration_board:main"
+hexapod-rgbd-calibrate = "hexapod_tracker.rgbd_calibrate:main"
+hexapod-zero-survey = "hexapod_tracker.zero_pose_survey:main"
+hexapod-vision-web = "hexapod_tracker.vision_web:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

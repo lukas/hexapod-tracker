@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "tag_family": "tag36h11",
+  "marker_size_m": 0.07,
+  "board_size_m": [
+    0.158,
+    0.158
+  ],
+  "world_frame": "origin at board center; +x printed right; +y printed up; +z out of face",
+  "print_instructions": "Print the SVG at 100% / actual size on a matte rigid surface and verify one black square with calipers. Do not use fit-to-page.",
+  "floor_tags": {
+    "40": {
+      "label": "RGB-D calibration grid r0 c0",
+      "world_from_tag": {
+        "translation_m": [
+          -0.044,
+          0.044,
+          0.0
+        ],
+        "euler_xyz_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "41": {
+      "label": "RGB-D calibration grid r0 c1",
+      "world_from_tag": {
+        "translation_m": [
+          0.044,
+          0.044,
+          0.0
+        ],
+        "euler_xyz_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "42": {
+      "label": "RGB-D calibration grid r1 c0",
+      "world_from_tag": {
+        "translation_m": [
+          -0.044,
+          -0.044,
+          0.0
+        ],
+        "euler_xyz_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "43": {
+      "label": "RGB-D calibration grid r1 c1",
+      "world_from_tag": {
+        "translation_m": [
+          0.044,
+          -0.044,
+          0.0
+        ],
+        "euler_xyz_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    }
+  }
+}

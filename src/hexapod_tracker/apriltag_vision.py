@@ -460,16 +460,27 @@ def estimate_world_reference(
     distortion: np.ndarray,
     *,
     marker_size_m: float = DEFAULT_MARKER_SIZE_M,
+    marker_sizes_m: Mapping[int, float] | None = None,
     previous_world_from_camera: RigidTransform | None = None,
+    preferred_floor_normal_camera: np.ndarray | None = None,
 ) -> WorldReference | None:
     """Solve camera extrinsics from one or more mapped floor tags."""
     visible = [item for item in detections if item.tag_id in floor_tags]
     if not visible:
         return None
 
+    def size_for(tag_id: int) -> float:
+        if marker_sizes_m is None:
+            return marker_size_m
+        return float(marker_sizes_m.get(tag_id, marker_size_m))
+
     if len(visible) == 1:
         preferred_normal_camera = np.asarray([0.0, 0.0, -1.0])
-        if previous_world_from_camera is not None:
+        if preferred_floor_normal_camera is not None:
+            preferred_normal_camera = np.asarray(
+                preferred_floor_normal_camera, dtype=float
+            ).reshape(3)
+        elif previous_world_from_camera is not None:
             preferred_normal_camera = (
                 previous_world_from_camera.rotation.inv().apply([0.0, 0.0, 1.0])
             )
@@ -477,7 +488,7 @@ def estimate_world_reference(
             visible[0],
             camera_matrix,
             distortion,
-            marker_size_m=marker_size_m,
+            marker_size_m=size_for(visible[0].tag_id),
             preferred_normal_camera=preferred_normal_camera,
         )
         world_from_camera = floor_tags[visible[0].tag_id].compose(
@@ -489,11 +500,11 @@ def estimate_world_reference(
             tag_pose.reprojection_rms_px,
         )
 
-    tag_corners = marker_object_corners(marker_size_m)
     object_points: list[np.ndarray] = []
     image_points: list[np.ndarray] = []
     for detection in visible:
         world_from_tag = floor_tags[detection.tag_id]
+        tag_corners = marker_object_corners(size_for(detection.tag_id))
         object_points.extend(world_from_tag.apply(point) for point in tag_corners)
         image_points.extend(detection.corners_px)
     world_points = np.asarray(object_points, dtype=np.float32)
@@ -546,8 +557,26 @@ class AprilTagPoseTracker:
             config.get("marker_size_m", DEFAULT_MARKER_SIZE_M)
         )
         marker_object_corners(self.marker_size_m)  # validate now
+        self.floor_marker_size_m = float(
+            config.get("floor_marker_size_m", self.marker_size_m)
+        )
+        marker_object_corners(self.floor_marker_size_m)
         self.calibration = CameraCalibration.from_dict(config["camera"])
         self.floor_tags = _read_transform_map(config.get("floor_tags", {}))
+        self.floor_marker_sizes_m = {
+            int(raw_id): float(spec.get(
+                "marker_size_m", self.floor_marker_size_m
+            ))
+            for raw_id, spec in config.get("floor_tags", {}).items()
+        }
+        for marker_size in self.floor_marker_sizes_m.values():
+            marker_object_corners(marker_size)
+        fixed_reference = config.get("fixed_camera_world_reference")
+        self.fixed_world_from_camera = (
+            None
+            if fixed_reference is None
+            else RigidTransform.from_dict(fixed_reference)
+        )
         self.robot_pose_config = dict(config.get("robot_pose", {}))
         self.visual_joint_bias_deg = {
             str(name): float(value)
@@ -564,7 +593,7 @@ class AprilTagPoseTracker:
         self.marker_size_verified = bool(config.get("marker_size_verified", False))
         self._joint_history: dict[str, tuple[float, int]] = {}
         self._previous_floor_feet: dict[int, tuple[np.ndarray, float | None]] = {}
-        self._previous_world_from_camera: RigidTransform | None = None
+        self._previous_world_from_camera = self.fixed_world_from_camera
         self._previous_camera_from_tag: dict[int, RigidTransform] = {}
         self.tag_labels = {
             int(raw_id): str(spec.get("label", spec.get("frame", f"tag {raw_id}")))
@@ -592,7 +621,7 @@ class AprilTagPoseTracker:
         self.foot_tracker.reset()
         self._joint_history.clear()
         self._previous_floor_feet.clear()
-        self._previous_world_from_camera = None
+        self._previous_world_from_camera = self.fixed_world_from_camera
         self._previous_camera_from_tag.clear()
 
     @staticmethod
@@ -880,10 +909,21 @@ class AprilTagPoseTracker:
             self.floor_tags,
             camera_matrix,
             distortion,
-            marker_size_m=self.marker_size_m,
+            marker_size_m=self.floor_marker_size_m,
+            marker_sizes_m=self.floor_marker_sizes_m,
             previous_world_from_camera=self._previous_world_from_camera,
         )
-        if reference is None:
+        fixed_reference_used = (
+            reference is None and self.fixed_world_from_camera is not None
+        )
+        if fixed_reference_used:
+            assert self.fixed_world_from_camera is not None
+            world_from_camera = self.fixed_world_from_camera
+            reference_name = "floor"
+            preferred_normal_camera = world_from_camera.rotation.inv().apply(
+                [0.0, 0.0, 1.0]
+            )
+        elif reference is None:
             world_from_camera = RigidTransform.identity()
             reference_name = "camera"
             preferred_normal_camera = None
@@ -912,11 +952,16 @@ class AprilTagPoseTracker:
                         ),
                     )
                 else:
+                    pose_marker_size_m = (
+                        self.floor_marker_sizes_m[detection.tag_id]
+                        if detection.tag_id in self.floor_tags
+                        else self.marker_size_m
+                    )
                     poses.append(estimate_tag_pose(
                         detection,
                         camera_matrix,
                         distortion,
-                        marker_size_m=self.marker_size_m,
+                        marker_size_m=pose_marker_size_m,
                         preferred_normal_camera=preferred_normal_camera,
                     ))
             except (ValueError, cv2.error):
@@ -1047,6 +1092,7 @@ class AprilTagPoseTracker:
             "native_luma_detection": detection_gray is not None,
             "tag_family": TAG_FAMILY,
             "marker_size_m": self.marker_size_m,
+            "floor_marker_size_m": self.floor_marker_size_m,
             "camera_calibration_approximate": self.calibration.approximate,
             "marker_size_verified": self.marker_size_verified,
             "pose_reference": reference_name,
@@ -1058,7 +1104,15 @@ class AprilTagPoseTracker:
             "pose_failure_tag_ids": pose_failures,
             "detections": serialized_detections,
             "world_reference": (
-                None if reference is None else {
+                {
+                    "source": "fixed_camera",
+                    "floor_tag_ids": [],
+                    "reprojection_rms_px": None,
+                    "world_from_camera": world_from_camera.to_dict(),
+                }
+                if fixed_reference_used
+                else None if reference is None else {
+                    "source": "floor_tags",
                     "floor_tag_ids": list(reference.floor_tag_ids),
                     "reprojection_rms_px": round(
                         reference.reprojection_rms_px, 4
@@ -1577,7 +1631,11 @@ class AprilTagPoseTracker:
                     distortion,
                     rvec,
                     tvec,
-                    self.marker_size_m * 0.7,
+                    (
+                        self.floor_marker_sizes_m[detection.tag_id]
+                        if detection.tag_id in floor_ids
+                        else self.marker_size_m
+                    ) * 0.7,
                     thickness,
                 )
             center = detection.center_px.astype(int)

@@ -6,6 +6,8 @@ import type {
   FootTip,
   JointState,
   VisionState,
+  ZeroSurveyState,
+  ZeroSurveyTag,
 } from './types'
 
 const POLL_MS = 350
@@ -186,6 +188,260 @@ function ReportTable({
   )
 }
 
+function stateCopy(state: string) {
+  if (state === 'measured') return 'Recorded'
+  if (state === 'seen_needs_another_view') return 'Another view'
+  return 'Find it'
+}
+
+function surveyStep(status?: string) {
+  if (status === 'connecting') return 1
+  if (status === 'locking_origin') return 2
+  if (['scanning', 'finishing', 'stopping'].includes(status || '')) return 3
+  if (['complete', 'incomplete'].includes(status || '')) return 4
+  return 1
+}
+
+function SurveySchematic({survey}: {survey: ZeroSurveyState}) {
+  const [view, setView] = useState<'iso' | 'top'>('iso')
+  const [selected, setSelected] = useState<number | null>(null)
+  const tags = survey.records.filter((tag) => tag.world_from_tag?.translation_m)
+  const path = survey.camera_path_m || []
+  const selectedTag = tags.find((tag) => tag.tag_id === selected)
+
+  if (!tags.length) {
+    return (
+      <div className="survey-map empty-map">
+        <div className="map-heading"><div><span>Live reconstruction</span><b>3D survey map</b></div><em>Awaiting origin lock</em></div>
+        <svg viewBox="0 0 760 440" role="img" aria-label="Hexapod survey schematic waiting for tag measurements">
+          <defs>
+            <linearGradient id="floorFade" x1="0" y1="0" x2="1" y2="1"><stop stopColor="#edf5ff"/><stop offset="1" stopColor="#f8fbff"/></linearGradient>
+          </defs>
+          <path className="map-floor" d="M90 328 L380 170 L680 330 L390 426 Z" fill="url(#floorFade)" />
+          {[0, 1, 2].map((row) => [0, 1, 2].map((column) => (
+            <g key={`${row}-${column}`} className="ghost-floor-tag" transform={`translate(${178 + column * 164 - row * 43} ${322 - row * 56 + column * 9})`}><rect x="-16" y="-10" width="32" height="20" rx="4"/><circle r="3"/></g>
+          )))}
+          <g className="ghost-robot">
+            <path d="M315 248 L352 219 L416 221 L452 250 L416 282 L351 280 Z" />
+            {[[335,244,250,208,183,196],[338,260,246,271,184,293],[366,279,333,354,291,391],[405,280,444,354,490,392],[431,260,528,273,598,301],[430,242,525,210,598,192]].map((points, index) => <polyline key={index} points={points.join(' ')} />)}
+          </g>
+          <text x="380" y="80" textAnchor="middle">Your measured tags and orientations will appear here</text>
+        </svg>
+      </div>
+    )
+  }
+
+  const projectRaw = (point: [number, number, number]) => view === 'top'
+    ? [point[0], -point[1]]
+    : [(point[0] - point[1]) * 0.866, -(point[2] * 1.7 + (point[0] + point[1]) * 0.34)]
+  const rawPoints = [
+    ...tags.map((tag) => projectRaw(tag.world_from_tag.translation_m)),
+    ...path.map((point) => projectRaw(point)),
+  ]
+  const xs = rawPoints.map((point) => point[0])
+  const ys = rawPoints.map((point) => point[1])
+  const minX = Math.min(...xs); const maxX = Math.max(...xs)
+  const minY = Math.min(...ys); const maxY = Math.max(...ys)
+  const scale = Math.min(620 / Math.max(0.35, maxX - minX), 330 / Math.max(0.25, maxY - minY))
+  const project = (point: [number, number, number]) => {
+    const raw = projectRaw(point)
+    return [70 + (raw[0] - minX) * scale, 55 + (raw[1] - minY) * scale]
+  }
+  const tagByFrame = new Map(tags.filter((tag) => tag.robot_frame).map((tag) => [tag.robot_frame, tag]))
+  const body = tagByFrame.get('body')
+  const connections: Array<[ZeroSurveyTag, ZeroSurveyTag]> = []
+  for (let leg = 0; leg < 6; leg += 1) {
+    const hip = tagByFrame.get(`L${leg}_coxa`)
+    const knee = tagByFrame.get(`L${leg}_femur`)
+    if (body && hip) connections.push([body, hip])
+    if (hip && knee) connections.push([hip, knee])
+  }
+  const pathPoints = path.map((point) => project(point).join(',')).join(' ')
+
+  return (
+    <div className="survey-map">
+      <div className="map-heading">
+        <div><span>Live reconstruction</span><b>3D survey map</b></div>
+        <div className="map-view-toggle"><button className={view === 'iso' ? 'active' : ''} onClick={() => setView('iso')}>Isometric</button><button className={view === 'top' ? 'active' : ''} onClick={() => setView('top')}>Top</button></div>
+      </div>
+      <svg viewBox="0 0 760 440" role="img" aria-label="Measured robot and floor AprilTags in three dimensions">
+        <defs>
+          <pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse"><path d="M34 0H0V34" fill="none" stroke="#dfe9f3" strokeWidth="1"/></pattern>
+          <filter id="tagShadow" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="3" stdDeviation="3" floodColor="#17324d" floodOpacity=".16"/></filter>
+        </defs>
+        <rect x="18" y="18" width="724" height="404" rx="20" fill="url(#grid)" />
+        {connections.map(([first, second]) => {
+          const a = project(first.world_from_tag.translation_m); const b = project(second.world_from_tag.translation_m)
+          return <line key={`${first.tag_id}-${second.tag_id}`} className="robot-link" x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} />
+        })}
+        {path.length > 1 && <polyline className="phone-path" points={pathPoints} />}
+        {tags.map((tag) => {
+          const point = tag.world_from_tag.translation_m
+          const center = project(point)
+          const orientation = tag.tag_y_world
+          const arrow = orientation ? project([
+            point[0] + orientation[0] * 0.045,
+            point[1] + orientation[1] * 0.045,
+            point[2] + orientation[2] * 0.045,
+          ]) : null
+          const role = tag.role === 'robot' ? 'robot' : tag.role === 'unknown' ? 'extra' : 'floor'
+          return (
+            <g key={tag.tag_id} className={`map-tag ${role} ${tag.stable ? 'stable' : 'warming'} ${selected === tag.tag_id ? 'selected' : ''}`} transform={`translate(${center[0]} ${center[1]})`} onClick={() => setSelected(tag.tag_id)}>
+              {view === 'iso' && point[2] > 0.015 && <line className="height-stem" x1="0" y1="0" x2="0" y2={Math.min(80, point[2] * scale * 1.4)} />}
+              {arrow && <line className="orientation-arrow" x1="0" y1="0" x2={arrow[0] - center[0]} y2={arrow[1] - center[1]} />}
+              <rect x="-12" y="-9" width="24" height="18" rx="4" filter="url(#tagShadow)" />
+              <circle r="3" />
+              <text x="16" y="-10">#{tag.tag_id}</text>
+              <title>{`${tag.label || role} · ${tag.observations} observations`}</title>
+            </g>
+          )
+        })}
+        {survey.camera_position_m && (() => { const camera = project(survey.camera_position_m); return <g className="phone-marker" transform={`translate(${camera[0]} ${camera[1]})`}><path d="M0 -10 L8 9 L0 6 L-8 9 Z"/><text x="13" y="5">iPhone</text></g> })()}
+        <g className="map-axis" transform="translate(54 376)"><line x2="42"/><line y2="-42"/><text x="47" y="4">x</text><text x="-4" y="-49">z</text></g>
+      </svg>
+      <div className="map-legend"><span><i className="robot" />Robot mount</span><span><i className="floor" />Floor tag</span><span><i className="extra" />Discovered extra</span><span className="legend-arrow">↗ tag +Y orientation</span></div>
+      {selectedTag && <div className="selected-tag"><b>Tag #{selectedTag.tag_id}</b><span>{selectedTag.label || selectedTag.role}</span><span>{selectedTag.observations} views · {selectedTag.translation_spread_mm?.toFixed(1) || '—'} mm spread · {selectedTag.rotation_spread_deg?.toFixed(1) || '—'}°</span></div>}
+    </div>
+  )
+}
+
+function ZeroSurveyWorkspace({
+  state,
+  error,
+  busy,
+  floorIds,
+  setFloorIds,
+  originId,
+  setOriginId,
+  l0Id,
+  setL0Id,
+  bodyAnchorConfirmed,
+  setBodyAnchorConfirmed,
+  notice,
+  onStart,
+  onStop,
+  onSave,
+  onPublish,
+  onPoseCheck,
+}: {
+  state: VisionState | null
+  error: string | null
+  busy: boolean
+  floorIds: string
+  setFloorIds: (value: string) => void
+  originId: string
+  setOriginId: (value: string) => void
+  l0Id: string
+  setL0Id: (value: string) => void
+  bodyAnchorConfirmed: boolean
+  setBodyAnchorConfirmed: (value: boolean) => void
+  notice: string | null
+  onStart: () => void
+  onStop: () => void
+  onSave: () => void
+  onPublish: () => void
+  onPoseCheck: () => void
+}) {
+  const survey = state?.zero_survey
+  const step = surveyStep(survey?.status)
+  const active = survey?.active || false
+  const measuredRobot = survey?.progress.robot_positions.filter((item) => item.state === 'measured').length || 0
+  const measuredFloor = survey?.progress.ground_tag_status.filter((item) => item.state === 'measured').length || 0
+  const totalRobot = survey?.progress.robot_positions.length || 13
+  const totalFloor = survey?.progress.ground_tag_status.length || 7
+  const complete = survey?.status === 'complete'
+
+  return (
+    <main className="calibration-app">
+      <header className="studio-header">
+        <div className="brand-lockup"><div className="brand-mark">HX</div><div><div className="eyebrow">Hexapod 1 · Calibration studio</div><h1>AprilTag geometry survey</h1></div></div>
+        <nav className="app-nav" aria-label="Vision tools"><button className="active">Tag survey</button><button onClick={onPoseCheck}>Pose check</button></nav>
+        <div className="read-only-badge"><i /> Camera only · robot stays still</div>
+      </header>
+
+      {(error || survey?.error) && <div className="error-banner"><b>Calibration needs attention:</b> {error || survey?.error}</div>}
+
+      <div className="survey-shell">
+        <aside className="wizard-rail">
+          <div className="rail-intro"><span>Guided setup</span><b>About 3–5 minutes</b></div>
+          {[
+            ['Connect', 'Start the iPhone stream'],
+            ['Set origin', `Lock floor tag #${survey?.defaults.origin_tag_id ?? 104}`],
+            ['Walk around', 'Record every position'],
+            ['Review', 'Save and sync'],
+          ].map(([title, detail], index) => {
+            const number = index + 1
+            return <div key={title} className={`wizard-step ${number === step ? 'current' : ''} ${number < step ? 'done' : ''}`}><span>{number < step ? '✓' : number}</span><div><b>{title}</b><small>{detail}</small></div></div>
+          })}
+          <div className="l0-callout"><b>L0 stays anchored by tag #{survey?.defaults.leg_zero_anchor_tag_id ?? 1}</b><span>Change this only if that particular hip tag was replaced.</span></div>
+        </aside>
+
+        <section className="survey-main">
+          <div className={`guide-card status-${survey?.status || 'idle'}`}>
+            <div className="guide-icon">{complete ? '✓' : active ? <span className="pulse-rings" /> : '◎'}</div>
+            <div><span className="guide-kicker">Step {step} of 4 · {(survey?.status || 'ready').replaceAll('_', ' ')}</span><h2>{survey?.instruction || 'Put the robot in zero pose and start when ready.'}</h2><p>{survey?.message || 'The scan records tag identity, position, orientation, floor spacing, and the geometry identifiable from this pose.'}</p></div>
+            {active && <button className="stop-survey" disabled={busy} onClick={onStop}>Stop & save partial</button>}
+          </div>
+
+          {!active && !complete && survey?.status !== 'incomplete' && (
+            <section className="setup-grid">
+              <div className="setup-card primary-setup">
+                <div className="eyebrow">Before you start</div><h2>Robot down. Tags up. Phone ready.</h2>
+                <div className="prep-list"><span><i>1</i>Place the stationary robot in its zero pose.</span><span><i>2</i>Spread floor tags 100–105 and 112 around it.</span><span><i>3</i>Connect the iPhone by USB and open Record3D.</span><span><i>4</i>When the phone says “waiting for connection,” press Start below, then tap its red stream button.</span></div>
+                <button className="launch-survey" disabled={busy || !survey?.available} onClick={onStart}>{busy ? 'Starting…' : 'Start iPhone LiDAR calibration'}<span>→</span></button>
+              </div>
+              <div className="setup-card settings-card">
+                <div className="panel-heading"><div><div className="eyebrow">Known setup</div><h2>Tag references</h2></div><span className="defaults-chip">editable</span></div>
+                <label>Floor origin tag<input value={originId} inputMode="numeric" onChange={(event) => setOriginId(event.target.value)} /></label>
+                <label>Floor tags to find<input value={floorIds} onChange={(event) => setFloorIds(event.target.value)} /></label>
+                <label>L0 hip identity tag<input value={l0Id} inputMode="numeric" onChange={(event) => setL0Id(event.target.value)} /></label>
+                <p>The other robot IDs may change. Calibration fills each named physical position with whichever stable tag is actually there.</p>
+                <div className={`lab-preflight ${survey?.robot_lab.status === 'ready' ? 'ready' : ''}`}><i />
+                  <span><b>{survey?.robot_lab.status === 'ready' ? 'Robot Lab ready' : 'Robot Lab token needed'}</b><small>{survey?.robot_lab.status === 'ready' ? 'The reviewed config will publish automatically.' : 'Set HEXAPOD_LAB_TOKEN for automatic publication; the scan can still run now.'}</small></span>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {(active || complete || survey?.status === 'incomplete') && survey && (
+            <>
+              <div className="live-grid">
+                <section className="camera-card">
+                  <div className="map-heading"><div><span>Record3D RGB + LiDAR</span><b>What the phone sees</b></div><em>{survey.detected_tag_ids.length ? `IDs ${survey.detected_tag_ids.join(', ')}` : 'Looking for tags…'}</em></div>
+                  <div className="survey-camera">
+                    {survey.camera_frame_available ? <img src={`/api/vision/zero-survey/frame.jpg?v=${survey.camera_frame_version}`} alt="Live iPhone view with identified AprilTags" /> : <div className="waiting-camera"><div className="phone-glyph">▯</div><b>Waiting for the iPhone</b><span>Start USB streaming in Record3D. The first frame will appear here.</span></div>}
+                  </div>
+                  <div className="camera-stats"><span><b>{survey.frame_sequence}</b> frames</span><span><b>{survey.detected_tag_ids.length}</b> IDs now</span><span><b>{survey.elapsed_s.toFixed(0)}s</b> elapsed</span></div>
+                </section>
+                <SurveySchematic survey={survey} />
+              </div>
+
+              <section className="coverage-board">
+                <div className="coverage-heading"><div><div className="eyebrow">Position-based coverage</div><h2>{measuredRobot}/{totalRobot} robot positions · {measuredFloor}/{totalFloor} floor tags</h2></div><div className="coverage-total"><span style={{width: `${((measuredRobot + measuredFloor) / Math.max(1, totalRobot + totalFloor)) * 100}%`}} /></div></div>
+                <div className="position-groups">
+                  <div><h3>Robot positions</h3><div className="position-list">{survey.progress.robot_positions.map((item) => <div key={item.position} className={`position-item ${item.state}`}><i>{item.state === 'measured' ? '✓' : item.state === 'seen_needs_another_view' ? '↻' : '·'}</i><span><b>{item.position}</b><small>{item.tag_id === null ? 'No tag seen yet' : `tag #${item.tag_id}${item.replacement ? ' · replacement' : ''}`}</small></span><em>{stateCopy(item.state)}</em></div>)}</div></div>
+                  <div><h3>Floor tags</h3><div className="floor-list">{survey.progress.ground_tag_status.map((item) => <div key={item.tag_id} className={`floor-item ${item.state}`}><b>#{item.tag_id}</b><span>{stateCopy(item.state)}</span><small>{item.observations} views</small></div>)}</div>{survey.progress.discovered_unexpected_tag_ids.length > 0 && <div className="extra-tags"><b>Also discovered</b><span>{survey.progress.discovered_unexpected_tag_ids.map((id) => `#${id}`).join(', ')}</span></div>}</div>
+                </div>
+              </section>
+            </>
+          )}
+
+          {(complete || survey?.status === 'incomplete') && survey && (
+            <section className={`review-card ${complete ? 'complete' : 'partial'}`}>
+              <div className="review-heading"><div className="review-check">{complete ? '✓' : '!'}</div><div><div className="eyebrow">Survey review</div><h2>{complete ? 'Every required position is recorded' : 'A partial survey was saved'}</h2><p>{complete ? 'Review the schematic and confirm the one fixed body-frame reference before creating the robot configuration.' : survey.instruction}</p></div><a href="/api/vision/zero-survey/result" download="zero-pose-survey.json">Download measurements</a></div>
+              {complete && <div className="finalize-grid"><label className="anchor-confirm"><input type="checkbox" checked={bodyAnchorConfirmed} onChange={(event) => setBodyAnchorConfirmed(event.target.checked)} /><span><b>Chassis tag #0 is still in its original mount and orientation.</b><small>This is the one fixed reference needed to learn all other tag mounts.</small></span></label><button className="save-config" disabled={busy || !bodyAnchorConfirmed || survey.reviewed_config_available} onClick={onSave}>{survey.reviewed_config_available ? 'Configuration saved' : 'Save configuration & update Robot Lab'}<span>→</span></button></div>}
+              {notice && <div className="success-notice">{notice}</div>}
+              {survey.robot_lab.status === 'published' && <div className="lab-sync published"><b>Robot Lab updated</b><span>Survey and calibrated tracker configuration are saved as durable artifacts.</span>{survey.robot_lab.url && <a href={survey.robot_lab.url} target="_blank" rel="noreferrer">Open result ↗</a>}</div>}
+              {['failed', 'not_configured'].includes(survey.robot_lab.status) && survey.reviewed_config_available && <div className="lab-sync failed"><div><b>Robot Lab still needs this update</b><span>{survey.robot_lab.error || 'The vision server needs HEXAPOD_LAB_TOKEN.'}</span></div><button disabled={busy} onClick={onPublish}>Retry sync</button></div>}
+              {survey.status === 'incomplete' && <button className="secondary restart" disabled={busy} onClick={onStart}>Start a fresh scan</button>}
+            </section>
+          )}
+        </section>
+      </div>
+    </main>
+  )
+}
+
 export default function App() {
   const [state, setState] = useState<VisionState | null>(null)
   const [report, setReport] = useState<CalibrationReport | null>(null)
@@ -201,6 +457,13 @@ export default function App() {
   const [surveyRecoveries, setSurveyRecoveries] = useState('2')
   const [surveyAck, setSurveyAck] = useState(false)
   const [showSurvey, setShowSurvey] = useState(false)
+  const [activeView, setActiveView] = useState<'survey' | 'pose'>('survey')
+  const [zeroFloorIds, setZeroFloorIds] = useState('100, 101, 102, 103, 104, 105, 112')
+  const [zeroOriginId, setZeroOriginId] = useState('104')
+  const [zeroL0Id, setZeroL0Id] = useState('1')
+  const [zeroDefaultsLoaded, setZeroDefaultsLoaded] = useState(false)
+  const [bodyAnchorConfirmed, setBodyAnchorConfirmed] = useState(false)
+  const [zeroNotice, setZeroNotice] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -232,6 +495,14 @@ export default function App() {
     if (state?.camera.requested_index === undefined) return
     setCameraInput(String(state.camera.requested_index))
   }, [state?.camera.requested_index])
+
+  useEffect(() => {
+    if (!state?.zero_survey?.defaults || zeroDefaultsLoaded) return
+    setZeroFloorIds(state.zero_survey.defaults.floor_tag_ids.join(', '))
+    setZeroOriginId(String(state.zero_survey.defaults.origin_tag_id))
+    setZeroL0Id(String(state.zero_survey.defaults.leg_zero_anchor_tag_id))
+    setZeroDefaultsLoaded(true)
+  }, [state?.zero_survey?.defaults, zeroDefaultsLoaded])
 
   const switchCamera = async (index: number) => {
     setBusy(true)
@@ -351,6 +622,97 @@ export default function App() {
     }
   }
 
+  const startZeroSurvey = async () => {
+    setBusy(true)
+    setZeroNotice(null)
+    setBodyAnchorConfirmed(false)
+    try {
+      const floor_tag_ids = zeroFloorIds.split(',').map((value) => Number(value.trim())).filter(Number.isFinite)
+      if (!floor_tag_ids.length) throw new Error('Enter at least one floor tag ID')
+      await api('/api/vision/zero-survey/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          record3d_device: state?.zero_survey.defaults.record3d_device ?? 0,
+          origin_tag_id: Number(zeroOriginId),
+          floor_tag_ids,
+          marker_size_mm: state?.zero_survey.defaults.marker_size_mm ?? 27,
+          body_anchor_tag_id: state?.zero_survey.defaults.body_anchor_tag_id ?? 0,
+          leg_zero_anchor_tag_id: Number(zeroL0Id),
+        }),
+      })
+      setError(null)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const stopZeroSurvey = async () => {
+    setBusy(true)
+    try {
+      await api('/api/vision/zero-survey/stop', {method: 'POST', body: '{}'})
+      setError(null)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const saveZeroSurvey = async () => {
+    setBusy(true)
+    try {
+      const saved = await api<{config_path: string; robot_lab: {status: string; url?: string; error?: string}}>('/api/vision/zero-survey/save', {
+        method: 'POST',
+        body: JSON.stringify({confirm_body_anchor_unchanged: bodyAnchorConfirmed}),
+      })
+      setZeroNotice(saved.robot_lab.status === 'published'
+        ? 'Configuration saved locally and published to Robot Lab.'
+        : `Configuration saved locally. Robot Lab: ${saved.robot_lab.error || saved.robot_lab.status}.`)
+      setError(null)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const publishZeroSurvey = async () => {
+    setBusy(true)
+    try {
+      const published = await api<{status: string; url?: string; error?: string}>('/api/vision/zero-survey/publish', {method: 'POST', body: '{}'})
+      setZeroNotice(published.status === 'published' ? 'Robot Lab is updated.' : published.error || published.status)
+      setError(null)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (activeView === 'survey') {
+    return <ZeroSurveyWorkspace
+      state={state}
+      error={error}
+      busy={busy}
+      floorIds={zeroFloorIds}
+      setFloorIds={setZeroFloorIds}
+      originId={zeroOriginId}
+      setOriginId={setZeroOriginId}
+      l0Id={zeroL0Id}
+      setL0Id={setZeroL0Id}
+      bodyAnchorConfirmed={bodyAnchorConfirmed}
+      setBodyAnchorConfirmed={setBodyAnchorConfirmed}
+      notice={zeroNotice}
+      onStart={() => void startZeroSurvey()}
+      onStop={() => void stopZeroSurvey()}
+      onSave={() => void saveZeroSurvey()}
+      onPublish={() => void publishZeroSurvey()}
+      onPoseCheck={() => setActiveView('pose')}
+    />
+  }
+
   const safety = state?.pose.safety
   const readiness = state?.readiness
   const collecting = state?.calibration.status === 'collecting'
@@ -375,6 +737,7 @@ export default function App() {
             <h1>Visual calibration</h1>
           </div>
         </div>
+        <nav className="app-nav compact" aria-label="Vision tools"><button onClick={() => setActiveView('survey')}>Tag survey</button><button className="active">Pose check</button></nav>
         <div className="top-status">
           <span className={surveyActive ? 'motion-dot' : 'readonly-dot'} />
           {surveyActive ? 'Guarded gait survey active' : 'Observation · survey motion gated'}

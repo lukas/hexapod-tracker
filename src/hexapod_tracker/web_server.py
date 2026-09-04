@@ -16,6 +16,7 @@ import math
 from http import HTTPStatus
 from pathlib import Path
 import statistics
+import sys
 import threading
 import time
 from typing import Any, Mapping, Sequence
@@ -26,6 +27,7 @@ import cv2
 from .apriltag_vision import AprilTagPoseTracker
 from .joint_contract import FRAME_ROBOT_ABS, JOINT_CONTRACT
 from .paths import CONFIG_DIR, DEFAULT_REPORT_DIR, WEB_DIST_DIR
+from .zero_survey_web import ZeroPoseSurveyManager
 from .track import (
     FeedbackClient,
     _resize_for_processing,
@@ -427,6 +429,7 @@ class VisionRuntime:
         capture_fps: float = 30.0,
         capture_factory: Any | None = None,
         survey_factory: Any | None = None,
+        zero_survey_factory: Any | None = None,
     ) -> None:
         config = json.loads(config_path.read_text(encoding="utf-8"))
         self.config_path = config_path
@@ -501,6 +504,9 @@ class VisionRuntime:
             robot_url=robot_url,
             vision_runtime=self,
         )
+        self.zero_survey = (zero_survey_factory or ZeroPoseSurveyManager)(
+            config_path=config_path,
+        )
         self.refresh_camera_devices()
 
     def start(self) -> None:
@@ -516,6 +522,7 @@ class VisionRuntime:
     def stop(self) -> None:
         """Shut down the worker when the shared web server exits."""
         self.gait_survey.shutdown()
+        self.zero_survey.shutdown()
         self._shutdown.set()
         self._camera_enabled.clear()
         with self._frame_ready:
@@ -848,6 +855,7 @@ class VisionRuntime:
                 # bus poller during motion.
                 "feedback": latest.get("encoder_feedback"),
                 "survey": self.gait_survey.public_state(),
+                "zero_survey": self.zero_survey.public_state(),
                 "read_only": not self.motion_control_available,
                 "motion_control_scope": (
                     "acknowledged_guarded_gait_survey"
@@ -1269,6 +1277,24 @@ def wrap_handler_with_vision(
                     )
                 else:
                     self._vision_json(HTTPStatus.OK, report)
+            elif path == "/api/vision/zero-survey/frame.jpg":
+                jpeg = runtime.zero_survey.latest_camera_jpeg()
+                if jpeg is None:
+                    self._vision_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"ok": False, "error": "no Record3D frame available"},
+                    )
+                else:
+                    self._vision_send_bytes(HTTPStatus.OK, jpeg, "image/jpeg")
+            elif path == "/api/vision/zero-survey/result":
+                result = runtime.zero_survey.result()
+                if result is None:
+                    self._vision_json(
+                        HTTPStatus.NOT_FOUND,
+                        {"ok": False, "error": "no zero-pose survey result yet"},
+                    )
+                else:
+                    self._vision_json(HTTPStatus.OK, result)
             elif path.startswith("/api/vision/"):
                 self._vision_json(
                     HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"}
@@ -1337,6 +1363,32 @@ def wrap_handler_with_vision(
                     self._vision_json(
                         HTTPStatus.ACCEPTED,
                         runtime.gait_survey.stop(),
+                    )
+                elif path == "/api/vision/zero-survey/start":
+                    body = self._vision_read_json()
+                    if runtime.public_state()["camera"]["enabled"]:
+                        runtime.disable_camera()
+                    self._vision_json(
+                        HTTPStatus.ACCEPTED,
+                        runtime.zero_survey.start(body),
+                    )
+                elif path == "/api/vision/zero-survey/stop":
+                    self._vision_read_json()
+                    self._vision_json(
+                        HTTPStatus.ACCEPTED,
+                        runtime.zero_survey.stop(),
+                    )
+                elif path == "/api/vision/zero-survey/save":
+                    body = self._vision_read_json()
+                    self._vision_json(
+                        HTTPStatus.OK,
+                        runtime.zero_survey.save_reviewed_config(body),
+                    )
+                elif path == "/api/vision/zero-survey/publish":
+                    self._vision_read_json()
+                    self._vision_json(
+                        HTTPStatus.OK,
+                        runtime.zero_survey.publish_to_robot_lab(),
                     )
                 else:
                     self._vision_json(

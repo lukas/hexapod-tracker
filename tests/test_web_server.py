@@ -227,6 +227,13 @@ def test_shared_server_worker_leaves_camera_off_until_explicit_start() -> None:
         assert state["camera"]["enabled"] is False
         assert state["camera"]["status"] == "off"
         assert state["readiness"]["status"] == "camera_off"
+        assert state["zero_survey"]["available"] is True
+        assert state["zero_survey"]["active"] is False
+        assert state["zero_survey"]["defaults"]["floor_tag_ids"] == [
+            100, 101, 102, 103, 104, 105, 112
+        ]
+        assert len(state["zero_survey"]["progress"]["robot_positions"]) == 13
+        assert state["zero_survey"]["motor_commands_sent"] is False
 
         runtime.enable_camera(1)
         deadline = time.monotonic() + 1.0

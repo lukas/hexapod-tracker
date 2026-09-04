@@ -47,6 +47,9 @@ dependencies = [
 dev = [
     { name = "pytest" },
 ]
+rgbd = [
+    { name = "record3d" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -54,9 +57,10 @@ requires-dist = [
     { name = "opencv-contrib-python", specifier = ">=4.8,<6" },
     { name = "pyobjc-framework-avfoundation", marker = "sys_platform == 'darwin'", specifier = ">=12.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "record3d", marker = "extra == 'rgbd'", specifier = ">=1.4.1" },
     { name = "scipy", specifier = ">=1.10" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "rgbd"]
 
 [[package]]
 name = "iniconfig"
@@ -326,6 +330,25 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313", size = 1636369, upload-time = "2026-06-19T10:58:32.857Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c", size = 386536, upload-time = "2026-06-19T10:58:31.347Z" },
+]
+
+[[package]]
+name = "record3d"
+version = "1.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/18/bf/1643deceae39fe711d6444742cf3865925c080b0c4061ea59ca8f82a2e22/record3d-1.4.1.tar.gz", hash = "sha256:5bd378ab630f7404de6cd5831dd83b35ad9d4b35f9de4162a2fddbd4e22d70ac", size = 603886, upload-time = "2025-04-21T15:10:06.844Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c9/2d/223eca37d84222ac461c3e0f282ea62eb7f81ac803f7e7883c519c02c6c2/record3d-1.4.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2cf7e9a3a67204c40aed0ca4cd94332b117c6d6e75bd3674ae26e2f8b0af5269", size = 255348, upload-time = "2025-04-21T18:34:45.597Z" },
+    { url = "https://files.pythonhosted.org/packages/e6/20/a5d4462e39a1273b0ee3190dde59bc3b2a55dac639e09a69fd7357200f3a/record3d-1.4.1-cp310-cp310-win_amd64.whl", hash = "sha256:005ad038932eb6ada3d03b5fda44dd3009074b2e1eafc6241e34968c4dc5bf6d", size = 174058, upload-time = "2025-04-21T18:34:46.924Z" },
+    { url = "https://files.pythonhosted.org/packages/6d/c7/586def5ad3981be394dba01c41d1e4d870126f4129a77cfdedac8061573f/record3d-1.4.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e16fd0a5f05e7eb81995b6f8c4812ebbb75e9a5b22f1eac538e19156db7e8446", size = 257392, upload-time = "2025-04-21T18:34:48.86Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/c5/59d2fabed31b7f455ee7caae96fe6220a8aefc780242d2d2e3bcdf16f0ea/record3d-1.4.1-cp311-cp311-win_amd64.whl", hash = "sha256:cc23bda2f7f91eba565a1db57e5249f705e39d0d8d98c748e8829b50f0aa9d59", size = 174888, upload-time = "2025-04-21T18:34:50.113Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/c2/be526e90451a6faad21c2e4eb6ab44c8b782529c147fbb2778ffcb32b987/record3d-1.4.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8d692cd0fb66ffdc0a6b133778021f92798b072a9c58e689294f802aaec054c2", size = 256423, upload-time = "2025-04-21T18:34:51.749Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/7f/11de992723562dd1bdd6cc62f06e3f29c7f19b008ca554eae1c7a1e56ff5/record3d-1.4.1-cp312-cp312-win_amd64.whl", hash = "sha256:58817df3c6a3f3fb0f7b1822e44c68350cc66c5243f924439da1e915d0f65b5a", size = 174614, upload-time = "2025-04-21T18:34:53.493Z" },
 ]
 
 [[package]]

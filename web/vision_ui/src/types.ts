@@ -92,6 +92,105 @@ export interface GaitSurveyState {
   hard_stop_policy: string
 }
 
+export interface ZeroSurveyPosition {
+  position: string
+  frame?: string
+  configured_tag_id?: number | null
+  declared_tag_id?: number | null
+  tag_id: number | null
+  replacement: boolean
+  identity_reference: boolean
+  state: 'not_seen' | 'seen_needs_another_view' | 'measured'
+  observations?: number
+  used_observations?: number
+  expected_world_position_m?: [number, number, number] | null
+}
+
+export interface ZeroSurveyTag {
+  tag_id: number
+  role: 'robot' | 'ground' | 'calibration_anchor' | 'unknown'
+  label?: string
+  robot_frame?: string
+  world_from_tag: {
+    translation_m: [number, number, number]
+    quaternion_xyzw?: [number, number, number, number]
+  }
+  euler_xyz_deg?: [number, number, number]
+  tag_y_world?: [number, number, number]
+  height_above_ground_mm?: number
+  observations: number
+  used_observations: number
+  translation_spread_mm?: number
+  rotation_spread_deg?: number
+  stable: boolean
+  possible_duplicate_id_or_tracking_jump?: boolean
+}
+
+export interface ZeroSurveyState {
+  available: boolean
+  active: boolean
+  status: 'idle' | 'connecting' | 'locking_origin' | 'scanning' | 'finishing' | 'stopping' | 'complete' | 'incomplete' | 'failed'
+  phase: 'setup' | 'connect' | 'anchor' | 'survey' | 'review'
+  message: string
+  instruction: string
+  error: string | null
+  started_unix: number | null
+  completed_unix: number | null
+  run_dir: string | null
+  result_available: boolean
+  reviewed_config_path: string | null
+  reviewed_config_available: boolean
+  camera_frame_available: boolean
+  camera_frame_version: number | null
+  anchor_ids: number[]
+  alignment_count: number
+  anchor_frames: number
+  detected_tag_ids: number[]
+  elapsed_s: number
+  frame_sequence: number
+  progress: {
+    complete: boolean
+    robot_positions: ZeroSurveyPosition[]
+    ground_tag_status: Array<{
+      tag_id: number
+      state: 'not_seen' | 'seen_needs_another_view' | 'measured'
+      observations: number
+      used_observations?: number
+    }>
+    unseen_robot_positions: string[]
+    robot_positions_needing_another_view: string[]
+    unseen_ground_tag_ids: number[]
+    ground_tags_needing_another_view: number[]
+    stable_tag_ids: number[]
+    discovered_unexpected_tag_ids: number[]
+  }
+  records: ZeroSurveyTag[]
+  camera_path_m: Array<[number, number, number]>
+  camera_position_m: [number, number, number] | null
+  mount_learning: {
+    ok: boolean
+    error?: string
+    learned_mounts?: unknown[]
+  } | null
+  defaults: {
+    record3d_device: number
+    origin_tag_id: number
+    floor_tag_ids: number[]
+    marker_size_mm: number
+    body_anchor_tag_id: number
+    leg_zero_anchor_tag_id: number
+  }
+  log_tail: string[]
+  robot_lab: {
+    status: 'ready' | 'not_configured' | 'publishing' | 'published' | 'failed'
+    url: string | null
+    error: string | null
+    experiment_id?: string
+    artifacts?: string[]
+  }
+  motor_commands_sent: false
+}
+
 export interface VisionState {
   ok: boolean
   service: string
@@ -141,6 +240,7 @@ export interface VisionState {
   readiness: Readiness
   calibration: CalibrationState
   survey: GaitSurveyState
+  zero_survey: ZeroSurveyState
   pose: {
     image_size_px: [number, number] | null
     tags: Detection[]

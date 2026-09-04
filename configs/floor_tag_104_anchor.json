@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "tag_family": "tag36h11",
+  "marker_size_m": 0.027,
+  "world_frame": "tag 104 center; +x tag right; +y tag top; +z up from floor",
+  "floor_tags": {
+    "104": {
+      "label": "survey floor origin",
+      "world_from_tag": {
+        "translation_m": [0.0, 0.0, 0.0],
+        "euler_xyz_deg": [0.0, 0.0, 0.0]
+      }
+    }
+  }
+}

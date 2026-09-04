@@ -7,13 +7,17 @@ by reading one module in isolation.
 ## The short version
 
 `hexapod-tracker` is the camera and AprilTag subsystem extracted from
-[`lukas/hexapod`](https://github.com/lukas/hexapod). It has three related uses:
+[`lukas/hexapod`](https://github.com/lukas/hexapod). It has four related uses:
 
 1. A simple multi-camera webpage for seeing USB feeds and tag detections.
 2. A calibrated single-camera pipeline for 6-D body/link pose, joint
    diagnostics, red foot-tip tracking, and optional read-only encoder
    comparison.
 3. Offline gait analysis and annotated telemetry-video generation.
+4. Optional iPhone LiDAR-assisted calibration of a fixed RGB camera against a
+   generated, dimensioned AprilTag board.
+5. A guided handheld zero-pose survey that discovers tags, maps floor markers,
+   and relearns non-anchor robot-tag mounts in an ARKit-tracked world frame.
 
 The package is observation software. It must not acquire authority to move the
 robot. The standalone web runtime deliberately installs
@@ -28,7 +32,7 @@ make check
 git status --short --branch
 ```
 
-`make check` currently runs 39 synthetic/off-robot Python tests and the React
+`make check` currently runs 58 synthetic/off-robot Python tests and the React
 type-check. It does not prove that a particular camera index, intrinsic
 calibration, tag placement, or physical measurement is valid.
 
@@ -127,8 +131,47 @@ grid. The UI contains gait-survey controls because the main robot repo supplies
 that adapter. In this standalone repo those routes are unavailable and the
 runtime reports `read_only: true`.
 
+`hexapod-vision-web` is the standalone local entry point at `:8898/vision`.
+Its default light Tag survey workflow wraps `hexapod-zero-survey`, publishes
+atomic live progress and a clean labelled camera JPEG, renders the tag geometry
+in SVG, and only creates the reviewed config after the operator confirms the
+unchanged chassis anchor. The final action publishes the survey and config to
+Robot Lab using its first-class calibration endpoint, with the older completed-
+result artifact API as a compatibility fallback.
+
 Do not add robot-control HTTP calls here to make the standalone UI's survey
 buttons work. That would break the intentional safety and ownership boundary.
+
+### iPhone RGB-D calibration path
+
+`hexapod-calibration-board` creates the printable board/map and
+`hexapod-rgbd-calibrate` consumes registered Record3D RGB, depth, confidence,
+and per-frame intrinsics. RGB tag corners initialize the existing mapped-floor
+PnP solve. A robust LiDAR plane then constrains distance, roll, and pitch in a
+joint least-squares refinement. Multiple stationary observations are averaged
+after translation/rotation outlier rejection.
+
+The output tracker config has separate `marker_size_m` (robot tags) and
+`floor_marker_size_m` (calibration tags), plus a
+`fixed_camera_world_reference`. `AprilTagPoseTracker` uses that fixed transform
+when mapped floor tags leave the image. `hexapod-track --record3d-device` keeps
+using Record3D and refreshes RGB intrinsics on every frame, avoiding a silent
+switch to a different Continuity Camera crop. See `docs/RGBD_CALIBRATION.md`.
+
+`hexapod-zero-survey` is the moving-phone companion. A repeated board sighting
+aligns Record3D's OpenGL/ARKit camera trajectory to the board world frame. A
+slow walk then aggregates every decoded tag's 6-D transform. Completion is one
+stable tag per named robot mount position plus every expected floor ID, not the
+continued presence of every old robot ID. A missing configured robot ID may be
+replaced by a nearby stable newly discovered ID after fitting the original
+calibration-photo layout to recognized tags. The configured L0 hip tag is the
+protected leg-number reference unless the operator explicitly supplies its new
+ID. The live dashboard distinguishes `not seen` from `seen, needs another view`
+and shows an isometric tag/orientation map and phone path. The updated config
+replaces surveyed floor poses and learns robot `frame_from_tag` values from a
+known stationary pose. One explicitly trusted body tag remains unchanged as the
+unavoidable body-frame gauge. A one-pose result is mount calibration plus
+static baselines, not independently identified link lengths or joint axes.
 
 ## Data flow
 
@@ -140,6 +183,16 @@ camera/image/video
   -> robot_abs yaw/hip diagnostics
   -> red foot-tip projection + unsigned knee evidence
   -> JSON/JSONL, annotated media, and web state
+
+optional registered iPhone RGB + depth + confidence
+  -> mapped board-tag corners + robust depth plane
+  -> fixed world_from_camera and measured RGB intrinsics
+  -> same AprilTagPoseTracker world frame after the board leaves view
+
+optional handheld Record3D ARKit trajectory + initial/revisited board
+  -> board-aligned moving camera poses
+  -> robust 6-D pose for every decoded robot/ground tag
+  -> floor-tag distances + non-anchor zero-pose mount updates
 
 optional GET /api/feedback
   -> encoder comparison only
@@ -222,7 +275,14 @@ force calibration, and component localization are separate questions.
 - `camera_server.py`: simple multi-camera MJPEG site and planar pose API.
 - `planar_pose.py`: per-camera homographies and cross-camera planar fusion.
 - `apriltag_vision.py`: calibrated tag detection, PnP/world pose, temporal
-  tracking, and combined frame diagnostics.
+  tracking, fixed-camera reference fallback, and combined frame diagnostics.
+- `calibration_board.py`: exact-size printable tag36h11 grid and matching map.
+- `rgbd_calibration.py`: registered depth sampling, robust plane fit, joint
+  RGB-D refinement, and fixed-camera consensus.
+- `rgbd_calibrate.py`: Record3D/offline capture and calibrated-config writer.
+- `tag_survey.py`: ARKit/OpenCV frame alignment, robust per-tag pose consensus,
+  floor-distance reporting, and zero-pose mount/config updates.
+- `zero_pose_survey.py`: guided live Record3D/offline walk-around CLI.
 - `housing_pose.py`: rigid transforms, kinematic frame fusion, and joint-angle
   reconstruction.
 - `foot_tip_tracking.py`: red boot-tip segmentation, assignment, and short
@@ -244,6 +304,10 @@ force calibration, and component localization are separate questions.
 - AprilTag support requires `opencv-contrib-python`, not `opencv-python`,
   because the detector uses `cv2.aruco`.
 - Native Mac capture needs the PyObjC AVFoundation framework.
+- iPhone depth is optional. On macOS, Record3D has no wheel; use
+  `uv run --with cmake uv sync --extra dev --extra rgbd` to build Record3D
+  1.4.1+ for the Record3D iOS 1.10+ USB stream. The import stays lazy so
+  normal camera tools do not require it.
 - `telemetry_video.py` shells out to `ffmpeg`, which is not a Python package.
 - UI changes require both `make check` and `make web-build`; commit the changed
   `web/vision_ui/dist` assets.
@@ -260,15 +324,20 @@ not assume the present wheel has self-contained defaults.
 
 In roughly descending value:
 
-1. Calibrate each Arducam's intrinsics at every capture mode actually used.
-2. Establish a measured common world/extrinsic calibration if true multi-view
-   3-D or stereo claims are needed.
-3. Replace the operator-described floor coordinates with a surveyed map.
-4. Measure tag-to-joint-axis mount transforms or add component-local markers
+1. Run physical fixed and handheld iPhone RGB-D smoke tests; record observed
+   depth, board-alignment, ARKit-drift, and per-tag spread thresholds.
+2. Capture multiple stationary, encoder-known poses with tibia-fixed tags, then
+   fit joint axes/link lengths separately from tag-mount transforms.
+3. Calibrate each Arducam's intrinsics at every capture mode actually used.
+4. Use one unmoved RGB-D board pose to establish a measured common frame if
+   true multi-view 3-D or stereo claims are needed.
+5. Replace provisional floor coordinates/yaws with a physical handheld survey
+   and eliminate duplicate tag IDs.
+6. Measure tag-to-joint-axis mount transforms or add component-local markers
    before trying to localize flex within an assembly.
-5. Add recorded-camera regression clips with expected tag/pose summaries. Keep
+7. Add recorded-camera regression clips with expected tag/pose summaries. Keep
    large media out of Git and document how to retrieve it.
-6. Make package resources wheel-safe if this project will be installed outside
+8. Make package resources wheel-safe if this project will be installed outside
    a source checkout.
 
 Before reporting a result, state separately: tag coverage, calibration quality,

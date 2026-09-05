@@ -253,8 +253,30 @@ class ZeroPoseSurveyManager:
                     )
                     instruction = "Reconnect the phone, then continue this calibration."
                 else:
-                    message = "The phone stream never connected; no measurements were saved."
-                    instruction = "Restart streaming in Record3D, then retry the connection."
+                    failure = str(progress_state.get("connection_error", ""))
+                    if "no Record3D USB device found" in failure:
+                        message = "No Record3D USB stream is visible to this Mac."
+                        instruction = (
+                            "Check the cable and Trust prompt, select USB Streaming "
+                            "in Record3D, then press Recheck before restarting the red button."
+                        )
+                    elif "did not accept the stream connection" in failure:
+                        message = "The iPhone is visible, but Record3D rejected the connection."
+                        instruction = (
+                            "Press Recheck, then stop and restart the red USB stream button."
+                        )
+                    elif "timed out waiting for an RGB-D frame" in failure:
+                        message = "Record3D connected, but sent no RGB-D video frames."
+                        instruction = (
+                            "Press Recheck, then stop and restart the red USB stream button."
+                        )
+                    else:
+                        message = failure or (
+                            "The phone stream never connected; no measurements were saved."
+                        )
+                        instruction = (
+                            "Restart streaming in Record3D, then retry the connection."
+                        )
             elif self._legacy_completed_run:
                 message = (
                     "The previous result used the old 13-tag, single-floor-anchor model."

@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
-import threading
 import time
 from typing import Any
 
@@ -124,92 +123,6 @@ def _write_jpeg_atomic(path: Path, image: np.ndarray, *, quality: int = 82) -> N
     ):
         raise OSError(f"could not write {temporary}")
     temporary.replace(path)
-
-
-class _LatestUSBFrameStream:
-    """Capture Record3D continuously while the solver consumes newest frames.
-
-    Record3D is callback-driven and can stop delivering if expensive pose
-    consensus blocks its only consumer. This small pump copies every coherent
-    RGB-D frame on a dedicated thread, publishes a low-latency raw browser
-    preview, and lets reconstruction drop any stale intermediate frames.
-    """
-
-    def __init__(
-        self,
-        reader: Record3DReader,
-        *,
-        camera_preview_output: Path | None,
-    ) -> None:
-        self.reader = reader
-        self.camera_preview_output = camera_preview_output
-        self._condition = threading.Condition()
-        self._stop = threading.Event()
-        self._latest: RGBDFrame | None = None
-        self._sequence = 0
-        self._consumed_sequence = 0
-        self._error: BaseException | None = None
-        self._thread = threading.Thread(
-            target=self._capture,
-            name="record3d-latest-frame",
-            daemon=True,
-        )
-        self._thread.start()
-
-    def _capture(self) -> None:
-        first_frame = True
-        last_preview_time = -float("inf")
-        try:
-            while not self._stop.is_set():
-                frame = self.reader.next_frame(
-                    timeout_s=90.0 if first_frame else 15.0
-                )
-                first_frame = False
-                with self._condition:
-                    self._latest = frame
-                    self._sequence += 1
-                    self._condition.notify_all()
-                now = time.monotonic()
-                if (
-                    self.camera_preview_output is not None
-                    and now - last_preview_time >= 0.16
-                ):
-                    _write_jpeg_atomic(
-                        self.camera_preview_output,
-                        _camera_preview(frame.rgb_bgr, ()),
-                        quality=78,
-                    )
-                    last_preview_time = now
-        except BaseException as error:
-            if not self._stop.is_set():
-                with self._condition:
-                    self._error = error
-                    self._condition.notify_all()
-
-    def __iter__(self) -> _LatestUSBFrameStream:
-        return self
-
-    def __next__(self) -> RGBDFrame:
-        with self._condition:
-            self._condition.wait_for(lambda: (
-                self._sequence > self._consumed_sequence
-                or self._error is not None
-                or self._stop.is_set()
-            ))
-            if self._sequence > self._consumed_sequence:
-                self._consumed_sequence = self._sequence
-                assert self._latest is not None
-                return self._latest
-            if self._error is not None:
-                raise self._error
-            raise StopIteration
-
-    def close(self) -> None:
-        self._stop.set()
-        self.reader.close()
-        with self._condition:
-            self._condition.notify_all()
-        self._thread.join(timeout=1.0)
 
 
 def _guidance(
@@ -1150,7 +1063,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     previous_anchor_pose: RigidTransform | None = None
     reader: Record3DReader | None = None
-    usb_stream: _LatestUSBFrameStream | None = None
     start = time.monotonic()
     last_status_time = -float("inf")
     last_progress_time = -float("inf")
@@ -1220,12 +1132,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.npz_dir is not None:
             frames = _npz_frames(args.npz_dir)
         else:
-            reader = Record3DReader(args.record3d_device)
-            usb_stream = _LatestUSBFrameStream(
-                reader,
-                camera_preview_output=args.camera_preview_output,
+            reader = Record3DReader(
+                args.record3d_device,
+                connect_timeout_s=90.0,
             )
-            frames = iter(usb_stream)
+
+            def live_frames() -> Iterator[RGBDFrame]:
+                assert reader is not None
+                first_frame = True
+                while True:
+                    yield reader.next_frame(
+                        timeout_s=90.0 if first_frame else 15.0
+                    )
+                    first_frame = False
+
+            frames = live_frames()
         for frame_index, frame in enumerate(frames):
             current_world_from_camera: RigidTransform | None = None
             anchor_reprojection_rms_px = last_anchor_reprojection_rms_px
@@ -1413,7 +1334,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     break
             if (
                 args.camera_preview_output is not None
-                and usb_stream is None
                 and now - last_camera_preview_time >= 0.25
             ):
                 _write_jpeg_atomic(
@@ -1525,9 +1445,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         connection_error = str(error)
         last_message = connection_error
     finally:
-        if usb_stream is not None:
-            usb_stream.close()
-        elif reader is not None:
+        if reader is not None:
             reader.close()
         if not args.no_preview and args.npz_dir is None:
             cv2.destroyAllWindows()
@@ -1600,7 +1518,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         "phase": "connect" if connection_error is not None else "review",
         "message": (
-            f"Connection lost. {survey_payload['stable_tag_count']} stable tags are saved."
+            connection_error
             if connection_error is not None
             else "Survey complete. Review the geometry and tag assignments."
             if final_ok
@@ -1616,6 +1534,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "guidance": final_guidance,
         "quality": last_quality,
         "connection_mode": connection_mode,
+        "connection_error": connection_error,
         "resumed": resumed,
         "restored_tag_ids": restored_ids,
         "anchor_ids": sorted(anchors),

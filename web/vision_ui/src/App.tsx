@@ -502,7 +502,7 @@ function ZeroSurveyWorkspace({
   const guideDetail = survey?.status === 'connecting'
     ? 'Leave this page waiting, keep Record3D open, and stop then restart its red stream button. The first full frame will appear automatically.'
     : emptyConnectionFailure
-      ? 'The Mac can see the iPhone over USB, but Record3D did not deliver video. Recheck below, then restart the red button while the desktop is waiting.'
+      ? survey?.message || 'No RGB-D video reached the calibration server.'
       : survey?.guidance?.detail || survey?.message || 'The scan records tag identity, position, orientation, floor spacing, and the geometry identifiable from this pose.'
   const guideAction = survey?.status === 'connecting'
     ? 'On the phone: tap the red button to stop, then tap it again to stream.'
@@ -568,7 +568,7 @@ function ZeroSurveyWorkspace({
               <div className="setup-card primary-setup">
                 <div className="eyebrow">Before you start</div><h2>Robot down. Tags up. Phone ready.</h2>
                 <div className="transport-picker"><button className={connectionMode === 'usb' ? 'active' : ''} onClick={() => setConnectionMode('usb')}><b>USB</b><span>Best LiDAR precision</span></button><button className={connectionMode === 'wifi' ? 'active' : ''} onClick={() => setConnectionMode('wifi')}><b>Wi‑Fi</b><span>No cable · lower depth quality</span></button></div>
-                {emptyConnectionFailure && <div className="connection-retry-notice"><i /><span><b>USB sees the iPhone, but no RGB‑D frames arrived</b><small>Press Recheck first. While this page says “Waiting for the iPhone,” stop and restart the red stream button in Record3D. The desktop will now wait up to 90 seconds.</small></span></div>}
+                {emptyConnectionFailure && <div className="connection-retry-notice"><i /><span><b>{survey.message}</b><small>{survey.instruction}</small></span></div>}
                 <div className="prep-list"><span><i>1</i>Place the stationary robot in its zero pose.</span><span><i>2</i>Leave floor tags 100–105 and 112 in their mapped one-foot grid.</span><span><i>3</i>In Record3D, select {connectionMode === 'usb' ? 'USB' : 'Wi‑Fi'} under Live RGBD Video Streaming.</span><span><i>4</i>Press Connect here, then tap the red stream button on the phone. Keep Record3D open.</span></div>
                 {connectionMode === 'wifi' && <div className="wifi-connect"><label>iPhone address<input value={wifiAddress} placeholder="for example 192.168.1.100 or myiPhone.local" onChange={(event) => setWifiAddress(event.target.value)} /></label><button disabled={busy || !wifiAddress.trim()} onClick={onConnectWifi}>Connect phone</button><small>{wifiStatus}. Requires Record3D 1.11+ and its Wi‑Fi Streaming extension; USB remains more accurate.</small></div>}
                 <button className="launch-survey" disabled={busy || !survey?.available} onClick={onStart}>{busy ? 'Checking for RGB‑D frames…' : emptyConnectionFailure ? 'Recheck phone connection' : 'Start iPhone LiDAR calibration'}<span>→</span></button>

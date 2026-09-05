@@ -119,7 +119,12 @@ def _npz_frames(directory: Path) -> Iterator[RGBDFrame]:
 class Record3DReader:
     """Copy coherent frames from Record3D's callback-driven USB API."""
 
-    def __init__(self, device_index: int) -> None:
+    def __init__(
+        self,
+        device_index: int,
+        *,
+        connect_timeout_s: float = 7.0,
+    ) -> None:
         try:
             from record3d import Record3DStream
         except ImportError as error:
@@ -139,7 +144,8 @@ class Record3DReader:
         # Connection".  Re-enumerate and retry long enough for that service to
         # become ready after the user presses Record.
         found_count = 0
-        for attempt in range(9):
+        deadline = time.monotonic() + max(0.0, connect_timeout_s)
+        while True:
             devices = Record3DStream.get_connected_devices()
             found_count = len(devices)
             if device_index >= 0 and device_index < found_count:
@@ -153,8 +159,9 @@ class Record3DReader:
                 disconnect = getattr(session, "disconnect", None)
                 if disconnect is not None:
                     disconnect()
-            if attempt < 8:
-                time.sleep(0.75)
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(min(0.75, max(0.0, deadline - time.monotonic())))
 
         if self._session is not None:
             return
@@ -222,9 +229,8 @@ class Record3DReader:
         })
         return RGBDFrame(
             rgb_bgr=cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR),
-            # The zero-pose survey pumps capture on a dedicated thread. Own
-            # these native buffers so Record3D cannot overwrite a frame while
-            # the slower reconstruction thread is still reading it.
+            # Own the native buffers so Record3D cannot overwrite a frame
+            # while reconstruction is still reading it.
             depth_m=np.asarray(depth, dtype=np.float32).copy(),
             confidence=(
                 None if np.asarray(confidence).size == 0

@@ -241,6 +241,29 @@ def test_shared_server_worker_leaves_camera_off_until_explicit_start() -> None:
         runtime.stop()
 
 
+def test_latest_jpeg_capture_time_is_paired_and_cleared() -> None:
+    runtime = VisionRuntime(
+        CONFIG_PATH,
+        capture_factory=lambda _index: _ClosedCapture(),
+    )
+    try:
+        with runtime._lock:
+            runtime._frame_sequence = 7
+            runtime._latest_jpeg = b"jpeg"
+            runtime._latest_capture_unix_s = 1234.5
+
+        assert runtime.latest_jpeg_with_capture_time() == (
+            7,
+            b"jpeg",
+            1234.5,
+        )
+
+        runtime.disable_camera()
+        assert runtime.latest_jpeg_with_capture_time() == (7, None, None)
+    finally:
+        runtime.stop()
+
+
 def test_runtime_reports_named_configured_camera_choices() -> None:
     runtime = VisionRuntime(
         CONFIG_PATH,

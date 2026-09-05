@@ -16,6 +16,7 @@ import math
 from http import HTTPStatus
 from pathlib import Path
 import statistics
+import sys
 import threading
 import time
 from typing import Any, Mapping, Sequence
@@ -482,6 +483,7 @@ class VisionRuntime:
         self._capture_details: dict[str, Any] = {}
         self._latest_result: dict[str, Any] | None = None
         self._latest_jpeg: bytes | None = None
+        self._latest_capture_unix_s: float | None = None
         self._frame_sequence = 0
         self._frame_times: deque[float] = deque(maxlen=40)
         self._history: deque[dict[str, Any]] = deque(maxlen=90)
@@ -543,6 +545,7 @@ class VisionRuntime:
             self._capture_details = {}
             self._latest_result = None
             self._latest_jpeg = None
+            self._latest_capture_unix_s = None
             self._frame_times.clear()
             self._history.clear()
             if self._calibration["status"] == "collecting":
@@ -721,6 +724,22 @@ class VisionRuntime:
     def latest_jpeg(self) -> tuple[int, bytes | None]:
         with self._lock:
             return self._frame_sequence, self._latest_jpeg
+
+    def latest_jpeg_with_capture_time(
+        self,
+    ) -> tuple[int, bytes | None, float | None]:
+        """Return the latest JPEG and the wall time of its camera read.
+
+        Receipt time at the HTTP client cannot prove that a camera frame is
+        fresh.  Keep the timestamp paired under the same lock as the JPEG so
+        guarded recorders can fail closed on a stale capture.
+        """
+        with self._lock:
+            return (
+                self._frame_sequence,
+                self._latest_jpeg,
+                self._latest_capture_unix_s,
+            )
 
     def wait_for_jpeg(
         self, after_sequence: int, timeout_s: float = 2.0
@@ -1044,6 +1063,7 @@ class VisionRuntime:
                         self._history.clear()
 
                 ok, frame = capture.read()
+                capture_unix_s = time.time()
                 if not ok:
                     capture.release()
                     capture = None
@@ -1107,6 +1127,7 @@ class VisionRuntime:
                         continue
                     self._latest_result = result
                     self._latest_jpeg = jpeg.tobytes()
+                    self._latest_capture_unix_s = capture_unix_s
                     self._capture_details = capture_details
                     self._frame_sequence += 1
                     self._frame_times.append(now)
@@ -1142,11 +1163,14 @@ def wrap_handler_with_vision(
             content_type: str,
             *,
             cache: str = "no-store",
+            headers: Mapping[str, str] | None = None,
         ) -> None:
             self.send_response(code)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", cache)
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             try:
                 self.wfile.write(body)
@@ -1252,14 +1276,26 @@ def wrap_handler_with_vision(
             elif path == "/api/vision/frame.mjpg":
                 self._vision_stream_mjpeg()
             elif path == "/api/vision/frame.jpg":
-                _sequence, jpeg = runtime.latest_jpeg()
+                _sequence, jpeg, capture_unix_s = (
+                    runtime.latest_jpeg_with_capture_time()
+                )
                 if jpeg is None:
                     self._vision_json(
                         HTTPStatus.SERVICE_UNAVAILABLE,
                         {"ok": False, "error": "no frame available"},
                     )
                 else:
-                    self._vision_send_bytes(HTTPStatus.OK, jpeg, "image/jpeg")
+                    headers = (
+                        {}
+                        if capture_unix_s is None
+                        else {"X-Capture-Unix-S": repr(capture_unix_s)}
+                    )
+                    self._vision_send_bytes(
+                        HTTPStatus.OK,
+                        jpeg,
+                        "image/jpeg",
+                        headers=headers,
+                    )
             elif path == "/api/vision/calibration/report":
                 report = runtime.latest_report()
                 if report is None:

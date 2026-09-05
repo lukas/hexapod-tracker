@@ -248,6 +248,7 @@ export interface ZeroSurveyState {
     initial_coordinate_rms_px?: number
     physical_model_coordinate_rms_px?: number
     pre_bundle_coordinate_rms_px?: number
+    all_observation_coordinate_rms_px?: number
     final_coordinate_rms_px?: number
     floor_coordinate_rms_px?: number
     robot_coordinate_rms_px?: number
@@ -255,6 +256,41 @@ export interface ZeroSurveyState {
     max_tag_correction_mm?: number
     median_shared_mount_deviation_mm?: number
     max_shared_mount_deviation_mm?: number
+    used_corner_observations?: number
+    rejected_corner_observations?: number
+    lidar_depth?: {
+      available: boolean
+      constraints: number
+      used_constraints: number
+      rejected_constraints: number
+      median_absolute_error_mm: number | null
+      p90_absolute_error_mm: number | null
+      quality_passed: boolean
+    }
+    scene_motion?: {
+      reference_segment: number
+      segments: Array<{
+        segment: number
+        reference: boolean
+        translation_mm: number
+        rotation_deg: number
+      }>
+      floor_rejection_fraction: number
+      systematic_floor_consistency_passed: boolean
+    }
+    floor_reference?: {
+      status?: string
+      uses_measured_ground_truth: boolean
+    }
+    visual_reprojection_audit?: {
+      available: boolean
+      directory?: string
+      overlay_frames?: Array<{
+        frame: string
+        coordinate_rms_px: number | null
+        path: string
+      }>
+    }
     diagnostics?: {
       image_fit_outlier_tag_ids: number[]
       buildviz_or_mount_mismatch_tag_ids: number[]

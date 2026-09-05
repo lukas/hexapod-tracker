@@ -1438,6 +1438,18 @@ def wrap_handler_with_vision(
                     )
                 else:
                     self._vision_send_bytes(HTTPStatus.OK, jpeg, "image/jpeg")
+            elif path.startswith(
+                "/api/vision/zero-survey/reprojection-audit/"
+            ):
+                filename = path.rsplit("/", 1)[-1]
+                jpeg = runtime.zero_survey.reprojection_audit_jpeg(filename)
+                if jpeg is None:
+                    self._vision_json(
+                        HTTPStatus.NOT_FOUND,
+                        {"ok": False, "error": "audit image not found"},
+                    )
+                else:
+                    self._vision_send_bytes(HTTPStatus.OK, jpeg, "image/jpeg")
             elif path == "/api/vision/zero-survey/result":
                 result = runtime.zero_survey.result()
                 if result is None:

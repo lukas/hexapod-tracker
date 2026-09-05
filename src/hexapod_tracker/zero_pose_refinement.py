@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import cv2
 import numpy as np
 from scipy.optimize import least_squares
 from scipy.sparse import lil_matrix
@@ -29,6 +30,21 @@ class _ArchivedFrame:
     camera_matrix: np.ndarray
     arkit_world_from_camera: RigidTransform
     detections: tuple[tuple[int, np.ndarray], ...]
+    image_size_px: tuple[int, int]
+    depth_m: np.ndarray | None
+    confidence: np.ndarray | None
+    trajectory_segment: int = 0
+
+
+@dataclass(frozen=True)
+class _DepthConstraint:
+    frame_index: int
+    tag_id: int
+    point_camera_m: np.ndarray
+    sigma_m: float
+    sample_count: int
+    confidence_level: int
+    incidence_cosine: float
 
 
 def _transform_values(transform: RigidTransform) -> np.ndarray:
@@ -135,6 +151,48 @@ def _load_frames(
             arkit_gl = RigidTransform(
                 pose[4:], Rotation.from_quat(pose[:4])
             )
+            image_size_raw = raw.get("image_size_px")
+            if image_size_raw is not None:
+                image_size_values = np.asarray(
+                    image_size_raw, dtype=int
+                ).reshape(-1)
+                image_size_px = (
+                    int(image_size_values[0]), int(image_size_values[1])
+                )
+            elif "rgb_jpeg" in raw:
+                image = cv2.imdecode(
+                    np.asarray(raw["rgb_jpeg"], dtype=np.uint8),
+                    cv2.IMREAD_GRAYSCALE,
+                )
+                if image is None:
+                    continue
+                image_size_px = (int(image.shape[1]), int(image.shape[0]))
+            else:
+                matrix = np.asarray(raw["camera_matrix"], dtype=float)
+                # Synthetic and legacy archives did not record the RGB size.
+                # Their principal point is centered, so this is the least
+                # surprising backwards-compatible estimate. Depth is ignored
+                # for such a frame unless its aspect ratio agrees below.
+                image_size_px = (
+                    max(1, int(round(2.0 * matrix[0, 2]))),
+                    max(1, int(round(2.0 * matrix[1, 2]))),
+                )
+            depth = (
+                np.asarray(raw["depth"], dtype=float)
+                if "depth" in raw and np.asarray(raw["depth"]).size
+                else None
+            )
+            confidence = (
+                np.asarray(raw["confidence"])
+                if "confidence" in raw and np.asarray(raw["confidence"]).size
+                else None
+            )
+            if depth is not None:
+                if depth.ndim != 2:
+                    depth = None
+                    confidence = None
+                elif confidence is not None and confidence.shape != depth.shape:
+                    confidence = None
             frames.append(_ArchivedFrame(
                 name=path.name,
                 captured_unix=float(raw.get(
@@ -145,8 +203,239 @@ def _load_frames(
                     arkit_gl
                 ),
                 detections=detections,
+                image_size_px=image_size_px,
+                depth_m=depth,
+                confidence=confidence,
             ))
-    return frames
+    segmented: list[_ArchivedFrame] = []
+    segment = 0
+    for index, frame in enumerate(frames):
+        if index > 0:
+            delta = frame.captured_unix - frames[index - 1].captured_unix
+            if not 0.0 < delta <= 15.0:
+                segment += 1
+        segmented.append(replace(frame, trajectory_segment=segment))
+    return segmented
+
+
+def _select_keyframes(
+    frames: Sequence[_ArchivedFrame], *, maximum_frames: int = 32
+) -> list[_ArchivedFrame]:
+    """Keep high-resolution views with coverage and camera-pose diversity.
+
+    The capture loop intentionally archives often so a brief blur or missed
+    decode does not lose a physical position. Bundle adjustment does not gain
+    useful information from dozens of nearly identical half-second frames,
+    though, and per-frame camera variables make those duplicates expensive.
+    """
+    if len(frames) <= maximum_frames:
+        return list(frames)
+
+    tags_by_frame = [
+        {
+            tag_id: float(np.mean([
+                np.linalg.norm(corners[(index + 1) % 4] - corners[index])
+                for index in range(4)
+            ]))
+            for tag_id, corners in frame.detections
+        }
+        for frame in frames
+    ]
+    available_by_tag: dict[int, int] = {}
+    for tags in tags_by_frame:
+        for tag_id in tags:
+            available_by_tag[tag_id] = available_by_tag.get(tag_id, 0) + 1
+    target_by_tag = {
+        tag_id: min(3, count) for tag_id, count in available_by_tag.items()
+    }
+
+    selected: set[int] = {0, len(frames) - 1}
+    for index in range(len(frames) - 1):
+        if frames[index + 1].trajectory_segment != frames[index].trajectory_segment:
+            selected.update((index, index + 1))
+
+    def tag_counts() -> dict[int, int]:
+        counts: dict[int, int] = {}
+        for index in selected:
+            for tag_id in tags_by_frame[index]:
+                counts[tag_id] = counts.get(tag_id, 0) + 1
+        return counts
+
+    while len(selected) < maximum_frames:
+        counts = tag_counts()
+        if all(
+            counts.get(tag_id, 0) >= target
+            for tag_id, target in target_by_tag.items()
+        ):
+            break
+        best_index: int | None = None
+        best_score = -1.0
+        for index, tags in enumerate(tags_by_frame):
+            if index in selected:
+                continue
+            score = 0.0
+            for tag_id, edge_px in tags.items():
+                missing = target_by_tag[tag_id] - counts.get(tag_id, 0)
+                if missing <= 0:
+                    continue
+                rarity = 1.0 + 8.0 / available_by_tag[tag_id]
+                clarity = 1.0 + min(edge_px / 45.0, 2.0)
+                score += missing * rarity * clarity
+            if score > best_score:
+                best_index = index
+                best_score = score
+        if best_index is None or best_score <= 0.0:
+            break
+        selected.add(best_index)
+
+    # Spend any remaining budget on poses farthest from what is already kept.
+    # Translation and orientation both matter for recovering depth and tag
+    # surface normals; this does not resize or otherwise weaken source pixels.
+    while len(selected) < maximum_frames:
+        best_index = None
+        best_score = -1.0
+        for index, frame in enumerate(frames):
+            if index in selected:
+                continue
+            nearest = min(
+                np.linalg.norm(
+                    frame.arkit_world_from_camera.translation_m
+                    - frames[other].arkit_world_from_camera.translation_m
+                ) / 0.08
+                + (
+                    frame.arkit_world_from_camera.rotation.inv()
+                    * frames[other].arkit_world_from_camera.rotation
+                ).magnitude() / math.radians(12.0)
+                for other in selected
+            )
+            score = float(nearest) + 0.03 * len(tags_by_frame[index])
+            if score > best_score:
+                best_index = index
+                best_score = score
+        if best_index is None:
+            break
+        selected.add(best_index)
+    return [frames[index] for index in sorted(selected)]
+
+
+def _depth_constraint(
+    frame: _ArchivedFrame,
+    *,
+    frame_index: int,
+    tag_id: int,
+    pixels: np.ndarray,
+    world_from_tag: RigidTransform,
+    world_from_camera: RigidTransform,
+) -> _DepthConstraint | None:
+    """Summarize registered LiDAR samples near one tag's visual center.
+
+    Scene depth is far coarser than RGB. A single robust central point avoids
+    pretending that upsampled depth can locate the four tag corners. The point
+    becomes a point-to-predicted-tag-plane factor in the final bundle.
+    """
+    if frame.depth_m is None:
+        return None
+    depth = frame.depth_m
+    depth_height, depth_width = depth.shape
+    image_width, image_height = frame.image_size_px
+    if min(depth_width, depth_height, image_width, image_height) <= 0:
+        return None
+    if not math.isclose(
+        depth_width / depth_height,
+        image_width / image_height,
+        rel_tol=0.02,
+        abs_tol=0.0,
+    ):
+        return None
+
+    corners = np.asarray(pixels, dtype=float)
+    mean_edge_px = float(np.mean([
+        np.linalg.norm(corners[(index + 1) % 4] - corners[index])
+        for index in range(4)
+    ]))
+    mean_edge_depth_px = mean_edge_px * depth_width / image_width
+    if mean_edge_depth_px < 7.0:
+        return None
+
+    camera_from_tag = world_from_camera.inverse().compose(world_from_tag)
+    tag_to_camera = -camera_from_tag.translation_m
+    distance = float(np.linalg.norm(tag_to_camera))
+    if distance <= 1e-6:
+        return None
+    incidence_cosine = abs(float(
+        camera_from_tag.rotation.apply([0.0, 0.0, 1.0])
+        @ (tag_to_camera / distance)
+    ))
+    if incidence_cosine < 0.55:
+        return None
+
+    scale = np.asarray([
+        depth_width / image_width, depth_height / image_height
+    ])
+    depth_corners = corners * scale
+    center = np.mean(depth_corners, axis=0)
+    # Stay well inside the black square. Edge pixels frequently contain the
+    # lid, carpet, or background because RGB/depth registration is coarse.
+    inner = center + 0.38 * (depth_corners - center)
+    mask = np.zeros(depth.shape, dtype=np.uint8)
+    cv2.fillConvexPoly(mask, np.rint(inner).astype(np.int32), 1)
+    finite = (
+        (mask != 0)
+        & np.isfinite(depth)
+        & (depth >= 0.12)
+        & (depth <= 2.0)
+    )
+    confidence_level = 0
+    if frame.confidence is not None:
+        high = finite & (frame.confidence >= 2)
+        medium = finite & (frame.confidence >= 1)
+        if int(np.count_nonzero(high)) >= 6:
+            finite = high
+            confidence_level = 2
+        elif int(np.count_nonzero(medium)) >= 6:
+            finite = medium
+            confidence_level = 1
+        else:
+            return None
+    rows, columns = np.nonzero(finite)
+    if len(rows) < 6:
+        return None
+
+    values = depth[rows, columns]
+    center_depth = float(np.median(values))
+    mad = float(np.median(np.abs(values - center_depth)))
+    robust_sigma = max(0.004, 1.4826 * mad)
+    keep = np.abs(values - center_depth) <= max(0.012, 3.0 * robust_sigma)
+    rows = rows[keep]
+    columns = columns[keep]
+    values = values[keep]
+    if len(rows) < 6:
+        return None
+    center_depth = float(np.median(values))
+    center_column = float(np.median(columns))
+    center_row = float(np.median(rows))
+    matrix = frame.camera_matrix.copy()
+    matrix[0, :] *= depth_width / image_width
+    matrix[1, :] *= depth_height / image_height
+    matrix[2, :] = [0.0, 0.0, 1.0]
+    point = np.asarray([
+        (center_column - matrix[0, 2]) * center_depth / matrix[0, 0],
+        (center_row - matrix[1, 2]) * center_depth / matrix[1, 1],
+        center_depth,
+    ])
+    # Six millimetres is already optimistic for registered phone scene depth
+    # on a small object. Larger observed dispersion automatically weakens the
+    # factor rather than letting a mixed edge pixel bend the reconstruction.
+    sigma_m = min(0.025, max(0.006, 1.4826 * mad))
+    return _DepthConstraint(
+        frame_index=frame_index,
+        tag_id=tag_id,
+        point_camera_m=point,
+        sigma_m=sigma_m,
+        sample_count=int(len(values)),
+        confidence_level=confidence_level,
+        incidence_cosine=incidence_cosine,
+    )
 
 
 def _project(
@@ -171,6 +460,154 @@ def _project(
         camera_matrix[1, 1] * camera_points[:, 1] / depth
         + camera_matrix[1, 2],
     ])
+
+
+def _write_reprojection_audit(
+    *,
+    frame_archive_dir: Path,
+    frames: Sequence[_ArchivedFrame],
+    observations: Sequence[tuple[int, int, np.ndarray]],
+    cameras: Sequence[RigidTransform],
+    robot_tags: Mapping[int, RigidTransform],
+    floor_tags: Mapping[int, RigidTransform],
+    robot_segment_motions: Sequence[RigidTransform],
+    frame_segments: Sequence[int],
+    object_corners: Mapping[int, np.ndarray],
+    fit_observation_indices: Sequence[int],
+) -> dict[str, Any]:
+    """Render detected and predicted tag corners on representative photos."""
+    fit_set = set(fit_observation_indices)
+    per_frame: dict[int, list[tuple[int, np.ndarray, np.ndarray, bool, float]]] = {}
+    for observation_index, (frame_index, tag_id, detected) in enumerate(
+        observations
+    ):
+        canonical_tag = floor_tags.get(tag_id, robot_tags.get(tag_id))
+        if canonical_tag is None:
+            continue
+        observed_tag = (
+            canonical_tag
+            if tag_id in floor_tags
+            else robot_segment_motions[frame_segments[frame_index]].compose(
+                canonical_tag
+            )
+        )
+        predicted = _project(
+            observed_tag,
+            cameras[frame_index],
+            frames[frame_index].camera_matrix,
+            object_corners[tag_id],
+        )
+        coordinate_rms = float(np.sqrt(np.mean((predicted - detected) ** 2)))
+        per_frame.setdefault(frame_index, []).append((
+            tag_id,
+            detected,
+            predicted,
+            observation_index in fit_set,
+            coordinate_rms,
+        ))
+    candidates = sorted(per_frame)
+    if not candidates:
+        return {"available": False, "reason": "no projected observations"}
+
+    frame_rms = {
+        frame_index: float(np.sqrt(np.mean([
+            item[4] ** 2 for item in items if item[3]
+        ])))
+        for frame_index, items in per_frame.items()
+        if any(item[3] for item in items)
+    }
+    evenly_spaced = {
+        candidates[int(round(value))]
+        for value in np.linspace(0, len(candidates) - 1, min(8, len(candidates)))
+    }
+    worst = {
+        frame_index
+        for frame_index, _value in sorted(
+            frame_rms.items(), key=lambda item: item[1], reverse=True
+        )[:8]
+    }
+    selected = sorted(evenly_spaced | worst)
+    audit_dir = frame_archive_dir.parent / "reprojection-audit-v5"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    written: list[dict[str, Any]] = []
+    for frame_index in selected:
+        path = frame_archive_dir / frames[frame_index].name
+        try:
+            with np.load(path, allow_pickle=False) as raw:
+                if "rgb_jpeg" not in raw:
+                    continue
+                image = cv2.imdecode(
+                    np.asarray(raw["rgb_jpeg"], dtype=np.uint8),
+                    cv2.IMREAD_COLOR,
+                )
+        except (OSError, ValueError):
+            continue
+        if image is None:
+            continue
+        for tag_id, detected, predicted, accepted, coordinate_rms in per_frame[
+            frame_index
+        ]:
+            detected_polygon = np.rint(detected).astype(np.int32).reshape(-1, 1, 2)
+            predicted_polygon = np.rint(predicted).astype(np.int32).reshape(-1, 1, 2)
+            detected_color = (45, 195, 45) if accepted else (0, 135, 255)
+            cv2.polylines(image, [detected_polygon], True, detected_color, 3)
+            cv2.polylines(image, [predicted_polygon], True, (210, 55, 210), 2)
+            for detected_point, predicted_point in zip(detected, predicted):
+                cv2.line(
+                    image,
+                    tuple(np.rint(detected_point).astype(int)),
+                    tuple(np.rint(predicted_point).astype(int)),
+                    (0, 210, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+            label_at = tuple(np.rint(detected[0] + [2.0, -7.0]).astype(int))
+            cv2.putText(
+                image,
+                f"#{tag_id} {coordinate_rms:.1f}px" + ("" if accepted else " OUT"),
+                label_at,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                detected_color,
+                2,
+                cv2.LINE_AA,
+            )
+        headline = (
+            "detected green | predicted magenta | connector yellow | "
+            f"frame RMS {frame_rms.get(frame_index, 0.0):.2f}px"
+        )
+        cv2.rectangle(
+            image, (0, 0), (min(image.shape[1], 1120), 42), (20, 20, 20), -1
+        )
+        cv2.putText(
+            image,
+            headline,
+            (12, 29),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (245, 245, 245),
+            2,
+            cv2.LINE_AA,
+        )
+        output_path = audit_dir / f"audit-{frame_index:03d}.jpg"
+        if cv2.imwrite(str(output_path), image, [cv2.IMWRITE_JPEG_QUALITY, 91]):
+            written.append({
+                "frame": frames[frame_index].name,
+                "trajectory_segment": int(frame_segments[frame_index]),
+                "coordinate_rms_px": frame_rms.get(frame_index),
+                "path": str(output_path),
+            })
+    return {
+        "available": bool(written),
+        "directory": str(audit_dir),
+        "overlay_frames": written,
+        "legend": {
+            "detected_accepted": "green",
+            "detected_rejected": "orange",
+            "predicted": "magenta",
+            "corner_error_connector": "yellow",
+        },
+    }
 
 
 def _record_orientation_fields(
@@ -211,6 +648,7 @@ def refine_zero_pose_with_buildviz(
     body_anchor_tag_id: int,
     orientation_anchor_tag_id: int,
     floor_marker_size_m: float | None = None,
+    floor_manifest: Mapping[str, Any] | None = None,
     joint_angles_deg: Mapping[str, float] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Refine a stationary survey primarily from archived photo corners.
@@ -251,9 +689,11 @@ def refine_zero_pose_with_buildviz(
             "ok": False,
             "skipped_reason": "an anchor has no robot mount assignment",
         }
-    frames = _load_frames(
+    archived_frames = _load_frames(
         Path(frame_archive_dir), set(specs) | set(floor_tags)
     )
+    archived_frame_count = len(archived_frames)
+    frames = _select_keyframes(archived_frames)
     observations = [
         (frame_index, tag_id, corners)
         for frame_index, frame in enumerate(frames)
@@ -265,6 +705,7 @@ def refine_zero_pose_with_buildviz(
             "ok": False,
             "skipped_reason": "too few archived multi-view tag observations",
             "frames": len(frames),
+            "archived_frames": archived_frame_count,
             "robot_observations": len(robot_observations),
         }
 
@@ -561,6 +1002,79 @@ def refine_zero_pose_with_buildviz(
     movable_floor_index = {
         tag_id: index for index, tag_id in enumerate(movable_floor_ids)
     }
+    floor_manifest = floor_manifest or {}
+    raw_floor_specs = floor_manifest.get("floor_tags", {})
+    default_floor_position_sigma = floor_manifest.get(
+        "position_uncertainty_m"
+    )
+    default_floor_yaw_sigma = floor_manifest.get("yaw_uncertainty_deg")
+    floor_reference_status = str(
+        floor_manifest.get("reference_status", "")
+    ).lower()
+
+    def floor_prior(tag_id: int) -> dict[str, Any]:
+        raw = raw_floor_specs.get(str(tag_id), {})
+        position_sigma = raw.get(
+            "position_uncertainty_m", default_floor_position_sigma
+        )
+        yaw_sigma = raw.get(
+            "yaw_uncertainty_deg", default_floor_yaw_sigma
+        )
+        tag_reference_status = str(raw.get("reference_status", "")).lower()
+        effective_status = tag_reference_status or floor_reference_status
+        measured = (
+            effective_status == "surveyed"
+            if effective_status
+            else position_sigma is not None or yaw_sigma is not None
+        )
+        if not measured:
+            position_sigma = None
+            yaw_sigma = None
+        return {
+            "source": "measured_ground_truth" if measured else "loose_initial_map",
+            "position_sigma_m": (
+                0.10 if position_sigma is None else max(0.0005, float(position_sigma))
+            ),
+            "height_sigma_m": (
+                0.003 if position_sigma is None
+                else max(0.0005, float(raw.get(
+                    "height_uncertainty_m", position_sigma
+                )))
+            ),
+            "normal_sigma_deg": max(0.25, float(raw.get(
+                "normal_uncertainty_deg", 3.0
+            ))),
+            "rotation_sigma_deg": (
+                45.0 if yaw_sigma is None else max(0.25, float(yaw_sigma))
+            ),
+        }
+
+    floor_priors = {
+        tag_id: floor_prior(tag_id) for tag_id in movable_floor_ids
+    }
+
+    def append_floor_prior_residual(
+        output: list[float],
+        tag: RigidTransform,
+        initial: RigidTransform,
+        tag_id: int,
+    ) -> None:
+        prior = floor_priors[tag_id]
+        output.extend(
+            (tag.translation_m[:2] - initial.translation_m[:2])
+            / prior["position_sigma_m"]
+        )
+        output.append(
+            float(tag.translation_m[2] - initial.translation_m[2])
+            / prior["height_sigma_m"]
+        )
+        output.extend((
+            tag.rotation.apply([0.0, 0.0, 1.0])
+            - initial.rotation.apply([0.0, 0.0, 1.0])
+        ) / math.sin(math.radians(prior["normal_sigma_deg"])))
+        output.extend((
+            initial.rotation.inv() * tag.rotation
+        ).as_rotvec() / np.radians(prior["rotation_sigma_deg"]))
 
     def refine_floor_landmarks() -> dict[int, RigidTransform]:
         result: dict[int, RigidTransform] = {}
@@ -582,17 +1096,9 @@ def refine_zero_pose_with_buildviz(
                         frames[frame_index].camera_matrix,
                         object_corners[tag_id],
                     ) - pixels).reshape(-1))
-                output.extend(
-                    (tag.translation_m[:2] - initial.translation_m[:2]) / 0.10
+                append_floor_prior_residual(
+                    output, tag, initial, tag_id
                 )
-                output.append(float(tag.translation_m[2]) / 0.003)
-                output.extend((
-                    tag.rotation.apply([0.0, 0.0, 1.0])
-                    - np.asarray([0.0, 0.0, 1.0])
-                ) / math.sin(math.radians(3.0)))
-                output.extend((
-                    initial.rotation.inv() * tag.rotation
-                ).as_rotvec() / np.radians(45.0))
                 return np.asarray(output)
 
             solved = least_squares(
@@ -611,9 +1117,10 @@ def refine_zero_pose_with_buildviz(
     trajectory_edges = [
         index
         for index in range(len(frames) - 1)
-        if 0.0 < (
-            frames[index + 1].captured_unix - frames[index].captured_unix
-        ) <= 15.0
+        if (
+            frames[index + 1].trajectory_segment
+            == frames[index].trajectory_segment
+        )
     ]
     if len(trajectory_edges) == len(frames) - 1:
         # A continuous capture can use the clean raw ARKit trajectory as the
@@ -625,8 +1132,69 @@ def refine_zero_pose_with_buildviz(
     # multiple reset world frames into the same coordinates.
     floor_initial_tags = refine_floor_landmarks()
     camera_count = len(frames)
+    selected_segment_ids = sorted({
+        frame.trajectory_segment for frame in frames
+    })
+    segment_remap = {
+        source: index for index, source in enumerate(selected_segment_ids)
+    }
+    frame_segments = [
+        segment_remap[frame.trajectory_segment] for frame in frames
+    ]
+    segment_count = len(selected_segment_ids)
+    robot_observations_per_segment = [0] * segment_count
+    floor_observations_per_segment = [0] * segment_count
+    for frame_index, tag_id, _pixels in observations:
+        target = (
+            floor_observations_per_segment
+            if tag_id in floor_tags else robot_observations_per_segment
+        )
+        target[frame_segments[frame_index]] += 1
+    # The best-observed session defines the canonical placement of the robot.
+    # Other sessions may contain a rigid nudge of the whole robot relative to
+    # the floor. Modeling that explicitly is safer than throwing away a
+    # coherent group of floor observations to preserve a false static scene.
+    reference_robot_segment = max(
+        range(segment_count),
+        key=lambda index: (
+            min(
+                robot_observations_per_segment[index],
+                floor_observations_per_segment[index],
+            ),
+            robot_observations_per_segment[index]
+            + floor_observations_per_segment[index],
+        ),
+    )
+    movable_robot_segments = [
+        index for index in range(segment_count)
+        if index != reference_robot_segment
+    ]
+    movable_robot_segment_index = {
+        segment: index
+        for index, segment in enumerate(movable_robot_segments)
+    }
     robot_variable_offset = camera_count
     floor_variable_offset = camera_count + len(observed_tag_ids)
+    robot_motion_variable_offset = (
+        floor_variable_offset + len(movable_floor_ids)
+    )
+
+    depth_constraints: list[_DepthConstraint] = []
+    for frame_index, tag_id, pixels in observations:
+        initial_tag = (
+            floor_initial_tags[tag_id]
+            if tag_id in floor_tags else refined_tags[tag_id]
+        )
+        constraint = _depth_constraint(
+            frames[frame_index],
+            frame_index=frame_index,
+            tag_id=tag_id,
+            pixels=pixels,
+            world_from_tag=initial_tag,
+            world_from_camera=cameras[frame_index],
+        )
+        if constraint is not None:
+            depth_constraints.append(constraint)
 
     def pack_bundle() -> np.ndarray:
         values = np.concatenate([
@@ -635,6 +1203,10 @@ def refine_zero_pose_with_buildviz(
             *[
                 _transform_values(floor_initial_tags[tag_id])
                 for tag_id in movable_floor_ids
+            ],
+            *[
+                _transform_values(RigidTransform.identity())
+                for _segment in movable_robot_segments
             ],
         ])
         return np.asarray(values, dtype=float)
@@ -656,20 +1228,52 @@ def refine_zero_pose_with_buildviz(
             values, floor_variable_offset + movable_floor_index[tag_id]
         )
 
+    def bundle_robot_motion(values: np.ndarray, segment: int) -> RigidTransform:
+        if segment == reference_robot_segment:
+            return RigidTransform.identity()
+        return bundle_transform(
+            values,
+            robot_motion_variable_offset
+            + movable_robot_segment_index[segment],
+        )
+
+    def bundle_observation_tag(
+        values: np.ndarray, frame_index: int, tag_id: int
+    ) -> RigidTransform:
+        if tag_id in floor_tags:
+            return bundle_floor_tag(values, tag_id)
+        return bundle_robot_motion(
+            values, frame_segments[frame_index]
+        ).compose(bundle_tag(values, tag_id))
+
+    def depth_residual_m(
+        values: np.ndarray, constraint: _DepthConstraint
+    ) -> float:
+        camera_from_tag = bundle_camera(
+            values, constraint.frame_index
+        ).inverse().compose(bundle_observation_tag(
+            values, constraint.frame_index, constraint.tag_id
+        ))
+        normal = camera_from_tag.rotation.apply([0.0, 0.0, 1.0])
+        return float(
+            (constraint.point_camera_m - camera_from_tag.translation_m)
+            @ normal
+        )
+
     def bundle_residual(values: np.ndarray) -> np.ndarray:
         output: list[float] = []
         for frame_index, tag_id, pixels in observations:
-            tag = (
-                bundle_floor_tag(values, tag_id)
-                if tag_id in floor_tags
-                else bundle_tag(values, tag_id)
-            )
+            tag = bundle_observation_tag(values, frame_index, tag_id)
             output.extend((_project(
                 tag,
                 bundle_camera(values, frame_index),
                 frames[frame_index].camera_matrix,
                 object_corners[tag_id],
             ) - pixels).reshape(-1))
+        for constraint in depth_constraints:
+            output.append(
+                depth_residual_m(values, constraint) / constraint.sigma_m
+            )
         # This fixes only the otherwise arbitrary SE(3) gauge. Because all
         # image and relative-motion residuals are gauge invariant, the first
         # camera can stay at its ARKit-aligned pose without constraining any
@@ -699,20 +1303,18 @@ def refine_zero_pose_with_buildviz(
         for tag_id in movable_floor_ids:
             tag = bundle_floor_tag(values, tag_id)
             initial = floor_tags[tag_id]
+            append_floor_prior_residual(output, tag, initial, tag_id)
+        for segment in movable_robot_segments:
+            motion = bundle_robot_motion(values, segment)
+            output.extend(motion.translation_m / 0.10)
             output.extend(
-                (tag.translation_m[:2] - initial.translation_m[:2]) / 0.10
+                motion.rotation.as_rotvec() / np.radians(15.0)
             )
-            output.append(float(tag.translation_m[2]) / 0.003)
-            output.extend((
-                tag.rotation.apply([0.0, 0.0, 1.0])
-                - np.asarray([0.0, 0.0, 1.0])
-            ) / math.sin(math.radians(3.0)))
-            output.extend((
-                initial.rotation.inv() * tag.rotation
-            ).as_rotvec() / np.radians(45.0))
         return np.asarray(output)
 
     pixel_coordinate_count = len(observations) * 8
+    depth_constraint_count = len(depth_constraints)
+    regularizer_offset = pixel_coordinate_count + depth_constraint_count
     bundle_x0 = pack_bundle()
     bundle_initial = bundle_residual(bundle_x0)
     bundle_row_count = len(bundle_initial)
@@ -736,7 +1338,45 @@ def refine_zero_pose_with_buildviz(
                 row:row + 8,
                 variable_index * 6:(variable_index + 1) * 6,
             ] = 1
+        if (
+            tag_id not in floor_tags
+            and frame_segments[frame_index] != reference_robot_segment
+        ):
+            variable_index = (
+                robot_motion_variable_offset
+                + movable_robot_segment_index[frame_segments[frame_index]]
+            )
+            bundle_sparsity[
+                row:row + 8,
+                variable_index * 6:(variable_index + 1) * 6,
+            ] = 1
         row += 8
+    for constraint in depth_constraints:
+        frame_index = constraint.frame_index
+        tag_id = constraint.tag_id
+        bundle_sparsity[
+            row, frame_index * 6:(frame_index + 1) * 6
+        ] = 1
+        variable_index = (
+            floor_variable_offset + movable_floor_index[tag_id]
+            if tag_id in floor_tags
+            else robot_variable_offset + observed_tag_index[tag_id]
+        )
+        bundle_sparsity[
+            row, variable_index * 6:(variable_index + 1) * 6
+        ] = 1
+        if (
+            tag_id not in floor_tags
+            and frame_segments[frame_index] != reference_robot_segment
+        ):
+            variable_index = (
+                robot_motion_variable_offset
+                + movable_robot_segment_index[frame_segments[frame_index]]
+            )
+            bundle_sparsity[
+                row, variable_index * 6:(variable_index + 1) * 6
+            ] = 1
+        row += 1
     bundle_sparsity[row:row + 6, 0:6] = 1
     row += 6
     for index in trajectory_edges:
@@ -751,6 +1391,15 @@ def refine_zero_pose_with_buildviz(
             variable_index * 6:(variable_index + 1) * 6,
         ] = 1
         row += 9
+    for segment in movable_robot_segments:
+        variable_index = (
+            robot_motion_variable_offset + movable_robot_segment_index[segment]
+        )
+        bundle_sparsity[
+            row:row + 6,
+            variable_index * 6:(variable_index + 1) * 6,
+        ] = 1
+        row += 6
     bundle_solution = least_squares(
         bundle_residual,
         bundle_x0,
@@ -758,7 +1407,7 @@ def refine_zero_pose_with_buildviz(
         loss="huber",
         f_scale=2.0,
         x_scale="jac",
-        max_nfev=300,
+        max_nfev=100,
     )
     bundle_robust = bundle_residual(bundle_solution.x)
     bundle_initial_rms = float(np.sqrt(np.mean(
@@ -778,12 +1427,25 @@ def refine_zero_pose_with_buildviz(
     # robot corners from silently sacrificing every floor observation.
     fit_observation_indices = list(range(len(observations)))
     rejected_observation_indices: list[int] = []
+    fit_depth_constraint_indices = list(range(depth_constraint_count))
+    rejected_depth_constraint_indices: list[int] = []
     bundle_values = bundle_solution.x
     polish_solution = None
     polish_accepted = False
     polish_initial_rms = bundle_robust_rms
     polish_final_rms = bundle_robust_rms
     if math.isfinite(bundle_robust_rms) and bundle_robust_rms < bundle_initial_rms:
+        robust_depth = bundle_robust[
+            pixel_coordinate_count:regularizer_offset
+        ]
+        fit_depth_constraint_indices = [
+            index for index, residual in enumerate(robust_depth)
+            if abs(float(residual)) <= 4.0
+        ]
+        rejected_depth_constraint_indices = sorted(
+            set(range(depth_constraint_count))
+            - set(fit_depth_constraint_indices)
+        )
         robust_pixels = bundle_robust[:pixel_coordinate_count].reshape(-1, 8)
         observation_rms = np.sqrt(np.mean(robust_pixels ** 2, axis=1))
         selected = {
@@ -824,22 +1486,23 @@ def refine_zero_pose_with_buildviz(
             output: list[float] = []
             for observation_index in fit_observation_indices:
                 frame_index, tag_id, pixels = observations[observation_index]
-                tag = (
-                    bundle_floor_tag(values, tag_id)
-                    if tag_id in floor_tags
-                    else bundle_tag(values, tag_id)
-                )
+                tag = bundle_observation_tag(values, frame_index, tag_id)
                 output.extend((_project(
                     tag,
                     bundle_camera(values, frame_index),
                     frames[frame_index].camera_matrix,
                     object_corners[tag_id],
                 ) - pixels).reshape(-1))
+            for constraint_index in fit_depth_constraint_indices:
+                constraint = depth_constraints[constraint_index]
+                output.append(
+                    depth_residual_m(values, constraint) / constraint.sigma_m
+                )
             # Retain the gauge, within-session ARKit motion, and floor-plane
             # regularizers from the robust solve. They are weak compared with
             # the unweighted corner residuals but keep the metric 3-D result
             # physically well conditioned.
-            output.extend(bundle_residual(values)[pixel_coordinate_count:])
+            output.extend(bundle_residual(values)[regularizer_offset:])
             return np.asarray(output)
 
         polish_x0 = bundle_solution.x
@@ -866,7 +1529,46 @@ def refine_zero_pose_with_buildviz(
                 row:row + 8,
                 variable_index * 6:(variable_index + 1) * 6,
             ] = 1
+            if (
+                tag_id not in floor_tags
+                and frame_segments[frame_index] != reference_robot_segment
+            ):
+                variable_index = (
+                    robot_motion_variable_offset
+                    + movable_robot_segment_index[frame_segments[frame_index]]
+                )
+                polish_sparsity[
+                    row:row + 8,
+                    variable_index * 6:(variable_index + 1) * 6,
+                ] = 1
             row += 8
+        for constraint_index in fit_depth_constraint_indices:
+            constraint = depth_constraints[constraint_index]
+            frame_index = constraint.frame_index
+            tag_id = constraint.tag_id
+            polish_sparsity[
+                row, frame_index * 6:(frame_index + 1) * 6
+            ] = 1
+            variable_index = (
+                floor_variable_offset + movable_floor_index[tag_id]
+                if tag_id in floor_tags
+                else robot_variable_offset + observed_tag_index[tag_id]
+            )
+            polish_sparsity[
+                row, variable_index * 6:(variable_index + 1) * 6
+            ] = 1
+            if (
+                tag_id not in floor_tags
+                and frame_segments[frame_index] != reference_robot_segment
+            ):
+                variable_index = (
+                    robot_motion_variable_offset
+                    + movable_robot_segment_index[frame_segments[frame_index]]
+                )
+                polish_sparsity[
+                    row, variable_index * 6:(variable_index + 1) * 6,
+                ] = 1
+            row += 1
         polish_sparsity[row:row + 6, 0:6] = 1
         row += 6
         for index in trajectory_edges:
@@ -881,13 +1583,23 @@ def refine_zero_pose_with_buildviz(
                 variable_index * 6:(variable_index + 1) * 6,
             ] = 1
             row += 9
+        for segment in movable_robot_segments:
+            variable_index = (
+                robot_motion_variable_offset
+                + movable_robot_segment_index[segment]
+            )
+            polish_sparsity[
+                row:row + 6,
+                variable_index * 6:(variable_index + 1) * 6,
+            ] = 1
+            row += 6
         polish_solution = least_squares(
             polish_residual,
             polish_x0,
             jac_sparsity=polish_sparsity.tocsr(),
             loss="linear",
             x_scale="jac",
-            max_nfev=200,
+            max_nfev=80,
         )
         polished = polish_residual(polish_solution.x)
         polish_final_rms = float(np.sqrt(np.mean(
@@ -901,8 +1613,43 @@ def refine_zero_pose_with_buildviz(
             rejected_observation_indices = []
             polish_final_rms = bundle_robust_rms
 
-    bundle_all_final = bundle_residual(bundle_values)[:pixel_coordinate_count]
+    initial_rejected_observation_indices = list(rejected_observation_indices)
+    initial_rejected_depth_constraint_indices = list(
+        rejected_depth_constraint_indices
+    )
+    bundle_final_residual = bundle_residual(bundle_values)
+    bundle_all_final = bundle_final_residual[:pixel_coordinate_count]
     bundle_all_final_rms = float(np.sqrt(np.mean(bundle_all_final ** 2)))
+    # The linear polish can pull a view that Huber initially downweighted back
+    # into excellent agreement. Reclassify against the finished geometry so a
+    # 1-2 px floor view is not misleadingly reported or drawn as rejected.
+    final_observation_rms = np.sqrt(np.mean(
+        bundle_all_final.reshape(-1, 8) ** 2, axis=1
+    ))
+    fit_observation_indices = [
+        index
+        for index, ((_frame_index, tag_id, _pixels), error) in enumerate(
+            zip(observations, final_observation_rms)
+        )
+        if error <= (6.0 if tag_id in floor_tags else 8.0)
+    ]
+    rejected_observation_indices = sorted(
+        set(range(len(observations))) - set(fit_observation_indices)
+    )
+    final_standardized_depth = bundle_final_residual[
+        pixel_coordinate_count:regularizer_offset
+    ]
+    fit_depth_constraint_indices = [
+        index for index, residual in enumerate(final_standardized_depth)
+        if abs(float(residual)) <= 4.0
+    ]
+    rejected_depth_constraint_indices = sorted(
+        set(range(depth_constraint_count)) - set(fit_depth_constraint_indices)
+    )
+    robot_segment_motions = [
+        bundle_robot_motion(bundle_values, segment)
+        for segment in range(segment_count)
+    ]
     if math.isfinite(polish_final_rms) and polish_final_rms < bundle_initial_rms:
         cameras = [
             bundle_camera(bundle_values, index)
@@ -933,6 +1680,12 @@ def refine_zero_pose_with_buildviz(
             tag_id: alignment_rebase.compose(tag)
             for tag_id, tag in physical_tags.items()
         }
+        robot_segment_motions = [
+            alignment_rebase.compose(motion).compose(
+                alignment_rebase.inverse()
+            )
+            for motion in robot_segment_motions
+        ]
         world_from_body_report = alignment_rebase.compose(
             body_at(model_values)
         )
@@ -942,6 +1695,9 @@ def refine_zero_pose_with_buildviz(
         refined_floor_tags = {
             tag_id: floor_tags[tag_id] for tag_id in observed_floor_ids
         }
+        robot_segment_motions = [
+            RigidTransform.identity() for _segment in range(segment_count)
+        ]
     final_errors: list[float] = []
     floor_errors: list[float] = []
     robot_errors: list[float] = []
@@ -957,8 +1713,12 @@ def refine_zero_pose_with_buildviz(
         tag = refined_floor_tags.get(tag_id, refined_tags.get(tag_id))
         if tag is None:
             continue
+        observed_tag = (
+            tag if tag_id in floor_tags
+            else robot_segment_motions[frame_segments[frame_index]].compose(tag)
+        )
         errors = (_project(
-            tag,
+            observed_tag,
             cameras[frame_index],
             frames[frame_index].camera_matrix,
             object_corners[tag_id],
@@ -1070,8 +1830,11 @@ def refine_zero_pose_with_buildviz(
             continue
         view_directions = []
         for frame_index in used_frames_by_tag.get(tag_id, []):
+            canonical_camera = robot_segment_motions[
+                frame_segments[frame_index]
+            ].inverse().compose(cameras[frame_index])
             direction = (
-                cameras[frame_index].translation_m - refined.translation_m
+                canonical_camera.translation_m - refined.translation_m
             )
             magnitude = float(np.linalg.norm(direction))
             if magnitude > 1e-9:
@@ -1107,6 +1870,34 @@ def refine_zero_pose_with_buildviz(
     floor_rms = rms(floor_errors)
     robot_rms = rms(robot_errors)
     rejected_rms = rms(rejected_errors)
+    final_depth_errors_mm = np.asarray([
+        depth_residual_m(bundle_values, constraint) * 1000.0
+        for constraint in depth_constraints
+    ])
+    used_depth_errors_mm = np.asarray([
+        final_depth_errors_mm[index]
+        for index in fit_depth_constraint_indices
+    ])
+    depth_available = any(frame.depth_m is not None for frame in frames)
+    depth_median_absolute_mm = (
+        float(np.median(np.abs(used_depth_errors_mm)))
+        if used_depth_errors_mm.size else None
+    )
+    depth_p90_absolute_mm = (
+        float(np.percentile(np.abs(used_depth_errors_mm), 90.0))
+        if used_depth_errors_mm.size else None
+    )
+    minimum_depth_constraints = max(12, len(frames) // 4)
+    depth_quality_passed = (
+        not depth_available
+        or (
+            len(fit_depth_constraint_indices) >= minimum_depth_constraints
+            and depth_median_absolute_mm is not None
+            and depth_median_absolute_mm <= 12.0
+            and depth_p90_absolute_mm is not None
+            and depth_p90_absolute_mm <= 25.0
+        )
+    )
     max_mount_deviation_mm = max((
         item["shared_mount_deviation_mm"] for item in corrections
     ), default=0.0)
@@ -1142,6 +1933,10 @@ def refine_zero_pose_with_buildviz(
         ]
         per_camera.append({
             "frame": frames[index].name,
+            "trajectory_segment": frame_segments[index],
+            "robot_reference_segment": (
+                frame_segments[index] == reference_robot_segment
+            ),
             "world_from_camera": camera.to_dict(),
             "coordinate_rms_px": rms(per_frame_errors.get(index, [])),
             "used_tag_observations": len(per_frame_errors.get(index, [])) // 8,
@@ -1180,22 +1975,106 @@ def refine_zero_pose_with_buildviz(
         tag_view_counts.get(tag_id, 0) >= 2
         for tag_id in observed_floor_ids
     )
+    floor_observation_indices = [
+        index for index, item in enumerate(observations)
+        if item[1] in floor_tags
+    ]
+    rejected_observation_set = set(rejected_observation_indices)
+    rejected_floor_count = sum(
+        index in rejected_observation_set for index in floor_observation_indices
+    )
+    rejected_floor_fraction = (
+        rejected_floor_count / len(floor_observation_indices)
+        if floor_observation_indices else 0.0
+    )
+    floor_rejection_by_segment: list[dict[str, Any]] = []
+    for segment in range(segment_count):
+        segment_indices = [
+            index for index in floor_observation_indices
+            if frame_segments[observations[index][0]] == segment
+        ]
+        rejected = sum(
+            index in rejected_observation_set for index in segment_indices
+        )
+        floor_rejection_by_segment.append({
+            "segment": segment,
+            "observations": len(segment_indices),
+            "rejected_observations": rejected,
+            "rejected_fraction": (
+                rejected / len(segment_indices) if segment_indices else 0.0
+            ),
+        })
+    systematic_floor_consistency_passed = (
+        rejected_floor_fraction <= 0.20
+        and all(
+            item["observations"] < 6 or item["rejected_fraction"] <= 0.50
+            for item in floor_rejection_by_segment
+        )
+    )
+    robot_segment_motion_report = []
+    for segment, motion in enumerate(robot_segment_motions):
+        robot_segment_motion_report.append({
+            "segment": segment,
+            "reference": segment == reference_robot_segment,
+            "robot_observations": robot_observations_per_segment[segment],
+            "floor_observations": floor_observations_per_segment[segment],
+            "translation_mm": float(np.linalg.norm(
+                motion.translation_m
+            ) * 1000.0),
+            "rotation_deg": math.degrees(float(
+                motion.rotation.magnitude()
+            )),
+            "world_from_reference_robot": motion.to_dict(),
+        })
+    scene_motion_passed = all(
+        item["translation_mm"] <= 120.0 and item["rotation_deg"] <= 12.0
+        for item in robot_segment_motion_report
+    )
     quality_passed = (
         final_rms <= 3.0
         and floor_rms <= 3.0
         and robot_rms <= 3.5
         and floor_view_coverage
+        and systematic_floor_consistency_passed
+        and depth_quality_passed
+        and scene_motion_passed
+    )
+    visual_audit = _write_reprojection_audit(
+        frame_archive_dir=Path(frame_archive_dir),
+        frames=frames,
+        observations=observations,
+        cameras=cameras,
+        robot_tags=refined_tags,
+        floor_tags=refined_floor_tags,
+        robot_segment_motions=robot_segment_motions,
+        frame_segments=frame_segments,
+        object_corners=object_corners,
+        fit_observation_indices=fit_observation_indices,
     )
     report = {
         "ok": quality_passed,
         "method": (
             "image-first joint bundle adjustment of archived full-resolution "
-            "corners; one fixed floor origin plus measured coplanar floor tags; "
+            "corners; one output floor origin plus coplanar floor landmarks "
+            "and surveyed priors when configured; "
             "ARKit relative motion within uninterrupted sessions; a robust "
             "consistent-mode selection followed by unweighted least squares; "
+            "confidence-filtered LiDAR point-to-tag-plane factors; rigid "
+            "whole-robot motion between reconnect segments; "
             "BuildViz used only for initialization and as a post-fit diagnostic"
         ),
         "frames": len(frames),
+        "archived_frames": archived_frame_count,
+        "keyframe_selection": {
+            "used": len(frames) < archived_frame_count,
+            "selected_frames": len(frames),
+            "archived_frames": archived_frame_count,
+            "source_resolution_preserved": True,
+            "selection_basis": (
+                "tag coverage, apparent tag size, reconnect boundaries, and "
+                "ARKit translation/rotation diversity"
+            ),
+        },
         "corner_observations": len(observations),
         "used_corner_observations": len(fit_observation_indices),
         "rejected_corner_observations": len(rejected_observation_indices),
@@ -1212,11 +2091,18 @@ def refine_zero_pose_with_buildviz(
         "floor_anchor_tag_id": floor_anchor_id,
         "quality_gate": {
             "passed": quality_passed,
-            "basis": "image reprojection only; BuildViz disagreement is diagnostic",
+            "basis": (
+                "full-resolution image reprojection, LiDAR range, surveyed "
+                "floor consistency, and bounded reconnect movement; BuildViz "
+                "disagreement is diagnostic"
+            ),
             "final_coordinate_rms_px_max": 3.0,
             "floor_coordinate_rms_px_max": 3.0,
             "robot_coordinate_rms_px_max": 3.5,
             "at_least_two_views_per_floor_tag": floor_view_coverage,
+            "systematic_floor_consistency": systematic_floor_consistency_passed,
+            "lidar_depth_consistency": depth_quality_passed,
+            "scene_motion_bounded": scene_motion_passed,
         },
         "bundle_optimizer": {
             "success": bool(bundle_solution.success),
@@ -1241,9 +2127,57 @@ def refine_zero_pose_with_buildviz(
                 "final_coordinate_rms_px": polish_final_rms,
             },
         },
+        "lidar_depth": {
+            "available": depth_available,
+            "constraints": depth_constraint_count,
+            "used_constraints": len(fit_depth_constraint_indices),
+            "rejected_constraints": len(rejected_depth_constraint_indices),
+            "minimum_constraints": minimum_depth_constraints,
+            "median_absolute_error_mm": depth_median_absolute_mm,
+            "p90_absolute_error_mm": depth_p90_absolute_mm,
+            "rms_error_mm": (
+                rms(used_depth_errors_mm) if used_depth_errors_mm.size else None
+            ),
+            "quality_passed": depth_quality_passed,
+            "role": (
+                "metric range/plane constraint; RGB corners remain the "
+                "lateral and orientation measurement"
+            ),
+        },
+        "scene_motion": {
+            "reference_segment": reference_robot_segment,
+            "segments": robot_segment_motion_report,
+            "floor_rejection_fraction": rejected_floor_fraction,
+            "floor_rejection_by_segment": floor_rejection_by_segment,
+            "systematic_floor_consistency_passed": (
+                systematic_floor_consistency_passed
+            ),
+        },
+        "floor_reference": {
+            "status": floor_reference_status or "unspecified",
+            "uses_measured_ground_truth": any(
+                prior["source"] == "measured_ground_truth"
+                for prior in floor_priors.values()
+            ),
+            "per_tag": {
+                str(tag_id): prior
+                for tag_id, prior in sorted(floor_priors.items())
+            },
+        },
+        "visual_reprojection_audit": visual_audit,
         "outlier_filter": {
             "robot_observation_rms_px_max": 8.0,
             "floor_observation_rms_px_max": 6.0,
+            "initial_robust_rejected_observations": len(
+                initial_rejected_observation_indices
+            ),
+            "recovered_after_polish": len(
+                set(initial_rejected_observation_indices)
+                - set(rejected_observation_indices)
+            ),
+            "initial_robust_rejected_depth_constraints": len(
+                initial_rejected_depth_constraint_indices
+            ),
             "rejected_by_tag_id": {
                 str(tag_id): count
                 for tag_id, count in sorted(rejected_by_tag.items())
@@ -1316,9 +2250,26 @@ def refine_zero_pose_with_buildviz(
         "per_tag": corrections,
     }
     if not quality_passed:
-        report["skipped_reason"] = (
-            "fewer than two consistent image views remain for a floor tag"
-            if not floor_view_coverage
-            else "joint photo reprojection residual exceeds the image-fit accuracy gate"
-        )
+        failing_reasons: list[str] = []
+        if not floor_view_coverage:
+            failing_reasons.append(
+                "fewer than two consistent image views remain for a floor tag"
+            )
+        if not systematic_floor_consistency_passed:
+            failing_reasons.append(
+                "too many floor observations disagree systematically with the fit"
+            )
+        if not depth_quality_passed:
+            failing_reasons.append(
+                "too few trustworthy LiDAR samples or excessive LiDAR range error"
+            )
+        if not scene_motion_passed:
+            failing_reasons.append(
+                "robot movement between reconnects exceeds the safe compensation limit"
+            )
+        if final_rms > 3.0 or floor_rms > 3.0 or robot_rms > 3.5:
+            failing_reasons.append(
+                "joint photo reprojection residual exceeds the image-fit accuracy gate"
+            )
+        report["skipped_reason"] = "; ".join(failing_reasons)
     return refined_survey, report

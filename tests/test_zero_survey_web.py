@@ -229,6 +229,9 @@ def test_manager_requires_only_visible_metric_floor_tags(tmp_path) -> None:
         item.get("kind") == "yoke_face" for item in manager._robot_positions
     ) == 24
     assert board["marker_size_m"] == 0.0272
+    assert board["reference_status"] == "provisional"
+    assert board["position_uncertainty_m"] == 0.005
+    assert board["yaw_uncertainty_deg"] == 1.5
     assert set(board["floor_tags"]) == {
         "100", "101", "102", "103", "104", "105"
     }
@@ -237,3 +240,10 @@ def test_manager_requires_only_visible_metric_floor_tags(tmp_path) -> None:
     ]
     tag_101 = board["floor_tags"]["101"]["world_from_tag"]["translation_m"]
     assert abs((tag_101[0] ** 2 + tag_101[1] ** 2) ** 0.5 - 0.8621) < 0.001
+
+    manager._run_dir = tmp_path / "run"
+    audit_dir = manager._run_dir / "reprojection-audit-v5"
+    audit_dir.mkdir(parents=True)
+    (audit_dir / "audit-001.jpg").write_bytes(b"jpeg")
+    assert manager.reprojection_audit_jpeg("audit-001.jpg") == b"jpeg"
+    assert manager.reprojection_audit_jpeg("../secret.jpg") is None

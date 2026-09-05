@@ -37,6 +37,9 @@ from hexapod_tracker.zero_pose_survey import (
     main as zero_pose_survey_main,
 )
 from hexapod_tracker.zero_pose_refinement import (
+    _ArchivedFrame,
+    _depth_constraint,
+    _select_keyframes,
     refine_zero_pose_with_buildviz,
 )
 
@@ -98,6 +101,71 @@ def _detection(
     if noise_px:
         pixels += np.random.default_rng(seed).normal(0.0, noise_px, pixels.shape)
     return TagCorners(tag_id, pixels.astype(np.float32))
+
+
+def test_depth_factor_uses_registered_high_confidence_tag_interior() -> None:
+    tag = RigidTransform(np.asarray([0.0, 0.0, 0.5]), Rotation.identity())
+    camera = RigidTransform.identity()
+    corners = _detection(7, 0.027, tag, camera).corners_px
+    frame = _ArchivedFrame(
+        name="frame.npz",
+        captured_unix=1.0,
+        camera_matrix=CAMERA_MATRIX,
+        arkit_world_from_camera=camera,
+        detections=((7, corners),),
+        image_size_px=(1280, 720),
+        depth_m=np.full((180, 320), 0.5, dtype=np.float32),
+        confidence=np.full((180, 320), 2, dtype=np.uint8),
+    )
+
+    constraint = _depth_constraint(
+        frame,
+        frame_index=0,
+        tag_id=7,
+        pixels=corners,
+        world_from_tag=tag,
+        world_from_camera=camera,
+    )
+
+    assert constraint is not None
+    assert constraint.confidence_level == 2
+    assert constraint.sample_count >= 6
+    assert np.allclose(constraint.point_camera_m, [0.0, 0.0, 0.5], atol=0.003)
+    assert constraint.sigma_m == 0.006
+
+
+def test_keyframes_preserve_rare_tags_and_full_resolution() -> None:
+    corners = np.asarray([
+        [600.0, 320.0], [680.0, 320.0],
+        [680.0, 400.0], [600.0, 400.0],
+    ])
+    frames = []
+    for index in range(100):
+        detections = [(1, corners)]
+        if index == 37:
+            detections.append((99, corners))
+        frames.append(_ArchivedFrame(
+            name=f"frame-{index:03d}.npz",
+            captured_unix=float(index),
+            camera_matrix=CAMERA_MATRIX,
+            arkit_world_from_camera=RigidTransform(
+                np.asarray([index * 0.005, 0.0, 0.4]), Rotation.identity()
+            ),
+            detections=tuple(detections),
+            image_size_px=(1280, 720),
+            depth_m=None,
+            confidence=None,
+            trajectory_segment=0 if index < 50 else 1,
+        ))
+
+    selected = _select_keyframes(frames)
+
+    assert len(selected) == 32
+    assert selected[0].name == "frame-000.npz"
+    assert selected[-1].name == "frame-099.npz"
+    assert any(tag_id == 99 for frame in selected for tag_id, _ in frame.detections)
+    assert all(frame.image_size_px == (1280, 720) for frame in selected)
+    assert {frame.trajectory_segment for frame in selected} == {0, 1}
 
 
 def test_handheld_alignment_converts_opengl_camera_trajectory() -> None:
@@ -823,20 +891,21 @@ def test_buildviz_refinement_corrects_noisy_multiview_mounts(
         np.zeros(3), Rotation.from_euler("x", 180.0, degrees=True)
     )
     all_tags = {**true_tags, **true_floor_tags}
+    robot_shift = RigidTransform(
+        np.asarray([0.020, -0.010, 0.004]),
+        Rotation.from_euler("z", 1.5, degrees=True),
+    )
     for index, camera in enumerate(camera_poses):
         detections = [
-            _detection(tag_id, 0.027, tag, camera)
+            _detection(
+                tag_id,
+                0.027,
+                robot_shift.compose(tag)
+                if index >= 3 and tag_id in true_tags else tag,
+                camera,
+            )
             for tag_id, tag in all_tags.items()
         ]
-        if index == 0:
-            detections = [
-                TagCorners(
-                    item.tag_id,
-                    item.corners_px + np.asarray([80.0, -55.0]),
-                )
-                if item.tag_id == 105 else item
-                for item in detections
-            ]
         arkit_gl = camera.compose(cv_from_gl.inverse())
         np.savez_compressed(
             archive / f"frame-{index:02d}.npz",
@@ -844,6 +913,7 @@ def test_buildviz_refinement_corrects_noisy_multiview_mounts(
             camera_pose_xyzw_xyz=np.asarray([
                 *arkit_gl.rotation.as_quat(), *arkit_gl.translation_m
             ]),
+            captured_unix=float(index * 5 if index < 3 else 30 + index * 5),
             tag_ids=np.asarray([item.tag_id for item in detections]),
             tag_corners_px=np.asarray([item.corners_px for item in detections]),
         )
@@ -894,15 +964,27 @@ def test_buildviz_refinement_corrects_noisy_multiview_mounts(
         orientation_anchor_tag_id=1,
     )
 
-    assert report["ok"] is True
+    assert report["ok"] is True, {
+        key: report.get(key)
+        for key in (
+            "skipped_reason", "final_coordinate_rms_px",
+            "floor_coordinate_rms_px", "robot_coordinate_rms_px",
+            "scene_motion", "outlier_filter",
+        )
+    }
     assert report["frames"] == 5
     assert report["robot_tag_count"] == len(true_tags)
-    assert report["rejected_corner_observations"] == 1
-    assert report["used_corner_observations"] == (
-        report["corner_observations"] - 1
-    )
-    assert report["outlier_filter"]["rejected_by_tag_id"] == {"105": 1}
+    assert report["rejected_corner_observations"] == 0
+    assert report["used_corner_observations"] == report["corner_observations"]
+    assert report["outlier_filter"]["rejected_by_tag_id"] == {}
     assert report["bundle_optimizer"]["inlier_polish"]["accepted"] is True
+    assert len(report["scene_motion"]["segments"]) == 2
+    moved_segment = next(
+        item for item in report["scene_motion"]["segments"]
+        if not item["reference"]
+    )
+    assert np.isclose(moved_segment["translation_mm"], 22.716, atol=2.0)
+    assert np.isclose(moved_segment["rotation_deg"], 1.5, atol=0.5)
     assert report["final_coordinate_rms_px"] < 0.25
     assert (
         report["final_coordinate_rms_px"]

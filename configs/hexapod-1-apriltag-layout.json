@@ -27,6 +27,7 @@
   },
   "floor": {
     "frame": "floor_grid",
+    "reference_status": "provisional",
     "units": "meters",
     "origin": "tag 104 center",
     "positive_x": "tag 104 toward tags 102 and 103",

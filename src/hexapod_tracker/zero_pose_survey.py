@@ -41,7 +41,7 @@ from .tag_survey import (
 from .zero_pose_refinement import refine_zero_pose_with_buildviz
 
 
-CALIBRATION_MODEL_VERSION = 4
+CALIBRATION_MODEL_VERSION = 5
 
 
 def _parse_ids(value: str) -> tuple[int, ...]:
@@ -160,6 +160,9 @@ def _archive_frame(
             if frame.confidence is None else np.asarray(frame.confidence)
         ),
         camera_matrix=np.asarray(frame.camera_matrix, dtype=np.float64),
+        image_size_px=np.asarray(
+            [frame.rgb_bgr.shape[1], frame.rgb_bgr.shape[0]], dtype=np.int32
+        ),
         camera_pose_xyzw_xyz=pose_values,
         tag_ids=np.asarray([item.tag_id for item in detections], dtype=np.int32),
         tag_corners_px=np.asarray(
@@ -1622,11 +1625,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "status": "refining",
             "phase": "refine",
             "message": (
-                "Capture complete; jointly fitting cameras and tags to every "
-                "saved corner."
+                "Capture complete; selecting coverage-complete keyframes, then "
+                "jointly fitting full-resolution corners and LiDAR range. The "
+                "offline verification can take a few minutes."
             ),
             "instruction": (
-                "Keep the robot still; BuildViz is now only a comparison."
+                "The phone can stop streaming. Keep the robot still; the page "
+                "will advance when image prediction checks finish."
             ),
             "guidance": None,
             "quality": last_quality,
@@ -1655,6 +1660,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     body_anchor_tag_id=int(selected_body_anchor_id),
                     orientation_anchor_tag_id=int(leg_zero_anchor_id),
                     floor_marker_size_m=anchor_marker_size_m,
+                    floor_manifest=board_manifest,
                     joint_angles_deg=joint_angles,
                 )
             )

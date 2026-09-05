@@ -108,7 +108,7 @@ calibration, the phone is meant to move during this workflow.
    `OK` means its 6-D pose was recorded. Vary the viewing angle rather than
    collecting all samples from one oblique direction.
 6. Keep a mapped floor tag in frame whenever practical. A direct RGB-D solution
-   from the seven-tag metric grid overrides accumulated ARKit drift. Each floor
+   from the mapped metric grid overrides accumulated ARKit drift. Each floor
    tag must also appear together with another mapped floor tag so the grid
    geometry is genuinely checked rather than self-validating one tag at a time.
 
@@ -136,8 +136,10 @@ uv run hexapod-zero-survey \
 ```
 
 The production completion checklist has a finite definition: 13 horizontal
-lid/chassis tags, 24 vertical angle tags (four per leg), and all seven mapped
-floor tags must have stable estimates. It additionally requires multi-tag floor
+lid/chassis tags, 24 vertical angle tags (four per leg), and the six normally
+visible mapped floor tags (100–105) must have stable estimates. Tag 112 is under
+the zero-pose robot and is optional unless explicitly requested. It additionally
+requires multi-tag floor
 views to fit below 1.25 px RMS, a LiDAR plane below 12 mm RMS, mapped floor
 positions below 10 mm RMS, heights below 6 mm RMS, and orientations below 3
 degrees RMS. Coverage alone cannot enable Save.
@@ -170,14 +172,37 @@ The JSON output retains, for each tag:
 It also records every pairwise ground/anchor center distance, planar distance,
 and XYZ delta. The optional updated config replaces surveyed expected floor
 poses with the new measurements, carries per-ID marker sizes, and updates stable
-robot tag mounts. The final offline pass jointly fits every archived
-full-resolution tag corner, every archived camera pose, every robot tag, and
-every observed floor tag. The selected floor tag defines the coordinate origin
-after the fit; loose floor tags are constrained to the floor plane but are not
-forced onto their nominal one-foot grid positions. BuildViz supplies only
-initial leg/face branches and a post-fit discrepancy report. The unchanged L0
-hip tag labels the body orientation; if it was replaced, specify the new
-reference explicitly before saving.
+robot tag mounts. The final offline pass jointly fits every full-resolution tag
+corner from a coverage- and viewpoint-selected set of at most 32 keyframes,
+every selected camera pose, every robot tag, and every observed floor tag. All
+source photos remain archived. Registered, confidence-filtered LiDAR samples
+from the interior of sufficiently large tags add point-to-tag-plane range
+constraints; RGB corners remain the lateral and orientation measurement. Floor
+coordinates are treated as metric priors only when the floor map has
+`"reference_status": "surveyed"`; their `position_uncertainty_m` and
+`yaw_uncertainty_deg` values set the prior weights. A `provisional` grid remains
+a set of loose coplanar landmarks even when it carries estimated uncertainty.
+The selected floor tag defines the coordinate origin after the fit.
+
+Long stream gaps form separate trajectory segments. The solver may estimate a
+small rigid movement of the whole robot between segments, preventing a nudge
+during a reconnect from being hidden by rejecting floor observations or
+warping individual tag locations. Excessive movement fails the quality gate.
+The report separately exposes accepted-image RMS, all-observation RMS, LiDAR
+range error, floor rejection fraction, and recovered reconnect movement. It
+also writes representative `reprojection-audit-v5` images with detected corners
+in green, predicted corners in magenta, and a line showing every corner error.
+BuildViz supplies only initial leg/face branches and a post-fit discrepancy
+report. The unchanged L0 hip tag labels the body orientation; if it was
+replaced, specify the new reference explicitly before saving.
+
+To promote a floor map from provisional to measured, update each
+`world_from_tag.translation_m` in the robot layout, set
+`floor.reference_status` to `surveyed`, and set realistic uncertainty values.
+Coordinates are tag centers relative to the chosen origin tag; X/Y center
+measurements are sufficient, while measured tag yaw is optional. A single tag
+may instead carry its own `reference_status: surveyed` for a partially measured
+map.
 
 If the robot is stationary at known nonzero angles, pass a JSON object mapping
 all or some joint names to degrees with `--joint-angles-json`. Omitted joint

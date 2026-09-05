@@ -472,9 +472,15 @@ class ZeroPoseSurveyManager:
         marker_size_m = float(settings["marker_size_mm"]) / 1000.0
         requested = {int(value) for value in settings["floor_tag_ids"]}
         origin_id = int(settings["origin_tag_id"])
+        floor_layout = self.robot_layout.get("floor", {})
+        floor_layout_specs = {
+            int(item["id"]): item
+            for item in floor_layout.get("tags", [])
+            if isinstance(item, Mapping)
+        }
         layout_tags = {
             int(item["id"]): RigidTransform.from_dict(item["world_from_tag"])
-            for item in self.robot_layout.get("floor", {}).get("tags", [])
+            for item in floor_layout.get("tags", [])
             if isinstance(item, Mapping)
         }
         if origin_id not in layout_tags:
@@ -483,6 +489,7 @@ class ZeroPoseSurveyManager:
                 "tag_family": "tag36h11",
                 "marker_size_m": marker_size_m,
                 "world_frame": f"tag {origin_id} center",
+                "reference_status": "provisional",
                 "floor_tags": {
                     str(origin_id): {
                         "label": "survey floor origin",
@@ -501,6 +508,16 @@ class ZeroPoseSurveyManager:
                 "world_from_tag": origin_from_layout_world.compose(
                     layout_tags[tag_id]
                 ).to_dict(),
+                **{
+                    key: floor_layout_specs[tag_id][key]
+                    for key in (
+                        "position_uncertainty_m",
+                        "height_uncertainty_m",
+                        "normal_uncertainty_deg",
+                        "yaw_uncertainty_deg",
+                    )
+                    if key in floor_layout_specs[tag_id]
+                },
             }
             for tag_id in sorted(requested | {origin_id})
             if tag_id in layout_tags
@@ -512,10 +529,19 @@ class ZeroPoseSurveyManager:
             "world_frame": (
                 f"tag {origin_id} center; metric visible floor-tag grid"
             ),
+            "reference_status": floor_layout.get(
+                "reference_status", "provisional"
+            ),
             "floor_tags": mapped,
             "reference_grid_spacing_m": self.robot_layout.get(
                 "floor", {}
             ).get("grid_spacing_m"),
+            "position_uncertainty_m": floor_layout.get(
+                "position_uncertainty_m"
+            ),
+            "yaw_uncertainty_deg": floor_layout.get(
+                "yaw_uncertainty_deg"
+            ),
         }
 
     def _launch(self, settings: dict[str, Any], *, resume: bool) -> dict[str, Any]:
@@ -695,6 +721,21 @@ class ZeroPoseSurveyManager:
         with self._lock:
             path = self._camera_path
             if path is None or not path.is_file():
+                return None
+            try:
+                return path.read_bytes()
+            except OSError:
+                return None
+
+    def reprojection_audit_jpeg(self, filename: str) -> bytes | None:
+        """Read one generated audit image without exposing arbitrary paths."""
+        if Path(filename).name != filename or not filename.endswith(".jpg"):
+            return None
+        with self._lock:
+            if self._run_dir is None:
+                return None
+            path = self._run_dir / "reprojection-audit-v5" / filename
+            if not path.is_file():
                 return None
             try:
                 return path.read_bytes()

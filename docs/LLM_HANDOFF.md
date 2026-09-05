@@ -175,17 +175,23 @@ and shows an isometric tag/orientation map and phone path. The updated config
 replaces surveyed floor poses and learns robot `frame_from_tag` values from a
 known stationary pose. Chassis tag 0 fixes the body-origin translation while
 the explicitly unchanged L0 hip tag aligns the survey to the BuildViz body
-axes. After capture, an image-first bundle adjustment jointly refines the
-archived camera poses plus every robot and floor tag from full-resolution
-corners. One floor tag defines the final origin; the others are remeasured as
-coplanar landmarks instead of being forced onto the nominal grid. BuildViz is
+axes. After capture, an image-first bundle adjustment jointly refines up to 32
+coverage- and viewpoint-selected full-resolution keyframes plus every robot and
+floor tag. Confidence-filtered LiDAR samples inside sufficiently large tags add
+point-to-tag-plane range factors. A floor map explicitly marked `surveyed` uses
+its configured position/yaw uncertainties as metric priors; a `provisional`
+map keeps floor tags as loose coplanar landmarks. One floor tag defines the
+final origin. BuildViz is
 used to initialize the leg/face branches and diagnose disagreement, not as a
 fixed answer. Long capture gaps split the ARKit relative-motion prior because
-each reconnect may reset the phone's coordinate frame. A robust pass identifies
-the largest mutually consistent set of robot/floor observations, and an
-ordinary least-squares finish reports calibration RMS only on that set while
-recording every rejected observation and its residual. A one-pose result still
-cannot independently identify new link lengths or joint axes.
+each reconnect may reset the phone's coordinate frame, and a per-segment rigid
+robot-motion variable prevents a physical nudge from warping the tag map. A
+robust pass identifies the largest mutually consistent set of robot/floor
+observations, and an ordinary least-squares finish reports calibration RMS only
+on that set while recording every rejected observation and its residual.
+Representative source images receive detected-versus-predicted corner overlays
+in `reprojection-audit-v5`. A one-pose result still cannot independently
+identify new link lengths or joint axes.
 Coverage is necessary but not sufficient: the quality gate requires every
 expected floor tag to be co-visible with another mapped tag, at least six
 multi-tag reference frames, a bounded LiDAR floor-plane residual, at least two

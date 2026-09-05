@@ -43,7 +43,7 @@ not added to the tracker's runtime dependencies.
 7. Keep the board and phone still while 30 accepted frames are collected.
 
 The default board is 188 x 206 mm and fits A4 or US Letter. IDs 40–43 avoid
-the robot and provisional floor IDs in the current tracker configuration.
+the robot and surveyed floor IDs in the current tracker configuration.
 
 ## Run calibration
 

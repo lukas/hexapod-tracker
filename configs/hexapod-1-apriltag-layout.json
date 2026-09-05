@@ -27,7 +27,7 @@
   },
   "floor": {
     "frame": "floor_grid",
-    "reference_status": "provisional",
+    "reference_status": "surveyed",
     "units": "meters",
     "origin": "tag 104 center",
     "positive_x": "tag 104 toward tags 102 and 103",
@@ -109,7 +109,7 @@
   "limitations": [
     "Robot-tag orientations are suitable for identity and axis handling, but robot tag translations remain unmeasured and must not be treated as calibrated link-origin transforms.",
     "The L2_tibia side tag 16 had only one strong geometric view; its orientation also uses the approximately 180-degree in-plane relationship to same-facing tag 31.",
-    "The floor positions assume the described one-foot grid. Survey tag centers before claiming better than 5 mm absolute position accuracy.",
+    "The operator confirmed that adjacent floor-grid sites were placed one foot (304.8 mm) apart. The 5 mm position uncertainty allows for tape-placement and recollection error; do not claim finer absolute accuracy without a new physical survey.",
     "Do not add the vertical yoke tags directly to housing_pose.py until their frame_from_tag translations have been measured or obtained from CAD."
   ]
 }

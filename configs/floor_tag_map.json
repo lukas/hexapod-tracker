@@ -22,9 +22,10 @@
     {"id": 105, "grid": [0, 2], "center": [0.0, 609.6, 0.0], "yaw_degrees": -90.798, "center_uncertainty_mm": 5.0, "yaw_uncertainty_degrees": 1.5},
     {"id": 101, "grid": [2, 2], "center": [609.6, 609.6, 0.0], "yaw_degrees": -90.915, "center_uncertainty_mm": 5.0, "yaw_uncertainty_degrees": 1.5}
   ],
-  "provisional": true,
+  "provisional": false,
   "source": {
     "captured": "2026-09-03",
+    "operator_confirmed": "2026-09-05",
     "images": ["IMG_3744.jpeg", "IMG_3745.jpeg", "IMG_3746.jpeg", "IMG_3747.jpeg", "IMG_3748.jpeg", "IMG_3749.jpeg", "IMG_3750.jpeg", "IMG_3751.jpeg"],
     "floor_fit_images": ["IMG_3744.jpeg", "IMG_3745.jpeg"],
     "floor_grid_fit_rms_mm": [1.405, 1.558]
@@ -33,6 +34,6 @@
     "All seven floor IDs decoded in both overhead images.",
     "Yaw is the circular mean of two independent planar rectifications; their per-tag disagreement was 0.46 degrees or less.",
     "The rectified black-square sizes were 26.78 to 27.13 mm, consistent with the generated 27.2 mm design.",
-    "The one-foot centers are based on the operator's placement description, not an independent tape survey; retain the stated position uncertainty until surveyed."
+    "The operator confirmed that adjacent floor-grid sites were placed one foot (304.8 mm) apart. The 5 mm center uncertainty remains to cover tape-placement and recollection error."
   ]
 }

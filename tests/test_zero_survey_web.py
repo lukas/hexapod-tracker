@@ -229,7 +229,7 @@ def test_manager_requires_only_visible_metric_floor_tags(tmp_path) -> None:
         item.get("kind") == "yoke_face" for item in manager._robot_positions
     ) == 24
     assert board["marker_size_m"] == 0.0272
-    assert board["reference_status"] == "provisional"
+    assert board["reference_status"] == "surveyed"
     assert board["position_uncertainty_m"] == 0.005
     assert board["yaw_uncertainty_deg"] == 1.5
     assert set(board["floor_tags"]) == {

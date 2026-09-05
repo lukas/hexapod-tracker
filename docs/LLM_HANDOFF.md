@@ -265,11 +265,12 @@ Important limitations in the current checked-in configs:
 - Several `frame_from_tag` translations are zero/photo-inferred placeholders.
   Measure tag-to-joint-axis transforms before calling a tag center a mechanical
   joint center.
-- The planar floor map is provisional. Active visible anchors are tags 100,
-  101, 102, 103, 104, and 105; tag 112 is optional because it is normally under
-  the robot. Their one-foot center spacing comes from the
-  operator's placement description, while yaw comes from two photographed
-  planar rectifications; survey the centers before millimeter-level claims.
+- The planar floor map uses an operator-confirmed one-foot (304.8 mm) grid.
+  Active visible anchors are tags 100, 101, 102, 103, 104, and 105; tag 112 is
+  optional because it is normally under the robot. Yaw comes from two
+  photographed planar rectifications. The configured 5 mm center uncertainty
+  allows for placement and recollection error; perform a fresh physical survey
+  before making finer absolute-position claims.
 - The current Hexapod 1 and floor inventory has no duplicate IDs. Other loose
   prints in the garage are outside this map and must not be introduced without
   checking for collisions.
@@ -366,8 +367,8 @@ In roughly descending value:
 3. Calibrate each Arducam's intrinsics at every capture mode actually used.
 4. Use one unmoved RGB-D board pose to establish a measured common frame if
    true multi-view 3-D or stereo claims are needed.
-5. Replace provisional floor coordinates/yaws with a physical handheld survey
-   and eliminate duplicate tag IDs.
+5. Re-survey floor-tag centers if accuracy finer than the current 5 mm prior is
+   needed, and eliminate duplicate tag IDs.
 6. Measure tag-to-joint-axis mount transforms or add component-local markers
    before trying to localize flex within an assembly.
 7. Add recorded-camera regression clips with expected tag/pose summaries. Keep

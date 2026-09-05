@@ -1132,19 +1132,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.npz_dir is not None:
             frames = _npz_frames(args.npz_dir)
         else:
-            reader = Record3DReader(
-                args.record3d_device,
-                connect_timeout_s=90.0,
-            )
+            reader = Record3DReader(args.record3d_device)
 
             def live_frames() -> Iterator[RGBDFrame]:
                 assert reader is not None
-                first_frame = True
                 while True:
-                    yield reader.next_frame(
-                        timeout_s=90.0 if first_frame else 15.0
-                    )
-                    first_frame = False
+                    yield reader.next_frame()
 
             frames = live_frames()
         for frame_index, frame in enumerate(frames):

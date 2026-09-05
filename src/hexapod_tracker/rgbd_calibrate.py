@@ -119,12 +119,7 @@ def _npz_frames(directory: Path) -> Iterator[RGBDFrame]:
 class Record3DReader:
     """Copy coherent frames from Record3D's callback-driven USB API."""
 
-    def __init__(
-        self,
-        device_index: int,
-        *,
-        connect_timeout_s: float = 7.0,
-    ) -> None:
+    def __init__(self, device_index: int) -> None:
         try:
             from record3d import Record3DStream
         except ImportError as error:
@@ -132,54 +127,26 @@ class Record3DReader:
                 "Record3D support is not installed; run "
                 "`uv run --with cmake uv sync --extra dev --extra rgbd`"
             ) from error
+        devices = Record3DStream.get_connected_devices()
+        if not devices:
+            raise RuntimeError(
+                "no Record3D USB device found; connect the iPhone, open "
+                "Record3D, and enable USB Streaming mode"
+            )
+        if device_index < 0 or device_index >= len(devices):
+            raise RuntimeError(
+                f"device index {device_index} is unavailable; found "
+                f"{len(devices)} device(s)"
+            )
         self._event = threading.Event()
         self._stopped = threading.Event()
         self._closed = False
-        self._session = None
-        self.device = None
-
-        # usbmux can enumerate the phone slightly before Record3D has opened
-        # its streaming service.  A single eager connect made the web wizard
-        # fail immediately even though the phone correctly said "Waiting for
-        # Connection".  Re-enumerate and retry long enough for that service to
-        # become ready after the user presses Record.
-        found_count = 0
-        deadline = time.monotonic() + max(0.0, connect_timeout_s)
-        while True:
-            devices = Record3DStream.get_connected_devices()
-            found_count = len(devices)
-            if device_index >= 0 and device_index < found_count:
-                session = Record3DStream()
-                session.on_new_frame = self._event.set
-                session.on_stream_stopped = self._stopped.set
-                if session.connect(devices[device_index]):
-                    self._session = session
-                    self.device = devices[device_index]
-                    break
-                disconnect = getattr(session, "disconnect", None)
-                if disconnect is not None:
-                    disconnect()
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(min(0.75, max(0.0, deadline - time.monotonic())))
-
-        if self._session is not None:
-            return
-        if not found_count:
-            raise RuntimeError(
-                "no Record3D USB device found; unlock the iPhone, trust this "
-                "Mac, open Record3D, select USB Streaming, and press Record"
-            )
-        if device_index < 0 or device_index >= found_count:
-            raise RuntimeError(
-                f"device index {device_index} is unavailable; found "
-                f"{found_count} device(s)"
-            )
-        raise RuntimeError(
-            "the iPhone is visible over USB, but Record3D did not accept the "
-            "stream connection; stop and restart USB Streaming in Record3D, "
-            "then retry"
-        )
+        self._session = Record3DStream()
+        self._session.on_new_frame = self._event.set
+        self._session.on_stream_stopped = self._stopped.set
+        if not self._session.connect(devices[device_index]):
+            raise RuntimeError(f"could not connect to Record3D device {device_index}")
+        self.device = devices[device_index]
 
     def close(self) -> None:
         if self._closed:
@@ -229,12 +196,10 @@ class Record3DReader:
         })
         return RGBDFrame(
             rgb_bgr=cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR),
-            # Own the native buffers so Record3D cannot overwrite a frame
-            # while reconstruction is still reading it.
-            depth_m=np.asarray(depth, dtype=np.float32).copy(),
+            depth_m=np.asarray(depth, dtype=np.float32),
             confidence=(
                 None if np.asarray(confidence).size == 0
-                else np.asarray(confidence).copy()
+                else np.asarray(confidence)
             ),
             camera_matrix=matrix,
             source_label="Record3D USB",

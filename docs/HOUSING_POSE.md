@@ -42,11 +42,12 @@ uv run hexapod-zero-survey \
 ```
 
 The chassis anchor fixes the body origin from its known mount translation. The
-unchanged L0 hip tag independently aligns observations to the BuildViz body
-axes, so a stale chassis-tag yaw cannot rotate the reconstructed robot. The
-survey then refines archived full-resolution corners against the verified CAD
-skeleton and shared six-leg mount geometry before learning individual tag
-offsets. See
+unchanged L0 hip tag independently labels the BuildViz body axes, so a stale
+chassis-tag yaw cannot rotate the reconstructed robot. The final solve fits all
+archived full-resolution image corners jointly. One floor tag names the output
+origin; the other floor tags and all robot tags are measured from the photos.
+BuildViz initializes the correct leg/face branches and is then reported only as
+a diagnostic comparison, not imposed as ground truth. See
 [`RGBD_CALIBRATION.md`](RGBD_CALIBRATION.md#handheld-zero-pose-tag-survey).
 If the configured L0 hip tag is replaced,
 pass its new ID explicitly with `--leg-zero-anchor-tag-id`; other missing robot

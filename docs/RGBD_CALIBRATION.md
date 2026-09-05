@@ -170,10 +170,13 @@ The JSON output retains, for each tag:
 It also records every pairwise ground/anchor center distance, planar distance,
 and XYZ delta. The optional updated config replaces surveyed expected floor
 poses with the new measurements, carries per-ID marker sizes, and updates stable
-robot tag mounts. The final offline pass uses the archived full-resolution tag
-corners, the verified BuildViz skeleton, shared mount geometry across all six
-legs, and bounded individual placement corrections. The unchanged L0 hip tag
-supplies the body orientation gauge; if it was replaced, specify the new
+robot tag mounts. The final offline pass jointly fits every archived
+full-resolution tag corner, every archived camera pose, every robot tag, and
+every observed floor tag. The selected floor tag defines the coordinate origin
+after the fit; loose floor tags are constrained to the floor plane but are not
+forced onto their nominal one-foot grid positions. BuildViz supplies only
+initial leg/face branches and a post-fit discrepancy report. The unchanged L0
+hip tag labels the body orientation; if it was replaced, specify the new
 reference explicitly before saving.
 
 If the robot is stationary at known nonzero angles, pass a JSON object mapping

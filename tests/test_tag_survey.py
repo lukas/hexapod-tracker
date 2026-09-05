@@ -780,10 +780,22 @@ def test_buildviz_refinement_corrects_noisy_multiview_mounts(
             ),
         )
         true_tags[tag_id] = zero_frames[spec["frame"]].compose(mount)
-    floor_tags = {
+    true_floor_tags = {
         104: RigidTransform(
-            np.asarray([-0.24, -0.12, 0.0]), Rotation.identity()
-        )
+            np.asarray([0.0, 0.0, 0.0]), Rotation.identity()
+        ),
+        105: RigidTransform(
+            np.asarray([-0.12, 0.31, 0.0]),
+            Rotation.from_euler("z", 11.0, degrees=True),
+        ),
+    }
+    floor_tags = {
+        **true_floor_tags,
+        105: RigidTransform(
+            true_floor_tags[105].translation_m
+            + np.asarray([0.025, -0.018, 0.0]),
+            Rotation.from_euler("z", 7.0, degrees=True),
+        ),
     }
 
     def look_at(position: np.ndarray) -> RigidTransform:
@@ -810,7 +822,7 @@ def test_buildviz_refinement_corrects_noisy_multiview_mounts(
     cv_from_gl = RigidTransform(
         np.zeros(3), Rotation.from_euler("x", 180.0, degrees=True)
     )
-    all_tags = {**true_tags, **floor_tags}
+    all_tags = {**true_tags, **true_floor_tags}
     for index, camera in enumerate(camera_poses):
         detections = [
             _detection(tag_id, 0.027, tag, camera)
@@ -852,6 +864,14 @@ def test_buildviz_refinement_corrects_noisy_multiview_mounts(
                 "world_from_tag": transform.to_dict(),
             }
             for tag_id, transform in raw_transforms.items()
+        ] + [
+            {
+                "tag_id": tag_id,
+                "stable": True,
+                "role": "calibration_anchor" if tag_id == 104 else "ground",
+                "world_from_tag": transform.to_dict(),
+            }
+            for tag_id, transform in floor_tags.items()
         ],
     }
 
@@ -886,6 +906,31 @@ def test_buildviz_refinement_corrects_noisy_multiview_mounts(
         for tag_id, true in true_tags.items()
     ])
     assert refined_error < raw_error * 0.1
+    refined_floor = refined_by_id[105]
+    initial_floor_error = np.linalg.norm(
+        floor_tags[105].translation_m - true_floor_tags[105].translation_m
+    )
+    refined_floor_error = np.linalg.norm(
+        refined_floor.translation_m - true_floor_tags[105].translation_m
+    )
+    assert refined_floor_error < initial_floor_error * 0.1
+    floor_correction = next(
+        item for item in report["floor_tag_corrections"]
+        if item["tag_id"] == 105
+    )
+    assert floor_correction["translation_mm"] > 25.0
+    distance = next(
+        item for item in refined["floor_tag_distances"]
+        if set(item["tag_ids"]) == {104, 105}
+    )
+    assert np.isclose(
+        distance["planar_distance_m"],
+        np.linalg.norm(
+            true_floor_tags[105].translation_m
+            - true_floor_tags[104].translation_m
+        ),
+        atol=0.001,
+    )
 
 
 def test_survey_rejects_two_consistent_poses_for_the_same_id() -> None:

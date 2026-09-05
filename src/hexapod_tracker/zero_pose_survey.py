@@ -1614,7 +1614,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ):
         refinement_progress = survey.progress()
         print(
-            "REFINING | fitting archived tag corners to the BuildViz skeleton",
+            "REFINING | jointly fitting every archived image corner",
             flush=True,
         )
         _write_progress(args.progress_output, {
@@ -1622,10 +1622,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "status": "refining",
             "phase": "refine",
             "message": (
-                "Capture complete; fitting all saved views to the BuildViz skeleton."
+                "Capture complete; jointly fitting cameras and tags to every "
+                "saved corner."
             ),
             "instruction": (
-                "Keep the robot still while the final geometry solve finishes."
+                "Keep the robot still; BuildViz is now only a comparison."
             ),
             "guidance": None,
             "quality": last_quality,
@@ -1661,7 +1662,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             buildviz_refinement = {
                 "ok": False,
                 "error": f"{type(error).__name__}: {error}",
-                "skipped_reason": "BuildViz refinement failed; raw survey retained",
+                "skipped_reason": "photo bundle adjustment failed; raw survey retained",
             }
     learned_mounts, geometry_report = learn_zero_pose_mounts(
         tracker_config,
@@ -1738,7 +1739,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             connection_error
             if connection_error is not None
             else (
-                "Coverage is complete, but the BuildViz solve needs more "
+                "Coverage is complete, but the photo solve needs more "
                 f"archived views: {buildviz_refinement.get('skipped_reason', 'fit failed')}"
             )
             if refinement_failed

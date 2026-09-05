@@ -247,11 +247,22 @@ export interface ZeroSurveyState {
     robot_tag_count?: number
     initial_coordinate_rms_px?: number
     physical_model_coordinate_rms_px?: number
+    pre_bundle_coordinate_rms_px?: number
     final_coordinate_rms_px?: number
+    floor_coordinate_rms_px?: number
+    robot_coordinate_rms_px?: number
     median_tag_correction_mm?: number
     max_tag_correction_mm?: number
     median_shared_mount_deviation_mm?: number
     max_shared_mount_deviation_mm?: number
+    diagnostics?: {
+      image_fit_outlier_tag_ids: number[]
+      buildviz_or_mount_mismatch_tag_ids: number[]
+      insufficient_archived_view_tag_ids: number[]
+      weak_viewpoint_geometry_tag_ids?: number[]
+      worst_image_frames?: string[]
+      floor_tags_moved_over_10mm?: number[]
+    }
   } | null
   defaults: {
     record3d_device: number

@@ -173,10 +173,13 @@ and shows an isometric tag/orientation map and phone path. The updated config
 replaces surveyed floor poses and learns robot `frame_from_tag` values from a
 known stationary pose. Chassis tag 0 fixes the body-origin translation while
 the explicitly unchanged L0 hip tag aligns the survey to the BuildViz body
-axes. After capture, archived full-resolution corners refine camera poses,
-shared six-leg mount geometry, and bounded individual tag placements against
-the fixed CAD skeleton. A one-pose result still cannot independently identify
-new link lengths or joint axes.
+axes. After capture, an image-first bundle adjustment jointly refines the
+archived camera poses plus every robot and floor tag from full-resolution
+corners. One floor tag defines the final origin; the others are remeasured as
+coplanar landmarks instead of being forced onto the nominal grid. BuildViz is
+used to initialize the leg/face branches and diagnose disagreement, not as a
+fixed answer. A one-pose result still cannot independently identify new link
+lengths or joint axes.
 Coverage is necessary but not sufficient: the quality gate requires every floor
 tag to be co-visible with another mapped tag, at least six multi-tag reference
 frames, and bounded grid, LiDAR-plane, position, height, and orientation

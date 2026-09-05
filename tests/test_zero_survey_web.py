@@ -59,6 +59,7 @@ def test_manager_recovers_latest_interrupted_run_and_resumes_it(tmp_path) -> Non
         "floor_tags": {"104": {"world_from_tag": {}}},
     }))
     (run_dir / "progress.json").write_text(json.dumps({
+        "calibration_model_version": 4,
         "status": "scanning",
         "phase": "survey",
         "anchor_ids": [104],
@@ -126,6 +127,9 @@ def test_manager_does_not_mistake_stale_scanning_result_for_active_run(
     assert state["active"] is False
     assert state["status"] == "connection_lost"
     assert state["can_resume"] is True
+    assert state["checkpoint_reset_required"] is True
+    assert state["progress"]["stable_tag_ids"] == []
+    assert "BuildViz calibration model" in state["message"]
 
 
 def test_manager_invalidates_completed_legacy_13_tag_result(tmp_path) -> None:

@@ -96,9 +96,9 @@ calibration, the phone is meant to move during this workflow.
    before starting.
 2. Put the rigid calibration board flat near the robot. Its printed axes remain
    the world frame for the entire survey.
-3. Choose a chassis tag whose physical mount and existing `frame_from_tag` are
-   still trusted. The default is the lowest visible configured body-tag ID, but
-   passing it explicitly avoids ambiguity.
+3. Leave the configured L0 hip tag in its known orientation. It fixes leg
+   numbering and the BuildViz body-axis direction. Chassis tag 0 fixes the body
+   origin, but its historical yaw is deliberately not used as the axis gauge.
 4. Start with the board filling a useful part of the view. Hold still until the
    preview advances from board lock to the walk-around step.
 5. Walk slowly around the stationary robot. The dashboard shows the live image,
@@ -170,11 +170,11 @@ The JSON output retains, for each tag:
 It also records every pairwise ground/anchor center distance, planar distance,
 and XYZ delta. The optional updated config replaces surveyed expected floor
 poses with the new measurements, carries per-ID marker sizes, and updates stable
-robot tag mounts. It never overwrites the trusted body anchor because that
-anchor defines the otherwise unobservable body-frame gauge. If tag 0 fell off
-and was replaced, choose a different unchanged chassis tag. With no unchanged
-body datum, world tag poses are still useful but body-relative mounts cannot be
-recovered from this one capture.
+robot tag mounts. The final offline pass uses the archived full-resolution tag
+corners, the verified BuildViz skeleton, shared mount geometry across all six
+legs, and bounded individual placement corrections. The unchanged L0 hip tag
+supplies the body orientation gauge; if it was replaced, specify the new
+reference explicitly before saving.
 
 If the robot is stationary at known nonzero angles, pass a JSON object mapping
 all or some joint names to degrees with `--joint-angles-json`. Omitted joint

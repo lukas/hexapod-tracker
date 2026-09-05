@@ -41,12 +41,14 @@ uv run hexapod-zero-survey \
   --updated-config artifacts/apriltag_pose_config_surveyed.json
 ```
 
-The anchor must be a chassis tag whose old mount is still trustworthy. The
-survey relearns all other stable configured mounts from the known pose and
-nominal kinematics; one static pose cannot independently identify exact link
-lengths, joint-axis positions, and tag offsets. See
+The chassis anchor fixes the body origin from its known mount translation. The
+unchanged L0 hip tag independently aligns observations to the BuildViz body
+axes, so a stale chassis-tag yaw cannot rotate the reconstructed robot. The
+survey then refines archived full-resolution corners against the verified CAD
+skeleton and shared six-leg mount geometry before learning individual tag
+offsets. See
 [`RGBD_CALIBRATION.md`](RGBD_CALIBRATION.md#handheld-zero-pose-tag-survey).
-The configured L0 hip tag separately anchors leg numbering. If it is replaced,
+If the configured L0 hip tag is replaced,
 pass its new ID explicitly with `--leg-zero-anchor-tag-id`; other missing robot
 IDs can be matched automatically to empty physical positions.
 

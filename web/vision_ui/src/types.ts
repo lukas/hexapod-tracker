@@ -146,8 +146,8 @@ export interface ZeroSurveyTag {
 export interface ZeroSurveyState {
   available: boolean
   active: boolean
-  status: 'idle' | 'connecting' | 'locking_origin' | 'scanning' | 'finishing' | 'stopping' | 'complete' | 'incomplete' | 'connection_lost' | 'failed'
-  phase: 'setup' | 'connect' | 'anchor' | 'survey' | 'review'
+  status: 'idle' | 'connecting' | 'locking_origin' | 'scanning' | 'finishing' | 'refining' | 'stopping' | 'complete' | 'incomplete' | 'connection_lost' | 'failed'
+  phase: 'setup' | 'connect' | 'anchor' | 'survey' | 'refine' | 'review'
   message: string
   instruction: string
   guidance: {
@@ -178,6 +178,7 @@ export interface ZeroSurveyState {
   } | null
   error: string | null
   can_resume: boolean
+  checkpoint_reset_required: boolean
   connection_mode: 'usb' | 'wifi'
   wifi_address: string
   started_unix: number | null
@@ -237,6 +238,20 @@ export interface ZeroSurveyState {
     ok: boolean
     error?: string
     learned_mounts?: unknown[]
+  } | null
+  buildviz_refinement: {
+    ok: boolean
+    skipped_reason?: string
+    frames?: number
+    corner_observations?: number
+    robot_tag_count?: number
+    initial_coordinate_rms_px?: number
+    physical_model_coordinate_rms_px?: number
+    final_coordinate_rms_px?: number
+    median_tag_correction_mm?: number
+    max_tag_correction_mm?: number
+    median_shared_mount_deviation_mm?: number
+    max_shared_mount_deviation_mm?: number
   } | null
   defaults: {
     record3d_device: number

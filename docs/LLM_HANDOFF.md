@@ -171,9 +171,12 @@ protected leg-number reference unless the operator explicitly supplies its new
 ID. The live dashboard distinguishes `not seen` from `seen, needs another view`
 and shows an isometric tag/orientation map and phone path. The updated config
 replaces surveyed floor poses and learns robot `frame_from_tag` values from a
-known stationary pose. One explicitly trusted body tag remains unchanged as the
-unavoidable body-frame gauge. A one-pose result is mount calibration plus
-static baselines, not independently identified link lengths or joint axes.
+known stationary pose. Chassis tag 0 fixes the body-origin translation while
+the explicitly unchanged L0 hip tag aligns the survey to the BuildViz body
+axes. After capture, archived full-resolution corners refine camera poses,
+shared six-leg mount geometry, and bounded individual tag placements against
+the fixed CAD skeleton. A one-pose result still cannot independently identify
+new link lengths or joint axes.
 Coverage is necessary but not sufficient: the quality gate requires every floor
 tag to be co-visible with another mapped tag, at least six multi-tag reference
 frames, and bounded grid, LiDAR-plane, position, height, and orientation

@@ -628,6 +628,15 @@ class TagSurveyAccumulator:
         self,
         records: Mapping[int, Mapping[str, Any]],
     ) -> dict[str, RigidTransform] | None:
+        orientation_anchor = self._orientation_anchor_spec()
+        if orientation_anchor is not None:
+            tag_id, spec = orientation_anchor
+            record = records.get(tag_id)
+            if record is not None and record.get("stable"):
+                return self._world_robot_frames_from_anchor(
+                    RigidTransform.from_dict(record["world_from_tag"]),
+                    spec,
+                )
         body_ids = [
             tag_id for tag_id, spec in self.robot_tags.items()
             if str(spec.get("frame")) == "body"
@@ -639,16 +648,48 @@ class TagSurveyAccumulator:
             if record is None or not record.get("stable"):
                 continue
             world_from_tag = RigidTransform.from_dict(record["world_from_tag"])
-            body_from_tag = RigidTransform.from_dict(
-                self.robot_tags[tag_id].get("frame_from_tag", {})
-            )
-            world_from_body = world_from_tag.compose(body_from_tag.inverse())
-            return forward_frame_transforms(
-                world_from_body,
-                {name: 0.0 for name in JOINT_NAMES},
-                geometry=self.geometry,
+            return self._world_robot_frames_from_anchor(
+                world_from_tag,
+                self.robot_tags[tag_id],
             )
         return None
+
+    def _orientation_anchor_spec(self) -> tuple[int, dict[str, Any]] | None:
+        """Return the unchanged L0 tag used to orient the BuildViz skeleton."""
+        tag_id = self.position_tag_overrides.get("L0_coxa")
+        if tag_id is None:
+            return None
+        spec = self.robot_tags.get(tag_id)
+        if spec is None:
+            spec = next((
+                item for item in self.robot_tags.values()
+                if str(item.get("frame")) == "L0_coxa"
+            ), None)
+        if spec is None:
+            return None
+        return tag_id, spec
+
+    def _world_robot_frames_from_anchor(
+        self,
+        world_from_tag: RigidTransform,
+        spec: Mapping[str, Any],
+    ) -> dict[str, RigidTransform]:
+        body_zero_frames = forward_frame_transforms(
+            RigidTransform(np.zeros(3), Rotation.identity()),
+            {name: 0.0 for name in JOINT_NAMES},
+            geometry=self.geometry,
+        )
+        frame = str(spec.get("frame", "body"))
+        body_from_frame = body_zero_frames[frame]
+        frame_from_tag = RigidTransform.from_dict(spec.get("frame_from_tag", {}))
+        world_from_body = world_from_tag.compose(
+            body_from_frame.compose(frame_from_tag).inverse()
+        )
+        return forward_frame_transforms(
+            world_from_body,
+            {name: 0.0 for name in JOINT_NAMES},
+            geometry=self.geometry,
+        )
 
     def _robot_position_records(
         self,
@@ -876,13 +917,48 @@ class TagSurveyAccumulator:
         distortion: np.ndarray,
         floor_normal_camera: np.ndarray,
     ) -> dict[str, RigidTransform] | None:
+        by_id = {item.tag_id: item for item in detections}
+        orientation_anchor = self._orientation_anchor_spec()
+        if orientation_anchor is not None:
+            tag_id, spec = orientation_anchor
+            world_from_tag = None
+            detection = by_id.get(tag_id)
+            if detection is not None:
+                try:
+                    pose = estimate_tag_pose(
+                        detection,
+                        camera_matrix,
+                        distortion,
+                        marker_size_m=self.marker_sizes_m.get(
+                            tag_id, self.marker_size_m
+                        ),
+                        preferred_normal_camera=floor_normal_camera,
+                    )
+                except (ValueError, cv2.error):
+                    pose = None
+                if (
+                    pose is not None
+                    and pose.reprojection_rms_px
+                    <= self.options.max_reprojection_rms_px
+                ):
+                    world_from_tag = world_from_camera.compose(
+                        pose.camera_from_tag
+                    )
+            elif tag_id in self._observations:
+                consensus = self._consensus_for(tag_id)
+                if consensus.stable:
+                    world_from_tag = consensus.transform
+            if world_from_tag is not None:
+                return self._world_robot_frames_from_anchor(
+                    world_from_tag,
+                    spec,
+                )
         body_ids = [
             tag_id for tag_id, spec in self.robot_tags.items()
             if str(spec.get("frame")) == "body"
         ]
         if self.body_anchor_tag_id is not None:
             body_ids.sort(key=lambda tag_id: tag_id != self.body_anchor_tag_id)
-        by_id = {item.tag_id: item for item in detections}
         for tag_id in body_ids:
             spec = self.robot_tags[tag_id]
             world_from_tag = None
@@ -914,15 +990,7 @@ class TagSurveyAccumulator:
                     world_from_tag = consensus.transform
             if world_from_tag is None:
                 continue
-            body_from_tag = RigidTransform.from_dict(
-                spec.get("frame_from_tag", {})
-            )
-            world_from_body = world_from_tag.compose(body_from_tag.inverse())
-            return forward_frame_transforms(
-                world_from_body,
-                {name: 0.0 for name in JOINT_NAMES},
-                geometry=self.geometry,
-            )
+            return self._world_robot_frames_from_anchor(world_from_tag, spec)
         return None
 
     @staticmethod
@@ -1518,12 +1586,13 @@ def learn_zero_pose_mounts(
     *,
     joint_angles_deg: Mapping[str, float] | None = None,
     body_anchor_tag_id: int | None = None,
+    orientation_anchor_tag_id: int | None = None,
 ) -> tuple[dict[int, RigidTransform], dict[str, Any]]:
     """Learn configured robot tag mounts from one known stationary pose.
 
-    At least one existing body-tag mount remains the frame anchor.  This is an
-    unavoidable gauge choice: a static image cannot independently recover the
-    body axes and the orientation of its only fiducial.
+    A body-tag translation fixes the body-origin gauge.  When an unchanged L0
+    tag is supplied, its configured mount and the BuildViz zero-pose frame fix
+    the body-axis orientation independently of the chassis tag's old yaw.
     """
     robot_config = dict(tracker_config.get("robot_pose", {}))
     configured_tag_specs = {
@@ -1569,16 +1638,6 @@ def learn_zero_pose_mounts(
         tag_id for tag_id, spec in tag_specs.items()
         if spec.get("frame") == "body" and tag_id in survey_tags
     )
-    if body_anchor_tag_id is not None and body_anchor_tag_id not in available_body_ids:
-        return {}, {
-            "ok": False,
-            "error": f"body anchor tag {body_anchor_tag_id} was not stably surveyed",
-            "available_body_tag_ids": available_body_ids,
-            "identifiability": (
-                "The selected body anchor must be visible and its existing "
-                "frame_from_tag transform must still be trustworthy."
-            ),
-        }
     if not available_body_ids:
         return {}, {
             "ok": False,
@@ -1588,11 +1647,32 @@ def learn_zero_pose_mounts(
                 "is required before link-tag mounts can be learned."
             ),
         }
-    selected_anchor_id = (
-        available_body_ids[0]
-        if body_anchor_tag_id is None
-        else int(body_anchor_tag_id)
+    requested_body_anchor_id = (
+        None if body_anchor_tag_id is None else int(body_anchor_tag_id)
     )
+    if requested_body_anchor_id is None:
+        selected_anchor_id = available_body_ids[0]
+    else:
+        matching_body_ids = [
+            tag_id for tag_id in available_body_ids
+            if tag_id == requested_body_anchor_id
+            or int(tag_specs[tag_id].get("configured_tag_id", tag_id))
+            == requested_body_anchor_id
+        ]
+        if not matching_body_ids:
+            return {}, {
+                "ok": False,
+                "error": (
+                    f"body anchor position {requested_body_anchor_id} was not "
+                    "stably surveyed"
+                ),
+                "available_body_tag_ids": available_body_ids,
+                "identifiability": (
+                    "The chassis position must contain a stable measured tag "
+                    "to fix the body-origin translation."
+                ),
+            }
+        selected_anchor_id = matching_body_ids[0]
     anchor_spec = tag_specs[selected_anchor_id]
     world_from_anchor_tag = RigidTransform.from_dict(
         survey_tags[selected_anchor_id]["world_from_tag"]
@@ -1600,13 +1680,55 @@ def learn_zero_pose_mounts(
     body_from_anchor_tag = RigidTransform.from_dict(
         anchor_spec.get("frame_from_tag", {})
     )
-    world_from_body = world_from_anchor_tag.compose(
-        body_from_anchor_tag.inverse()
-    )
     angles = {name: 0.0 for name in JOINT_NAMES}
     if joint_angles_deg is not None:
         angles.update({str(key): float(value) for key, value in joint_angles_deg.items()})
     geometry = HexapodGeometry.from_dict(robot_config.get("geometry"))
+    world_from_body = world_from_anchor_tag.compose(
+        body_from_anchor_tag.inverse()
+    )
+    orientation_anchor_frame: str | None = None
+    if orientation_anchor_tag_id is not None:
+        orientation_anchor_tag_id = int(orientation_anchor_tag_id)
+        orientation_spec = tag_specs.get(orientation_anchor_tag_id)
+        orientation_record = survey_tags.get(orientation_anchor_tag_id)
+        if orientation_spec is None or orientation_record is None:
+            return {}, {
+                "ok": False,
+                "error": (
+                    f"orientation anchor tag {orientation_anchor_tag_id} was "
+                    "not stably surveyed"
+                ),
+                "identifiability": (
+                    "The unchanged L0 hip tag must be measured to align the "
+                    "BuildViz body axes with the photographed robot."
+                ),
+            }
+        orientation_anchor_frame = str(orientation_spec["frame"])
+        zero_frames = forward_frame_transforms(
+            RigidTransform(np.zeros(3), Rotation.identity()),
+            angles,
+            geometry=geometry,
+        )
+        body_from_orientation_tag = zero_frames[
+            orientation_anchor_frame
+        ].compose(RigidTransform.from_dict(
+            orientation_spec.get("frame_from_tag", {})
+        ))
+        world_from_orientation_tag = RigidTransform.from_dict(
+            orientation_record["world_from_tag"]
+        )
+        body_rotation = (
+            world_from_orientation_tag.rotation
+            * body_from_orientation_tag.rotation.inv()
+        )
+        # Keep the trusted body tag's configured translation as the origin
+        # gauge, but take body-axis orientation from the unchanged L0 mount.
+        body_translation = (
+            world_from_anchor_tag.translation_m
+            - body_rotation.apply(body_from_anchor_tag.translation_m)
+        )
+        world_from_body = RigidTransform(body_translation, body_rotation)
     world_frames = forward_frame_transforms(
         world_from_body, angles, geometry=geometry
     )
@@ -1620,7 +1742,13 @@ def learn_zero_pose_mounts(
             survey_tags[tag_id]["world_from_tag"]
         )
         frame_from_tag = world_frames[frame].inverse().compose(world_from_tag)
-        if tag_id != selected_anchor_id:
+        # With a distinct L0 orientation anchor, the old body-tag yaw is no
+        # longer the gauge and must be relearned in the corrected body frame.
+        mount_updated = (
+            tag_id != selected_anchor_id
+            or orientation_anchor_tag_id is not None
+        )
+        if mount_updated:
             learned[tag_id] = frame_from_tag
         per_tag.append({
             "tag_id": tag_id,
@@ -1630,7 +1758,7 @@ def learn_zero_pose_mounts(
             "frame_from_tag": frame_from_tag.to_dict(),
             "euler_xyz_deg": _euler_xyz_deg(frame_from_tag.rotation),
             "body_frame_anchor": tag_id == selected_anchor_id,
-            "mount_updated": tag_id != selected_anchor_id,
+            "mount_updated": mount_updated,
         })
 
     # Static inter-tag baselines are useful measured geometry, but link lengths
@@ -1664,7 +1792,18 @@ def learn_zero_pose_mounts(
         "pose_used": {
             "joint_angles_deg": angles,
             "body_anchor_tag_id": selected_anchor_id,
+            "body_anchor_configured_tag_id": int(
+                anchor_spec.get("configured_tag_id", selected_anchor_id)
+            ),
+            "body_anchor_requested_tag_id": requested_body_anchor_id,
             "body_anchor_auto_selected": body_anchor_tag_id is None,
+            "orientation_anchor_tag_id": orientation_anchor_tag_id,
+            "orientation_anchor_frame": orientation_anchor_frame,
+            "orientation_source": (
+                "unchanged_leg_zero_tag_and_buildviz_zero_pose"
+                if orientation_anchor_tag_id is not None
+                else "body_tag_mount"
+            ),
             "world_from_body": world_from_body.to_dict(),
         },
         "learned_mounts": per_tag,

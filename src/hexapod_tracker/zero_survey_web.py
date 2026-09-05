@@ -20,6 +20,7 @@ from .tag_survey import (
     learn_zero_pose_mounts,
     merge_robot_layout_into_config,
 )
+from .zero_pose_survey import CALIBRATION_MODEL_VERSION
 
 
 DEFAULT_FLOOR_IDS = (100, 101, 102, 103, 104, 105, 112)
@@ -68,6 +69,7 @@ class ZeroPoseSurveyManager:
         self._started_unix: float | None = None
         self._completed_unix: float | None = None
         self._legacy_completed_run = False
+        self._checkpoint_reset_required = False
         self._log_tail: deque[str] = deque(maxlen=12)
         self._robot_lab_state: dict[str, Any] = {
             "status": "ready" if self.robot_lab.configured else "not_configured",
@@ -141,6 +143,13 @@ class ZeroPoseSurveyManager:
                 if isinstance(value, dict):
                     self._settings = value
             progress = self._read_progress()
+            progress_model_version = int(
+                progress.get("calibration_model_version", 1)
+            )
+            self._checkpoint_reset_required = (
+                progress_model_version < CALIBRATION_MODEL_VERSION
+                and bool(progress.get("records"))
+            )
             progress_details = progress.get("progress") or {}
             self._connection_mode = str(
                 self._settings.get(
@@ -221,7 +230,7 @@ class ZeroPoseSurveyManager:
             )
             progress = (
                 self._empty_progress()
-                if self._legacy_completed_run
+                if self._legacy_completed_run or self._checkpoint_reset_required
                 else progress_state.get("progress") or self._empty_progress()
             )
             can_resume = bool(
@@ -241,7 +250,24 @@ class ZeroPoseSurveyManager:
                 "instruction",
                 "Put the stationary robot in zero pose near floor tags 100–105 and 112.",
             )
-            if status == "connection_lost":
+            if self._legacy_completed_run:
+                message = (
+                    "The previous result used the old 13-tag, single-floor-anchor model."
+                )
+                instruction = (
+                    "Start a new calibration to measure 13 top/chassis tags, "
+                    "24 vertical angle tags, and the seven-tag floor grid."
+                )
+            elif self._checkpoint_reset_required:
+                message = (
+                    "The saved photos are intact, but their old fused tag poses "
+                    "cannot be reused by the BuildViz calibration model."
+                )
+                instruction = (
+                    "Reconnect and continue; the scan will rebuild measurements "
+                    "with the corrected L0 orientation and CAD constraints."
+                )
+            elif status == "connection_lost":
                 if can_resume:
                     provisional_count = max(
                         0,
@@ -277,14 +303,6 @@ class ZeroPoseSurveyManager:
                         instruction = (
                             "Restart streaming in Record3D, then retry the connection."
                         )
-            elif self._legacy_completed_run:
-                message = (
-                    "The previous result used the old 13-tag, single-floor-anchor model."
-                )
-                instruction = (
-                    "Start a new calibration to measure 13 top/chassis tags, "
-                    "24 vertical angle tags, and the seven-tag floor grid."
-                )
             return {
                 "available": True,
                 "active": active,
@@ -292,6 +310,7 @@ class ZeroPoseSurveyManager:
                 "phase": (
                     "setup" if self._legacy_completed_run
                     else "connect" if status == "connection_lost"
+                    else "connect" if self._checkpoint_reset_required
                     else progress_state.get("phase", "connect" if active else "setup")
                 ),
                 "message": message,
@@ -306,6 +325,7 @@ class ZeroPoseSurveyManager:
                 ),
                 "error": self._error,
                 "can_resume": can_resume,
+                "checkpoint_reset_required": self._checkpoint_reset_required,
                 "connection_mode": self._connection_mode,
                 "wifi_address": self._wifi_address,
                 "started_unix": self._started_unix,
@@ -332,7 +352,7 @@ class ZeroPoseSurveyManager:
                 "frame_sequence": int(progress_state.get("frame_sequence", 0)),
                 "progress": progress,
                 "records": (
-                    [] if self._legacy_completed_run
+                    [] if self._legacy_completed_run or self._checkpoint_reset_required
                     else progress_state.get("records", [])
                 ),
                 "camera_path_m": (
@@ -344,6 +364,9 @@ class ZeroPoseSurveyManager:
                     else progress_state.get("camera_position_m")
                 ),
                 "mount_learning": progress_state.get("mount_learning"),
+                "buildviz_refinement": progress_state.get(
+                    "buildviz_refinement"
+                ),
                 "defaults": dict(self._defaults),
                 "log_tail": list(self._log_tail),
                 "robot_lab": dict(self._robot_lab_state),
@@ -497,6 +520,7 @@ class ZeroPoseSurveyManager:
         assert self._run_dir is not None
         command = self._command(settings, resume=resume)
         self._settings = dict(settings)
+        self._checkpoint_reset_required = False
         self._connection_mode = str(settings["connection_mode"])
         self._wifi_address = str(settings["wifi_address"])
         _atomic_json(self._run_dir / "session.json", self._settings)
@@ -678,9 +702,9 @@ class ZeroPoseSurveyManager:
             return value if isinstance(value, dict) else None
 
     def save_reviewed_config(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if payload.get("confirm_body_anchor_unchanged") is not True:
+        if payload.get("confirm_leg_zero_anchor_unchanged") is not True:
             raise ValueError(
-                "confirm that chassis tag #0 stayed in its original mount and orientation"
+                "confirm that the L0 hip tag stayed in its original mount and orientation"
             )
         with self._lock:
             result = self.result()
@@ -689,6 +713,13 @@ class ZeroPoseSurveyManager:
             survey = result.get("survey") or {}
             if not survey.get("complete"):
                 raise RuntimeError("finish all robot positions and floor tags before saving")
+            if (
+                int(result.get("calibration_model_version", 1)) >= 4
+                and not (result.get("buildviz_refinement") or {}).get("ok")
+            ):
+                raise RuntimeError(
+                    "finish the BuildViz geometry refinement before saving"
+                )
             config = merge_robot_layout_into_config(
                 json.loads(self.config_path.read_text(encoding="utf-8")),
                 self.robot_layout,
@@ -697,6 +728,12 @@ class ZeroPoseSurveyManager:
                 config,
                 survey,
                 body_anchor_tag_id=int(self._defaults["body_anchor_tag_id"]),
+                orientation_anchor_tag_id=int(
+                    self._settings.get(
+                        "leg_zero_anchor_tag_id",
+                        self._defaults["leg_zero_anchor_tag_id"],
+                    )
+                ),
             )
             if not geometry.get("ok"):
                 raise RuntimeError(str(geometry.get("error", "mount learning failed")))

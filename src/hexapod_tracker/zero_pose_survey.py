@@ -38,9 +38,10 @@ from .tag_survey import (
     learn_zero_pose_mounts,
     merge_robot_layout_into_config,
 )
+from .zero_pose_refinement import refine_zero_pose_with_buildviz
 
 
-CALIBRATION_MODEL_VERSION = 3
+CALIBRATION_MODEL_VERSION = 4
 
 
 def _parse_ids(value: str) -> tuple[int, ...]:
@@ -987,8 +988,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--body-anchor-tag-id",
         type=int,
         help=(
-            "trusted chassis tag whose existing mount defines the body frame; "
-            "defaults to the lowest stable configured body tag"
+            "chassis tag whose known mount translation defines the body origin; "
+            "the L0 tag independently defines body-axis orientation"
         ),
     )
     parser.add_argument(
@@ -1045,6 +1046,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         int(raw_id): spec
         for raw_id, spec in tracker_config.get("robot_pose", {}).get("tags", {}).items()
     }
+    configured_body_ids = sorted(
+        tag_id for tag_id, spec in robot_tags.items()
+        if str(spec.get("frame")) == "body"
+    )
+    selected_body_anchor_id = (
+        configured_body_ids[0]
+        if args.body_anchor_tag_id is None and configured_body_ids
+        else args.body_anchor_tag_id
+    )
     configured_l0_ids = sorted(
         tag_id for tag_id, spec in robot_tags.items()
         if str(spec.get("frame")) == "L0_coxa"
@@ -1592,11 +1602,73 @@ def main(argv: Sequence[str] | None = None) -> int:
     joint_angles = None
     if args.joint_angles_json is not None:
         joint_angles = _load_json(args.joint_angles_json)
+    buildviz_refinement: dict[str, Any] = {
+        "ok": False,
+        "skipped_reason": "survey is incomplete",
+    }
+    if (
+        survey_payload["complete"]
+        and args.frame_archive_dir is not None
+        and selected_body_anchor_id is not None
+        and leg_zero_anchor_id is not None
+    ):
+        refinement_progress = survey.progress()
+        print(
+            "REFINING | fitting archived tag corners to the BuildViz skeleton",
+            flush=True,
+        )
+        _write_progress(args.progress_output, {
+            "calibration_model_version": CALIBRATION_MODEL_VERSION,
+            "status": "refining",
+            "phase": "refine",
+            "message": (
+                "Capture complete; fitting all saved views to the BuildViz skeleton."
+            ),
+            "instruction": (
+                "Keep the robot still while the final geometry solve finishes."
+            ),
+            "guidance": None,
+            "quality": last_quality,
+            "connection_mode": connection_mode,
+            "anchor_ids": sorted(anchors),
+            "alignment_count": alignment.observation_count,
+            "anchor_frames": args.anchor_frames,
+            "detected_tag_ids": sorted(
+                int(item["tag_id"]) for item in survey_payload["tags"]
+            ),
+            "frame_sequence": survey_payload.get("frames", 0),
+            "elapsed_s": round(time.monotonic() - start, 2),
+            "progress": refinement_progress,
+            "records": survey_payload["tags"],
+            "camera_path_m": [item.tolist() for item in camera_path[-240:]],
+            "camera_position_m": None,
+        })
+        try:
+            survey_payload, buildviz_refinement = (
+                refine_zero_pose_with_buildviz(
+                    tracker_config,
+                    survey_payload,
+                    frame_archive_dir=args.frame_archive_dir,
+                    floor_tags=anchors,
+                    world_from_arkit_world=alignment.locked_transform,
+                    body_anchor_tag_id=int(selected_body_anchor_id),
+                    orientation_anchor_tag_id=int(leg_zero_anchor_id),
+                    floor_marker_size_m=anchor_marker_size_m,
+                    joint_angles_deg=joint_angles,
+                )
+            )
+        except Exception as error:  # Keep the raw survey recoverable.
+            buildviz_refinement = {
+                "ok": False,
+                "error": f"{type(error).__name__}: {error}",
+                "skipped_reason": "BuildViz refinement failed; raw survey retained",
+            }
     learned_mounts, geometry_report = learn_zero_pose_mounts(
         tracker_config,
         survey_payload,
         joint_angles_deg=joint_angles,
         body_anchor_tag_id=args.body_anchor_tag_id,
+        orientation_anchor_tag_id=leg_zero_anchor_id,
     )
     payload = {
         "schema_version": 2,
@@ -1618,6 +1690,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
         "alignment": _alignment_record(alignment),
         "survey": survey_payload,
+        "buildviz_refinement": buildviz_refinement,
         "mount_learning": geometry_report,
         "last_camera_matrix": (
             None if last_camera_matrix is None else last_camera_matrix.tolist()
@@ -1637,8 +1710,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.preview_output.parent.mkdir(parents=True, exist_ok=True)
         if not cv2.imwrite(str(args.preview_output), last_preview):
             raise OSError(f"could not write {args.preview_output}")
-    final_ok = bool(survey_payload["complete"]) and (
-        not robot_tags or bool(geometry_report.get("ok"))
+    refinement_required = bool(robot_tags) and args.frame_archive_dir is not None
+    refinement_failed = (
+        refinement_required and not bool(buildviz_refinement.get("ok"))
+    )
+    final_ok = (
+        bool(survey_payload["complete"])
+        and (not robot_tags or bool(geometry_report.get("ok")))
+        and not refinement_failed
     )
     final_progress = survey.progress()
     final_guidance = _guidance(
@@ -1658,6 +1737,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "message": (
             connection_error
             if connection_error is not None
+            else (
+                "Coverage is complete, but the BuildViz solve needs more "
+                f"archived views: {buildviz_refinement.get('skipped_reason', 'fit failed')}"
+            )
+            if refinement_failed
             else "Survey complete. Review the geometry and tag assignments."
             if final_ok
             else "Partial survey saved. Continue this calibration when ready."
@@ -1665,6 +1749,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "instruction": (
             "Reconnect the phone, then continue this calibration."
             if connection_error is not None
+            else "Continue and revisit the robot from several wider angles."
+            if refinement_failed
             else "Review the 3D survey map."
             if final_ok
             else final_guidance["headline"]
@@ -1689,6 +1775,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "camera_position_m": None,
         "result_path": str(args.output),
         "mount_learning": geometry_report,
+        "buildviz_refinement": buildviz_refinement,
         "connection_error": connection_error,
     })
     print(f"wrote survey: {args.output}")

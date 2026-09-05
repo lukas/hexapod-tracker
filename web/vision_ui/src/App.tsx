@@ -310,7 +310,7 @@ function surveyStep(status?: string) {
   if (status === 'connecting') return 1
   if (status === 'locking_origin') return 2
   if (['scanning', 'finishing', 'stopping', 'connection_lost', 'failed'].includes(status || '')) return 3
-  if (['complete', 'incomplete'].includes(status || '')) return 4
+  if (['refining', 'complete', 'incomplete'].includes(status || '')) return 4
   return 1
 }
 
@@ -588,7 +588,7 @@ function ZeroSurveyWorkspace({
 
           {!active && !complete && interrupted && survey && (
             <section className="resume-card">
-              <div><div className="eyebrow">Saved checkpoint</div><h2>Your scan is intact</h2><p>{measuredRobot}/{totalRobot} robot positions and {measuredFloor}/{totalFloor} floor tags are finished; {provisionalTagCount} additional tag identities and pose seeds are retained. Reconnect the phone, re-lock the floor, then add the different angles needed to finish them.</p></div>
+              <div><div className="eyebrow">Saved checkpoint</div><h2>{survey.checkpoint_reset_required ? 'Photos saved; measurements need rebuilding' : 'Your scan is intact'}</h2><p>{survey.checkpoint_reset_required ? 'The earlier fusion used the wrong body-axis reference. Continue with the same saved photo set, but the tag poses will be measured again using L0 and the BuildViz skeleton.' : `${measuredRobot}/${totalRobot} robot positions and ${measuredFloor}/${totalFloor} floor tags are finished; ${provisionalTagCount} additional tag identities and pose seeds are retained. Reconnect the phone, re-lock the floor, then add the different angles needed to finish them.`}</p></div>
               <div className="resume-controls">
                 <div className="transport-picker compact"><button className={connectionMode === 'usb' ? 'active' : ''} onClick={() => setConnectionMode('usb')}><b>USB</b><span>Recommended</span></button><button className={connectionMode === 'wifi' ? 'active' : ''} onClick={() => setConnectionMode('wifi')}><b>Wi‑Fi</b><span>Wireless</span></button></div>
                 {connectionMode === 'wifi' && <div className="wifi-connect compact"><label>iPhone address<input value={wifiAddress} placeholder="myiPhone.local" onChange={(event) => setWifiAddress(event.target.value)} /></label><button disabled={busy || !wifiAddress.trim()} onClick={onConnectWifi}>Reconnect phone</button><small>{wifiStatus}</small></div>}
@@ -627,7 +627,8 @@ function ZeroSurveyWorkspace({
           {(complete || survey?.status === 'incomplete') && survey && (
             <section className={`review-card ${complete ? 'complete' : 'partial'}`}>
               <div className="review-heading"><div className="review-check">{complete ? '✓' : '!'}</div><div><div className="eyebrow">Survey review</div><h2>{complete ? 'Every required position is recorded' : 'A partial survey was saved'}</h2><p>{complete ? 'Review the schematic and confirm the one fixed body-frame reference before creating the robot configuration.' : survey.instruction}</p></div><a href="/api/vision/zero-survey/result" download="zero-pose-survey.json">Download measurements</a></div>
-              {complete && <div className="finalize-grid"><label className="anchor-confirm"><input type="checkbox" checked={bodyAnchorConfirmed} onChange={(event) => setBodyAnchorConfirmed(event.target.checked)} /><span><b>Chassis tag #0 is still in its original mount and orientation.</b><small>This is the one fixed reference needed to learn all other tag mounts.</small></span></label><button className="save-config" disabled={busy || !bodyAnchorConfirmed || survey.reviewed_config_available} onClick={onSave}>{survey.reviewed_config_available ? 'Configuration saved' : 'Save configuration & update Robot Lab'}<span>→</span></button></div>}
+              {complete && survey.buildviz_refinement?.ok && <div className="geometry-gate passed"><div><b>BuildViz geometry refinement passed</b><span>{survey.buildviz_refinement.robot_tag_count} robot tags across {survey.buildviz_refinement.frames} archived full-resolution views were fit to the CAD skeleton.</span></div><div><span><b>{survey.buildviz_refinement.initial_coordinate_rms_px?.toFixed(2)} → {survey.buildviz_refinement.final_coordinate_rms_px?.toFixed(2)} px</b>corner coordinate RMS</span><span><b>{survey.buildviz_refinement.physical_model_coordinate_rms_px?.toFixed(2)} px</b>shared rigid model</span><span><b>{survey.buildviz_refinement.median_shared_mount_deviation_mm?.toFixed(1)} mm</b>median tag-to-mount deviation</span><span><b>{survey.buildviz_refinement.max_shared_mount_deviation_mm?.toFixed(1)} mm</b>worst tag-to-mount deviation</span></div></div>}
+              {complete && <div className="finalize-grid"><label className="anchor-confirm"><input type="checkbox" checked={bodyAnchorConfirmed} onChange={(event) => setBodyAnchorConfirmed(event.target.checked)} /><span><b>The L0 hip tag is still in its original mount and orientation.</b><small>Its direction aligns the measured tags to the BuildViz robot axes. Tag #0 fixes only the body origin.</small></span></label><button className="save-config" disabled={busy || !bodyAnchorConfirmed || survey.reviewed_config_available} onClick={onSave}>{survey.reviewed_config_available ? 'Configuration saved' : 'Save configuration & update Robot Lab'}<span>→</span></button></div>}
               {notice && <div className="success-notice">{notice}</div>}
               {survey.robot_lab.status === 'published' && <div className="lab-sync published"><b>Robot Lab updated</b><span>Survey and calibrated tracker configuration are saved as durable artifacts.</span>{survey.robot_lab.url && <a href={survey.robot_lab.url} target="_blank" rel="noreferrer">Open result ↗</a>}</div>}
               {['failed', 'not_configured'].includes(survey.robot_lab.status) && survey.reviewed_config_available && <div className="lab-sync failed"><div><b>Robot Lab still needs this update</b><span>{survey.robot_lab.error || 'The vision server needs the Robot Lab credential.'}</span></div><button disabled={busy} onClick={onPublish}>Retry sync</button></div>}
@@ -1047,7 +1048,7 @@ export default function App() {
     try {
       const saved = await api<{config_path: string; robot_lab: {status: string; url?: string; error?: string}}>('/api/vision/zero-survey/save', {
         method: 'POST',
-        body: JSON.stringify({confirm_body_anchor_unchanged: bodyAnchorConfirmed}),
+        body: JSON.stringify({confirm_leg_zero_anchor_unchanged: bodyAnchorConfirmed}),
       })
       setZeroNotice(saved.robot_lab.status === 'published'
         ? 'Configuration saved locally and published to Robot Lab.'

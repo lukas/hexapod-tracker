@@ -258,6 +258,36 @@ def test_tag_requires_a_genuinely_different_viewpoint_when_configured() -> None:
     assert second["stable"] is True
 
 
+def test_slow_side_step_keeps_its_first_viewpoint_outside_rolling_window() -> None:
+    tag = RigidTransform(np.asarray([0.10, 0.08, 0.0]), Rotation.identity())
+    accumulator = TagSurveyAccumulator(
+        robot_tags={},
+        expected_ground_ids=[12],
+        marker_size_m=0.027,
+        options=TagSurveyOptions(
+            min_observations=3,
+            max_observations_per_tag=4,
+            min_viewpoint_span_deg=8.0,
+        ),
+    )
+    for x in np.linspace(0.0, 0.18, 12):
+        camera = RigidTransform(
+            np.asarray([x, 0.0, 0.75]),
+            Rotation.from_euler("x", 180.0, degrees=True),
+        )
+        accumulator.observe_frame(
+            [_detection(12, 0.027, tag, camera)],
+            camera,
+            CAMERA_MATRIX,
+            np.zeros(5),
+        )
+
+    record = accumulator.tag_records()[0]
+    assert record["observations"] == 4
+    assert record["viewpoint_span_deg"] > 8.0
+    assert record["stable"] is True
+
+
 def test_world_reference_supports_mixed_floor_tag_sizes() -> None:
     world_from_camera = RigidTransform(
         np.asarray([0.02, -0.03, 0.78]),

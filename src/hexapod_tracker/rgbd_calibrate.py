@@ -78,22 +78,34 @@ def _npz_frames(directory: Path) -> Iterator[RGBDFrame]:
     for path in paths:
         with np.load(path, allow_pickle=False) as data:
             missing = [
-                name for name in ("rgb", "depth", "camera_matrix")
-                if name not in data
+                name for name in ("depth", "camera_matrix") if name not in data
             ]
+            if "rgb" not in data and "rgb_jpeg" not in data:
+                missing.append("rgb or rgb_jpeg")
             if missing:
                 raise ValueError(f"{path} is missing arrays: {', '.join(missing)}")
-            rgb = np.asarray(data["rgb"])
-            if rgb.ndim == 2:
-                rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_GRAY2BGR)
-            elif rgb.ndim == 3 and rgb.shape[2] == 3:
-                # Offline fixtures are specified as BGR to match OpenCV.
-                rgb_bgr = rgb.copy()
+            if "rgb_jpeg" in data:
+                rgb_bgr = cv2.imdecode(
+                    np.asarray(data["rgb_jpeg"], dtype=np.uint8),
+                    cv2.IMREAD_COLOR,
+                )
+                if rgb_bgr is None:
+                    raise ValueError(f"{path}: rgb_jpeg could not be decoded")
             else:
-                raise ValueError(f"{path}: rgb must be HxW or HxWx3")
+                rgb = np.asarray(data["rgb"])
+                if rgb.ndim == 2:
+                    rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_GRAY2BGR)
+                elif rgb.ndim == 3 and rgb.shape[2] == 3:
+                    # Offline fixtures are specified as BGR to match OpenCV.
+                    rgb_bgr = rgb.copy()
+                else:
+                    raise ValueError(f"{path}: rgb must be HxW or HxWx3")
+            confidence_array = (
+                np.asarray([], dtype=np.uint8)
+                if "confidence" not in data else np.asarray(data["confidence"])
+            )
             confidence = (
-                None if "confidence" not in data
-                else np.asarray(data["confidence"]).copy()
+                None if confidence_array.size == 0 else confidence_array.copy()
             )
             arkit_pose = None
             if "camera_pose_xyzw_xyz" in data:

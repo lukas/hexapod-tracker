@@ -1016,13 +1016,22 @@ class TagSurveyAccumulator:
                 camera_position_world=world_from_camera.translation_m.copy(),
             ))
             if len(observations) > self.options.max_observations_per_tag:
-                del observations[0]
+                # Preserve the first clean viewpoint as the baseline while
+                # rolling newer pose samples through the bounded consensus
+                # window. Dropping the baseline made a slow side-step read as
+                # 0 degrees forever because both ends aged out together.
+                del observations[1 if len(observations) > 1 else 0]
             if (
                 self.options.freeze_stable_tags
                 and len(observations) >= self.options.min_observations
             ):
                 consensus = self._consensus_for(detection.tag_id)
-                if consensus.stable:
+                if (
+                    consensus.stable
+                    and self._viewpoint_span_deg(
+                        detection.tag_id, consensus.transform
+                    ) >= self.options.min_viewpoint_span_deg
+                ):
                     self._frozen[detection.tag_id] = consensus
 
     def estimate_world_from_camera(

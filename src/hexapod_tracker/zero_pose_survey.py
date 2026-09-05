@@ -125,6 +125,48 @@ def _write_jpeg_atomic(path: Path, image: np.ndarray, *, quality: int = 82) -> N
     temporary.replace(path)
 
 
+def _archive_frame(
+    directory: Path,
+    frame: RGBDFrame,
+    detections: Sequence[TagCorners],
+) -> Path:
+    """Save a compact, replayable RGB-D evidence frame."""
+    directory.mkdir(parents=True, exist_ok=True)
+    ok, rgb_jpeg = cv2.imencode(
+        ".jpg", frame.rgb_bgr, [cv2.IMWRITE_JPEG_QUALITY, 92]
+    )
+    if not ok:
+        raise OSError("could not encode archived RGB frame")
+    pose = frame.arkit_world_from_opengl_camera
+    pose_values = np.asarray([], dtype=np.float64)
+    if pose is not None:
+        pose_dict = pose.to_dict()
+        pose_values = np.asarray(
+            pose_dict["quaternion_xyzw"] + pose_dict["translation_m"],
+            dtype=np.float64,
+        )
+    path = directory / f"frame-{time.time_ns()}.npz"
+    temporary = path.with_suffix(".tmp.npz")
+    np.savez_compressed(
+        temporary,
+        rgb_jpeg=np.asarray(rgb_jpeg).reshape(-1),
+        depth=np.asarray(frame.depth_m, dtype=np.float32),
+        confidence=(
+            np.asarray([], dtype=np.uint8)
+            if frame.confidence is None else np.asarray(frame.confidence)
+        ),
+        camera_matrix=np.asarray(frame.camera_matrix, dtype=np.float64),
+        camera_pose_xyzw_xyz=pose_values,
+        tag_ids=np.asarray([item.tag_id for item in detections], dtype=np.int32),
+        tag_corners_px=np.asarray(
+            [item.corners_px for item in detections], dtype=np.float32
+        ).reshape(-1, 4, 2),
+        captured_unix=np.asarray(time.time(), dtype=np.float64),
+    )
+    temporary.replace(path)
+    return path
+
+
 def _guidance(
     phase: str,
     progress: dict[str, Any],
@@ -902,6 +944,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="periodically write the clean labelled camera frame for a web UI",
     )
     parser.add_argument(
+        "--frame-archive-dir",
+        type=Path,
+        help="save periodic replayable RGB-D evidence frames in this directory",
+    )
+    parser.add_argument("--frame-archive-interval-s", type=float, default=5.0)
+    parser.add_argument(
         "--progress-output",
         type=Path,
         help="periodically write an atomic machine-readable progress snapshot",
@@ -945,7 +993,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--settle-frames", type=int, default=12)
-    parser.add_argument("--max-seconds", type=float, default=300.0)
+    parser.add_argument("--max-seconds", type=float, default=900.0)
+    parser.add_argument(
+        "--analysis-fps",
+        type=float,
+        default=5.0,
+        help="full-resolution AprilTag analysis rate; all camera frames are still drained",
+    )
     parser.add_argument("--no-preview", action="store_true")
     return parser
 
@@ -958,6 +1012,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("--min-observations must be at least 2")
     if args.settle_frames < 1 or args.max_seconds <= 0.0:
         raise SystemExit("settle frames and max seconds must be positive")
+    if args.frame_archive_interval_s <= 0.0:
+        raise SystemExit("--frame-archive-interval-s must be positive")
+    if not 0.5 <= args.analysis_fps <= 30.0:
+        raise SystemExit("--analysis-fps must be between 0.5 and 30")
 
     tracker_config = _load_json(args.tracker_config)
     if args.robot_layout is not None:
@@ -1068,6 +1126,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     last_progress_time = -float("inf")
     last_camera_preview_time = -float("inf")
     last_floor_refinement_time = -float("inf")
+    last_archive_time = -float("inf")
+    last_analysis_time = -float("inf")
     last_anchor_reprojection_rms_px: float | None = None
     last_depth_plane_rms_mm: float | None = None
     completed_frames = 0
@@ -1140,7 +1200,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     yield reader.next_frame()
 
             frames = live_frames()
+        throttle_live_usb = (
+            args.npz_dir is None and args.wifi_frame_dir is None
+        )
         for frame_index, frame in enumerate(frames):
+            capture_time = time.monotonic()
+            if (
+                throttle_live_usb
+                and capture_time - last_analysis_time < 1.0 / args.analysis_fps
+            ):
+                continue
+            last_analysis_time = capture_time
             current_world_from_camera: RigidTransform | None = None
             anchor_reprojection_rms_px = last_anchor_reprojection_rms_px
             depth_plane_rms_mm = last_depth_plane_rms_mm
@@ -1287,6 +1357,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     camera_path.append(world_from_camera.translation_m.copy())
 
             now = time.monotonic()
+            if (
+                args.frame_archive_dir is not None
+                and now - last_archive_time >= args.frame_archive_interval_s
+            ):
+                _archive_frame(args.frame_archive_dir, frame, detections)
+                last_archive_time = now
             progress_updated = now - last_progress_time >= 0.35
             if progress_updated:
                 records = survey.tag_records()

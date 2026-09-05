@@ -421,6 +421,7 @@ class ZeroPoseSurveyManager:
             "--output", str(self._result_path),
             "--preview-output", str(self._run_dir / "dashboard.jpg"),
             "--camera-preview-output", str(self._camera_path),
+            "--frame-archive-dir", str(self._run_dir / "frames"),
             "--progress-output", str(self._progress_path),
             "--expected-floor-ids", ",".join(
                 str(value) for value in settings["floor_tag_ids"]

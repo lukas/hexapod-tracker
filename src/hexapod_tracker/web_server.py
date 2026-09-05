@@ -26,6 +26,7 @@ import cv2
 
 from .apriltag_vision import AprilTagPoseTracker
 from .joint_contract import FRAME_ROBOT_ABS, JOINT_CONTRACT
+from .lab_camera_calibration import LabCameraCalibrationManager
 from .paths import CONFIG_DIR, DEFAULT_REPORT_DIR, WEB_DIST_DIR
 from .zero_survey_web import ZeroPoseSurveyManager
 from .track import (
@@ -39,6 +40,10 @@ DEFAULT_CONFIG = CONFIG_DIR / "apriltag_pose_config_20260831.json"
 DEFAULT_UI_DIR = WEB_DIST_DIR
 DEFAULT_STABLE_FRAMES = 12
 DEFAULT_CALIBRATION_FRAMES = 45
+DEFAULT_LAB_CAMERA_DIR = DEFAULT_REPORT_DIR / "lab_cameras"
+DEFAULT_INTRINSIC_BOARD = CONFIG_DIR / "rgbd_calibration_board.json"
+DEFAULT_INTRINSIC_BOARD_SVG = CONFIG_DIR / "rgbd_calibration_board.svg"
+DEFAULT_ROBOT_LAYOUT = CONFIG_DIR / "hexapod-1-apriltag-layout.json"
 
 
 def _direct_ids(result: Mapping[str, Any], allowed: set[int]) -> set[int]:
@@ -430,6 +435,7 @@ class VisionRuntime:
         capture_factory: Any | None = None,
         survey_factory: Any | None = None,
         zero_survey_factory: Any | None = None,
+        lab_camera_factory: Any | None = None,
     ) -> None:
         config = json.loads(config_path.read_text(encoding="utf-8"))
         self.config_path = config_path
@@ -507,6 +513,13 @@ class VisionRuntime:
         self.zero_survey = (zero_survey_factory or ZeroPoseSurveyManager)(
             config_path=config_path,
         )
+        self.lab_camera = (lab_camera_factory or LabCameraCalibrationManager)(
+            board_manifest_path=DEFAULT_INTRINSIC_BOARD,
+            board_svg_path=DEFAULT_INTRINSIC_BOARD_SVG,
+            floor_layout_path=DEFAULT_ROBOT_LAYOUT,
+            output_dir=DEFAULT_LAB_CAMERA_DIR,
+        )
+        self._tracker_camera_profile_key: tuple[Any, ...] | None = None
         self.refresh_camera_devices()
 
     def start(self) -> None:
@@ -597,6 +610,7 @@ class VisionRuntime:
                     {
                         "index": index,
                         "name": f"Camera {index}",
+                        "stable_id": f"configured-camera:{index}",
                         "kind": "configured",
                         "available": True,
                     }
@@ -615,6 +629,7 @@ class VisionRuntime:
                     {
                         "index": index,
                         "name": f"Camera {index}",
+                        "stable_id": f"configured-camera:{index}",
                         "kind": "configured",
                         "available": True,
                     }
@@ -640,6 +655,94 @@ class VisionRuntime:
                 ):
                     self._requested_camera_index = discovered_indexes[0]
         return self.public_state()
+
+    def _active_camera_info_locked(
+        self,
+        index: int | None = None,
+        capture_details: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        selected_index = self._active_camera_index if index is None else index
+        descriptor = next((
+            dict(item) for item in self._camera_devices
+            if int(item.get("index", -1)) == selected_index
+        ), {
+            "index": selected_index,
+            "name": f"Camera {selected_index}",
+            "stable_id": f"configured-camera:{selected_index}",
+            "kind": "configured",
+            "available": True,
+        })
+        details = dict(capture_details or self._capture_details)
+        descriptor["stable_id"] = str(
+            details.get("device_stable_id")
+            or descriptor.get("stable_id")
+            or f"configured-camera:{selected_index}"
+        )
+        descriptor["name"] = str(
+            details.get("device_name") or descriptor.get("name")
+        )
+        descriptor.update({
+            "backend": details.get("backend"),
+            "capture_fps": details.get("capture_fps"),
+            "capture_image_size_px": details.get("capture_image_size_px"),
+        })
+        return descriptor
+
+    def start_lab_camera_calibration(
+        self, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        with self._lock:
+            if not self._camera_enabled.is_set() or self._active_camera_index is None:
+                raise RuntimeError("turn on and select the fixed camera first")
+            image_size = tuple(
+                int(value)
+                for value in (self._latest_result or {}).get("image_size_px", [])
+            )
+            if len(image_size) != 2:
+                raise RuntimeError("wait for the first camera frame")
+            camera = self._active_camera_info_locked()
+        return self.lab_camera.start(
+            payload,
+            camera=camera,
+            image_size_px=(image_size[0], image_size[1]),
+        )
+
+    def cancel_lab_camera_calibration(self) -> dict[str, Any]:
+        return self.lab_camera.cancel()
+
+    def publish_lab_camera_calibration(self) -> dict[str, Any]:
+        return self.lab_camera.publish()
+
+    def lab_camera_result(self) -> dict[str, Any] | None:
+        return self.lab_camera.result()
+
+    def _configure_tracker_for_camera(
+        self,
+        camera: Mapping[str, Any],
+        image_size_px: tuple[int, int],
+    ) -> None:
+        profile = self.lab_camera.profile_for(camera, image_size_px)
+        profile_id = None if profile is None else profile.get("id")
+        key = (camera.get("stable_id"), image_size_px, profile_id)
+        if key == self._tracker_camera_profile_key:
+            return
+        config = json.loads(self.config_path.read_text(encoding="utf-8"))
+        if profile is not None:
+            config["camera"] = profile["intrinsics"]
+            config["fixed_camera_world_reference"] = profile["extrinsics"][
+                "world_from_camera"
+            ]
+            config["floor_marker_size_m"] = self.lab_camera.floor_marker_size_m
+            config["floor_tags"] = {
+                str(tag_id): {
+                    "label": f"permanent floor tag {tag_id}",
+                    "marker_size_m": self.lab_camera.floor_marker_size_m,
+                    "world_from_tag": transform.to_dict(),
+                }
+                for tag_id, transform in self.lab_camera.floor_tags.items()
+            }
+        self.tracker = AprilTagPoseTracker(config)
+        self._tracker_camera_profile_key = key
 
     def start_calibration(self) -> dict[str, Any]:
         with self._lock:
@@ -767,6 +870,10 @@ class VisionRuntime:
     def public_state(self) -> dict[str, Any]:
         with self._lock:
             latest = self._latest_result or {}
+            active_camera = (
+                None if self._active_camera_index is None
+                else self._active_camera_info_locked()
+            )
             direct_robot = _direct_ids(latest, self.robot_tag_ids)
             direct_floor = _direct_ids(latest, self.floor_tag_ids)
             direct_feet = [
@@ -807,6 +914,7 @@ class VisionRuntime:
                     "scan_error": self._camera_scan_error,
                     "scan_unix": self._camera_scan_unix,
                     "discovery_exact": self._camera_discovery_exact,
+                    "active_identity": active_camera,
                 },
                 "performance": {
                     "fps": round(fps, 1),
@@ -856,6 +964,7 @@ class VisionRuntime:
                 "feedback": latest.get("encoder_feedback"),
                 "survey": self.gait_survey.public_state(),
                 "zero_survey": self.zero_survey.public_state(),
+                "lab_camera": self.lab_camera.public_state(active_camera),
                 "read_only": not self.motion_control_available,
                 "motion_control_scope": (
                     "acknowledged_guarded_gait_survey"
@@ -1073,6 +1182,20 @@ class VisionRuntime:
                     capture_details["detection_image_size_px"] = [
                         processed.shape[1], processed.shape[0]
                     ]
+                with self._lock:
+                    camera_info = self._active_camera_info_locked(
+                        active, capture_details
+                    )
+                try:
+                    self._configure_tracker_for_camera(
+                        camera_info,
+                        (processed.shape[1], processed.shape[0]),
+                    )
+                except (OSError, ValueError, KeyError) as error:
+                    with self._lock:
+                        self._camera_error = (
+                            f"saved camera calibration is invalid: {error}"
+                        )
                 encoder, feedback_status = ({}, {"configured": False})
                 if self.feedback is not None:
                     encoder, feedback_status = self.feedback.sample()
@@ -1100,6 +1223,11 @@ class VisionRuntime:
                 result["capture_image_size_px"] = capture_details[
                     "capture_image_size_px"
                 ]
+                self.lab_camera.process_frame(
+                    processed,
+                    result,
+                    camera=camera_info,
+                )
                 encoded_ok, jpeg = cv2.imencode(
                     ".jpg", processed, [cv2.IMWRITE_JPEG_QUALITY, 82]
                 )
@@ -1279,6 +1407,28 @@ def wrap_handler_with_vision(
                     )
                 else:
                     self._vision_json(HTTPStatus.OK, report)
+            elif path == "/api/vision/lab-camera/result":
+                result = runtime.lab_camera_result()
+                if result is None:
+                    self._vision_json(
+                        HTTPStatus.NOT_FOUND,
+                        {"ok": False, "error": "no lab camera calibration yet"},
+                    )
+                else:
+                    self._vision_json(HTTPStatus.OK, result)
+            elif path == "/api/vision/lab-camera/board.svg":
+                board_path = runtime.lab_camera.board_svg_path
+                if not board_path.is_file():
+                    self._vision_json(
+                        HTTPStatus.NOT_FOUND,
+                        {"ok": False, "error": "calibration board is missing"},
+                    )
+                else:
+                    self._vision_send_bytes(
+                        HTTPStatus.OK,
+                        board_path.read_bytes(),
+                        "image/svg+xml; charset=utf-8",
+                    )
             elif path == "/api/vision/zero-survey/frame.jpg":
                 jpeg = runtime.zero_survey.latest_camera_jpeg()
                 if jpeg is None:
@@ -1353,6 +1503,24 @@ def wrap_handler_with_vision(
                     self._vision_read_json()
                     self._vision_json(
                         HTTPStatus.OK, runtime.apply_latest_calibration()
+                    )
+                elif path == "/api/vision/lab-camera/start":
+                    body = self._vision_read_json()
+                    self._vision_json(
+                        HTTPStatus.ACCEPTED,
+                        runtime.start_lab_camera_calibration(body),
+                    )
+                elif path == "/api/vision/lab-camera/cancel":
+                    self._vision_read_json()
+                    self._vision_json(
+                        HTTPStatus.OK,
+                        runtime.cancel_lab_camera_calibration(),
+                    )
+                elif path == "/api/vision/lab-camera/publish":
+                    self._vision_read_json()
+                    self._vision_json(
+                        HTTPStatus.OK,
+                        runtime.publish_lab_camera_calibration(),
                     )
                 elif path == "/api/vision/survey/start":
                     body = self._vision_read_json()

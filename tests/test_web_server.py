@@ -262,12 +262,14 @@ def test_runtime_reports_named_configured_camera_choices() -> None:
             {
                 "index": 0,
                 "name": "Camera 0",
+                "stable_id": "configured-camera:0",
                 "kind": "configured",
                 "available": True,
             },
             {
                 "index": 3,
                 "name": "Camera 3",
+                "stable_id": "configured-camera:3",
                 "kind": "configured",
                 "available": True,
             },
@@ -331,17 +333,19 @@ def test_avfoundation_descriptors_preserve_names_and_camera_kinds(
     )
 
     assert AVFoundationYuvCapture.device_descriptors() == [
-        {
-            "index": 0,
-            "name": "MacBook Pro Camera",
-            "kind": "built_in",
-            "available": True,
-        },
-        {
-            "index": 1,
-            "name": "Lukas's iPhone",
-            "kind": "continuity",
-            "available": True,
+            {
+                "index": 0,
+                "name": "MacBook Pro Camera",
+                "stable_id": "avfoundation:MacBook Pro Camera",
+                "kind": "built_in",
+                "available": True,
+            },
+            {
+                "index": 1,
+                "name": "Lukas's iPhone",
+                "stable_id": "avfoundation:Lukas's iPhone",
+                "kind": "continuity",
+                "available": True,
         },
     ]
 

@@ -479,21 +479,55 @@ function ZeroSurveyWorkspace({
   onPoseCheck: () => void
 }) {
   const survey = state?.zero_survey
-  const step = surveyStep(survey?.status)
   const active = survey?.active || false
   const measuredRobot = survey?.progress.robot_positions.filter((item) => item.state === 'measured').length || 0
   const measuredFloor = survey?.progress.ground_tag_status.filter((item) => item.state === 'measured').length || 0
   const totalRobot = survey?.progress.robot_positions.length || 37
   const totalFloor = survey?.progress.ground_tag_status.length || 7
+  const provisionalTagCount = survey?.records.filter((item) => !item.stable).length || 0
   const topPositions = survey?.progress.robot_positions.filter((item) => item.kind !== 'yoke_face') || []
   const anglePositions = survey?.progress.robot_positions.filter((item) => item.kind === 'yoke_face') || []
   const topMeasured = topPositions.filter((item) => item.state === 'measured').length
   const angleMeasured = anglePositions.filter((item) => item.state === 'measured').length
   const qualityGate = survey?.progress.quality_gate
   const complete = survey?.status === 'complete'
-  const interrupted = survey?.status === 'connection_lost' || survey?.status === 'incomplete' || (survey?.status === 'failed' && survey.can_resume)
+  const interrupted = Boolean(survey?.can_resume && ['connection_lost', 'incomplete', 'failed'].includes(survey.status))
+  const emptyConnectionFailure = survey?.status === 'connection_lost' && !survey.can_resume
+  const step = emptyConnectionFailure ? 1 : surveyStep(survey?.status)
+  const guideHeadline = survey?.status === 'connecting'
+    ? 'Desktop connected — start the red Record3D stream'
+    : emptyConnectionFailure
+      ? 'No RGB-D frame arrived — recheck the phone'
+      : survey?.guidance?.headline || survey?.instruction || 'Put the robot in zero pose and start when ready.'
+  const guideDetail = survey?.status === 'connecting'
+    ? 'Leave this page waiting, keep Record3D open, and stop then restart its red stream button. The first full frame will appear automatically.'
+    : emptyConnectionFailure
+      ? 'The Mac can see the iPhone over USB, but Record3D did not deliver video. Recheck below, then restart the red button while the desktop is waiting.'
+      : survey?.guidance?.detail || survey?.message || 'The scan records tag identity, position, orientation, floor spacing, and the geometry identifiable from this pose.'
+  const guideAction = survey?.status === 'connecting'
+    ? 'On the phone: tap the red button to stop, then tap it again to stream.'
+    : survey?.guidance?.action
   const targetPosition = survey?.guidance?.target_position
   const targetTagId = survey?.guidance?.target_tag_id
+  const measuredPositionKey = (survey?.progress.robot_positions || [])
+    .filter((item) => item.state === 'measured')
+    .map((item) => item.position)
+    .sort()
+    .join('\u0000')
+  const previousMeasuredPositions = useRef<Set<string> | null>(null)
+  const [lastCompletedPosition, setLastCompletedPosition] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!survey) return
+    const current = new Set(measuredPositionKey ? measuredPositionKey.split('\u0000') : [])
+    if (previousMeasuredPositions.current !== null && active) {
+      const newlyCompleted = [...current].find(
+        (position) => !previousMeasuredPositions.current?.has(position),
+      )
+      if (newlyCompleted) setLastCompletedPosition(newlyCompleted)
+    }
+    previousMeasuredPositions.current = current
+  }, [active, measuredPositionKey])
 
   return (
     <main className="calibration-app">
@@ -523,18 +557,21 @@ function ZeroSurveyWorkspace({
         <section className="survey-main">
           <div className={`guide-card status-${survey?.status || 'idle'}`}>
             <div className="guide-icon">{complete ? '✓' : active ? <span className="pulse-rings" /> : '◎'}</div>
-            <div><span className="guide-kicker">Step {step} of 4 · {(survey?.status || 'ready').replaceAll('_', ' ')}</span><h2>{survey?.guidance?.headline || survey?.instruction || 'Put the robot in zero pose and start when ready.'}</h2><p>{survey?.guidance?.detail || survey?.message || 'The scan records tag identity, position, orientation, floor spacing, and the geometry identifiable from this pose.'}</p>{active && survey?.guidance?.action && <div className="next-action"><b>Do this now</b><span>{survey.guidance.action}</span></div>}{active && survey?.message && <small className="tracking-note">Tracking: {survey.message}</small>}</div>
-            {active && <button className="stop-survey" disabled={busy} onClick={onStop}>Stop & save partial</button>}
+            <div><span className="guide-kicker">Step {step} of 4 · {(survey?.status || 'ready').replaceAll('_', ' ')}</span><h2>{guideHeadline}</h2><p>{guideDetail}</p>{active && guideAction && <div className="next-action"><b>Do this now</b><span>{guideAction}</span></div>}{active && survey?.message && <small className="tracking-note">Tracking: {survey.message}</small>}</div>
+            {active ? <button className="stop-survey" disabled={busy} onClick={onStop}>Stop & save partial</button> : emptyConnectionFailure ? <button className="guide-reconnect" disabled={busy} onClick={onStart}>{busy ? 'Checking…' : 'Recheck phone connection'}<span>→</span></button> : null}
           </div>
+
+          {lastCompletedPosition && active && <div className="capture-confirmation"><b>✓ {lastCompletedPosition} complete</b><span>Enough clean frames and a genuinely different viewing angle were captured. The guide has moved to the next target.</span></div>}
 
           {!active && !complete && !interrupted && (
             <section className="setup-grid">
               <div className="setup-card primary-setup">
                 <div className="eyebrow">Before you start</div><h2>Robot down. Tags up. Phone ready.</h2>
                 <div className="transport-picker"><button className={connectionMode === 'usb' ? 'active' : ''} onClick={() => setConnectionMode('usb')}><b>USB</b><span>Best LiDAR precision</span></button><button className={connectionMode === 'wifi' ? 'active' : ''} onClick={() => setConnectionMode('wifi')}><b>Wi‑Fi</b><span>No cable · lower depth quality</span></button></div>
-                <div className="prep-list"><span><i>1</i>Place the stationary robot in its zero pose.</span><span><i>2</i>Leave floor tags 100–105 and 112 in their mapped one-foot grid.</span><span><i>3</i>In Record3D, select {connectionMode === 'usb' ? 'USB' : 'Wi‑Fi'} under Live RGBD Video Streaming.</span><span><i>4</i>Tap the red button so the phone says “Started, Waiting for Connection.”</span></div>
+                {emptyConnectionFailure && <div className="connection-retry-notice"><i /><span><b>USB sees the iPhone, but no RGB‑D frames arrived</b><small>Press Recheck first. While this page says “Waiting for the iPhone,” stop and restart the red stream button in Record3D. The desktop will now wait up to 90 seconds.</small></span></div>}
+                <div className="prep-list"><span><i>1</i>Place the stationary robot in its zero pose.</span><span><i>2</i>Leave floor tags 100–105 and 112 in their mapped one-foot grid.</span><span><i>3</i>In Record3D, select {connectionMode === 'usb' ? 'USB' : 'Wi‑Fi'} under Live RGBD Video Streaming.</span><span><i>4</i>Press Connect here, then tap the red stream button on the phone. Keep Record3D open.</span></div>
                 {connectionMode === 'wifi' && <div className="wifi-connect"><label>iPhone address<input value={wifiAddress} placeholder="for example 192.168.1.100 or myiPhone.local" onChange={(event) => setWifiAddress(event.target.value)} /></label><button disabled={busy || !wifiAddress.trim()} onClick={onConnectWifi}>Connect phone</button><small>{wifiStatus}. Requires Record3D 1.11+ and its Wi‑Fi Streaming extension; USB remains more accurate.</small></div>}
-                <button className="launch-survey" disabled={busy || !survey?.available} onClick={onStart}>{busy ? 'Starting…' : 'Start iPhone LiDAR calibration'}<span>→</span></button>
+                <button className="launch-survey" disabled={busy || !survey?.available} onClick={onStart}>{busy ? 'Checking for RGB‑D frames…' : emptyConnectionFailure ? 'Recheck phone connection' : 'Start iPhone LiDAR calibration'}<span>→</span></button>
               </div>
               <div className="setup-card settings-card">
                 <div className="panel-heading"><div><div className="eyebrow">Known setup</div><h2>Tag references</h2></div><span className="defaults-chip">editable</span></div>
@@ -551,7 +588,7 @@ function ZeroSurveyWorkspace({
 
           {!active && !complete && interrupted && survey && (
             <section className="resume-card">
-              <div><div className="eyebrow">Saved checkpoint</div><h2>Your scan is intact</h2><p>{measuredRobot}/{totalRobot} robot positions and {measuredFloor}/{totalFloor} floor tags are saved. Reconnect the phone; you will briefly re-lock any visible mapped floor tag, then continue with only the highlighted target.</p></div>
+              <div><div className="eyebrow">Saved checkpoint</div><h2>Your scan is intact</h2><p>{measuredRobot}/{totalRobot} robot positions and {measuredFloor}/{totalFloor} floor tags are finished; {provisionalTagCount} additional tag identities and pose seeds are retained. Reconnect the phone, re-lock the floor, then add the different angles needed to finish them.</p></div>
               <div className="resume-controls">
                 <div className="transport-picker compact"><button className={connectionMode === 'usb' ? 'active' : ''} onClick={() => setConnectionMode('usb')}><b>USB</b><span>Recommended</span></button><button className={connectionMode === 'wifi' ? 'active' : ''} onClick={() => setConnectionMode('wifi')}><b>Wi‑Fi</b><span>Wireless</span></button></div>
                 {connectionMode === 'wifi' && <div className="wifi-connect compact"><label>iPhone address<input value={wifiAddress} placeholder="myiPhone.local" onChange={(event) => setWifiAddress(event.target.value)} /></label><button disabled={busy || !wifiAddress.trim()} onClick={onConnectWifi}>Reconnect phone</button><small>{wifiStatus}</small></div>}
@@ -565,11 +602,12 @@ function ZeroSurveyWorkspace({
             <>
               <div className="live-grid">
                 <section className="camera-card">
-                  <div className="map-heading"><div><span>Record3D RGB + LiDAR</span><b>What the phone sees</b></div><em>{survey.detected_tag_ids.length ? `IDs ${survey.detected_tag_ids.join(', ')}` : 'Looking for tags…'}</em></div>
-                  <div className="survey-camera">
-                    {survey.camera_frame_available ? <img src={`/api/vision/zero-survey/frame.jpg?v=${survey.camera_frame_version}`} alt="Live iPhone view with identified AprilTags" /> : <div className="waiting-camera"><div className="phone-glyph">▯</div><b>Waiting for the iPhone</b><span>Start {connectionMode === 'wifi' ? 'Wi‑Fi' : 'USB'} streaming in Record3D. The first frame will appear here.</span></div>}
+                  <div className="map-heading"><div><span>Record3D RGB + LiDAR</span><b>Live positioning view</b></div><em>Full frame · no crop</em></div>
+                  <div className={`survey-camera ${survey.camera_frame_available ? 'has-frame' : 'waiting'} ${active ? 'is-live' : 'is-stale'}`}>
+                    {survey.camera_frame_available ? <><img src={`/api/vision/zero-survey/frame.jpg?v=${survey.camera_frame_version}`} alt={active ? 'Live full iPhone positioning frame' : 'Last saved full iPhone frame'} draggable={false} /><div className={`camera-frame-label ${active ? 'live' : 'stale'}`}>{active ? '● LIVE · FULL FRAME' : 'LAST SAVED FRAME · RECONNECT TO UPDATE'}</div>{!active && interrupted && <div className="stale-frame-overlay"><b>The phone feed is disconnected</b><span>This is the final complete frame received, not the phone’s current view.</span></div>}</> : <div className="waiting-camera"><div className="phone-glyph">▯</div><b>Desktop is waiting for the first frame</b><span>Now stop and restart the red {connectionMode === 'wifi' ? 'Wi‑Fi' : 'USB'} stream button in Record3D. Leave the app open; this page will wait 90 seconds.</span></div>}
                   </div>
-                  <div className="camera-stats"><span><b>{survey.frame_sequence}</b> frames</span><span><b>{survey.detected_tag_ids.length}</b> IDs now</span><span><b>{survey.elapsed_s.toFixed(0)}s</b> elapsed</span></div>
+                  {active && survey.guidance?.accepted_frames !== undefined && <div className="capture-progress"><div><span>Clean frames</span><b>{Math.min(survey.guidance.accepted_frames, survey.guidance.required_frames || 0)}/{survey.guidance.required_frames}</b><i><em style={{width: `${Math.min(100, survey.guidance.accepted_frames / Math.max(1, survey.guidance.required_frames || 1) * 100)}%`}} /></i></div><div><span>Different-angle proof</span><b>{(survey.guidance.viewpoint_span_deg || 0).toFixed(0)}°/{(survey.guidance.required_viewpoint_span_deg || 0).toFixed(0)}°</b><i><em style={{width: `${Math.min(100, (survey.guidance.viewpoint_span_deg || 0) / Math.max(1, survey.guidance.required_viewpoint_span_deg || 1) * 100)}%`}} /></i></div></div>}
+                  <div className="camera-stats"><span><b>{survey.frame_sequence}</b> analyzed frames</span><span><b>{survey.detected_tag_ids.length}</b> tags in last analysis</span><span><b>{survey.elapsed_s.toFixed(0)}s</b> elapsed</span></div>
                   {survey.quality && <div className={`quality-coach ${survey.quality.level}`}><div className="quality-head"><i /><span><b>{survey.quality.headline}</b><small>{survey.quality.suggestion}</small></span></div><div className="quality-metrics"><span><b>{survey.quality.reprojection_rms_px === null ? '—' : `${survey.quality.reprojection_rms_px.toFixed(2)} px`}</b>corner error</span><span><b>{survey.quality.depth_plane_rms_mm === null ? '—' : `${survey.quality.depth_plane_rms_mm.toFixed(1)} mm`}</b>LiDAR plane</span><span><b>{survey.quality.translation_spread_mm === null ? '—' : `${survey.quality.translation_spread_mm.toFixed(1)} mm`}</b>position spread</span><span><b>{survey.quality.rotation_spread_deg === null ? '—' : `${survey.quality.rotation_spread_deg.toFixed(1)}°`}</b>angle spread</span><span><b>{survey.quality.camera_speed_m_s === null ? '—' : `${survey.quality.camera_speed_m_s.toFixed(2)} m/s`}</b>phone speed</span></div></div>}
                 </section>
                 <SurveyScene survey={survey} />
@@ -579,8 +617,8 @@ function ZeroSurveyWorkspace({
                 <div className="coverage-heading"><div><div className="eyebrow">Position-based coverage</div><h2>{topMeasured}/{topPositions.length || 13} top + chassis · {angleMeasured}/{anglePositions.length || 24} vertical angle tags · {measuredFloor}/{totalFloor} floor</h2></div><div className="coverage-total"><span style={{width: `${((measuredRobot + measuredFloor) / Math.max(1, totalRobot + totalFloor)) * 100}%`}} /></div></div>
                 {qualityGate && <div className={`geometry-gate ${qualityGate.passed ? 'passed' : 'checking'}`}><div><b>{qualityGate.passed ? 'Geometry quality passed' : 'Geometry quality checking'}</b><span>{qualityGate.passed ? 'The mapped floor residuals and all required positions meet the save limits.' : qualityGate.failing_checks[0]}</span></div><div><span><b>{qualityGate.joint_floor_reprojection_rms_px == null ? '—' : `${qualityGate.joint_floor_reprojection_rms_px.toFixed(2)} px`}</b>floor grid fit</span><span><b>{qualityGate.floor_position_rms_mm === null ? '—' : `${qualityGate.floor_position_rms_mm.toFixed(1)} mm`}</b>floor position RMS</span><span><b>{qualityGate.floor_height_rms_mm === null ? '—' : `${qualityGate.floor_height_rms_mm.toFixed(1)} mm`}</b>floor height RMS</span><span><b>{qualityGate.floor_rotation_rms_deg === null ? '—' : `${qualityGate.floor_rotation_rms_deg.toFixed(1)}°`}</b>floor angle RMS</span></div></div>}
                 <div className="position-groups">
-                  <div className="robot-position-sections"><div><h3>Top + chassis tags <small>{topMeasured}/{topPositions.length}</small></h3><div className="position-list">{topPositions.map((item) => <div key={item.position} className={`position-item ${item.state} ${targetPosition === item.position ? 'targeted' : ''}`}><i>{item.state === 'measured' ? '✓' : item.state === 'seen_needs_another_view' ? '↻' : '·'}</i><span><b>{item.position}</b><small>{item.tag_id === null ? 'No tag seen yet' : `tag #${item.tag_id}${item.replacement ? ' · replacement' : ''}`}</small></span><em>{targetPosition === item.position ? 'Do now' : stateCopy(item.state)}</em></div>)}</div></div><div><h3>Vertical angle tags <small>{angleMeasured}/{anglePositions.length} · four per leg</small></h3><div className="position-list angle-list">{anglePositions.map((item) => <div key={item.position} className={`position-item ${item.state} ${targetPosition === item.position ? 'targeted' : ''}`}><i>{item.state === 'measured' ? '✓' : item.state === 'seen_needs_another_view' ? '↻' : '·'}</i><span><b>{item.position}</b><small>{item.tag_id === null ? 'No tag seen yet' : `tag #${item.tag_id}${item.replacement ? ' · replacement' : ''}`}</small></span><em>{targetPosition === item.position ? 'Do now' : stateCopy(item.state)}</em></div>)}</div></div></div>
-                  <div><h3>Floor tags</h3><div className="floor-list">{survey.progress.ground_tag_status.map((item) => <div key={item.tag_id} className={`floor-item ${item.state} ${targetTagId === item.tag_id ? 'targeted' : ''}`}><b>#{item.tag_id}</b><span>{targetTagId === item.tag_id ? 'Do now' : stateCopy(item.state)}</span><small>{item.observations} views</small></div>)}</div>{survey.progress.discovered_unexpected_tag_ids.length > 0 && <div className="extra-tags"><b>Also discovered</b><span>{survey.progress.discovered_unexpected_tag_ids.map((id) => `#${id}`).join(', ')}</span></div>}</div>
+                  <div className="robot-position-sections"><div><h3>Top + chassis tags <small>{topMeasured}/{topPositions.length}</small></h3><div className="position-list">{topPositions.map((item) => <div key={item.position} className={`position-item ${item.state} ${targetPosition === item.position ? 'targeted' : ''}`}><i>{item.state === 'measured' ? '✓' : item.state === 'seen_needs_another_view' ? '↻' : '·'}</i><span><b>{item.position}</b><small>{item.tag_id === null ? 'No tag seen yet' : `tag #${item.tag_id}${item.replacement ? ' · replacement' : ''} · ${item.observations || 0} frames · ${(item.viewpoint_span_deg || 0).toFixed(0)}° span`}</small></span><em>{targetPosition === item.position ? 'Do now' : stateCopy(item.state)}</em></div>)}</div></div><div><h3>Vertical angle tags <small>{angleMeasured}/{anglePositions.length} · four per leg</small></h3><div className="position-list angle-list">{anglePositions.map((item) => <div key={item.position} className={`position-item ${item.state} ${targetPosition === item.position ? 'targeted' : ''}`}><i>{item.state === 'measured' ? '✓' : item.state === 'seen_needs_another_view' ? '↻' : '·'}</i><span><b>{item.position}</b><small>{item.tag_id === null ? 'No tag seen yet' : `tag #${item.tag_id}${item.replacement ? ' · replacement' : ''} · ${item.observations || 0} frames · ${(item.viewpoint_span_deg || 0).toFixed(0)}° span`}</small></span><em>{targetPosition === item.position ? 'Do now' : stateCopy(item.state)}</em></div>)}</div></div></div>
+                  <div><h3>Floor tags</h3><div className="floor-list">{survey.progress.ground_tag_status.map((item) => <div key={item.tag_id} className={`floor-item ${item.state} ${targetTagId === item.tag_id ? 'targeted' : ''}`}><b>#{item.tag_id}</b><span>{targetTagId === item.tag_id ? 'Do now' : stateCopy(item.state)}</span><small>{item.observations} frames · {(item.viewpoint_span_deg || 0).toFixed(0)}° span</small></div>)}</div>{survey.progress.discovered_unexpected_tag_ids.length > 0 && <div className="extra-tags"><b>Also discovered</b><span>{survey.progress.discovered_unexpected_tag_ids.map((id) => `#${id}`).join(', ')}</span></div>}</div>
                 </div>
               </section>
             </>
@@ -793,7 +831,8 @@ export default function App() {
         })
       })
     }
-    const answerResponse = await fetch(`${baseUrl}/answer`, {
+    // Record3D's Wi-Fi signaling API calls this endpoint /sendAnswer.
+    const answerResponse = await fetch(`${baseUrl}/sendAnswer`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({type: 'answer', data: peer.localDescription?.sdp}),

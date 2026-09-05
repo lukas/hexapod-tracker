@@ -133,6 +133,21 @@ def test_handheld_alignment_converts_opengl_camera_trajectory() -> None:
         )) < 1e-6
 
 
+def test_handheld_alignment_uses_a_bounded_recent_window() -> None:
+    alignment = HandheldWorldAlignment(min_observations=3, max_observations=4)
+    arkit_pose = RigidTransform.identity()
+    for offset in range(7):
+        alignment.add(
+            RigidTransform(
+                np.asarray([float(offset) / 1000.0, 0.0, 0.0]), Rotation.identity()
+            ).compose(arkit_world_from_opencv_camera(arkit_pose)),
+            arkit_pose,
+        )
+
+    assert alignment.observation_count == 4
+    assert np.isclose(alignment.consensus().transform.translation_m[0], 0.0045)
+
+
 def test_wifi_frame_spool_decodes_packed_rgbd_and_pose(tmp_path) -> None:
     hsv_depth = np.zeros((40, 50, 3), dtype=np.uint8)
     hsv_depth[:, :, 0] = 60
@@ -191,9 +206,56 @@ def test_live_guidance_picks_one_target_and_coaches_camera_speed() -> None:
 
     assert guidance["target_position"] == "L2 knee"
     assert guidance["target_tag_id"] == 10
-    assert "2 more clean views" in guidance["action"]
+    assert "2 more clean frames" in guidance["action"]
     assert quality["level"] == "caution"
     assert quality["headline"] == "You are moving too quickly"
+
+
+def test_tag_requires_a_genuinely_different_viewpoint_when_configured() -> None:
+    tag = RigidTransform(
+        np.asarray([0.10, 0.08, 0.0]), Rotation.identity()
+    )
+    overhead = RigidTransform(
+        np.asarray([0.0, 0.0, 0.75]),
+        Rotation.from_euler("x", 180.0, degrees=True),
+    )
+    accumulator = TagSurveyAccumulator(
+        robot_tags={},
+        expected_ground_ids=[12],
+        marker_size_m=0.027,
+        options=TagSurveyOptions(
+            min_observations=4,
+            min_viewpoint_span_deg=8.0,
+        ),
+    )
+    for _index in range(4):
+        accumulator.observe_frame(
+            [_detection(12, 0.027, tag, overhead)],
+            overhead,
+            CAMERA_MATRIX,
+            np.zeros(5),
+        )
+
+    first = accumulator.tag_records()[0]
+    assert first["observations"] == 4
+    assert first["viewpoint_span_deg"] == 0.0
+    assert first["stable"] is False
+
+    side_view = RigidTransform(
+        np.asarray([0.18, 0.0, 0.75]),
+        Rotation.from_euler("x", 180.0, degrees=True),
+    )
+    for _index in range(4):
+        accumulator.observe_frame(
+            [_detection(12, 0.027, tag, side_view)],
+            side_view,
+            CAMERA_MATRIX,
+            np.zeros(5),
+        )
+
+    second = accumulator.tag_records()[0]
+    assert second["viewpoint_span_deg"] > 8.0
+    assert second["stable"] is True
 
 
 def test_world_reference_supports_mixed_floor_tag_sizes() -> None:
@@ -482,6 +544,40 @@ def test_survey_restores_only_stable_records_after_reconnect() -> None:
     assert record["observations"] == 8
     assert record["used_observations"] == 7
     assert record["translation_spread_mm"] == 2.5
+
+
+def test_survey_restores_clean_same_angle_record_as_provisional_seed() -> None:
+    transform = RigidTransform(
+        np.asarray([0.12, -0.04, 0.18]),
+        Rotation.from_euler("z", 17.0, degrees=True),
+    )
+    accumulator = TagSurveyAccumulator(
+        robot_tags={1: {"label": "L0 hip", "frame": "L0_coxa"}},
+        marker_size_m=0.027,
+        options=TagSurveyOptions(
+            min_observations=3,
+            min_viewpoint_span_deg=8.0,
+        ),
+    )
+    restored = accumulator.restore_stable_records([{
+        "tag_id": 1,
+        "stable": False,
+        "viewpoint_requirement_met": False,
+        "possible_duplicate_id_or_tracking_jump": False,
+        "marker_size_m": 0.027,
+        "world_from_tag": transform.to_dict(),
+        "observations": 12,
+        "used_observations": 11,
+        "translation_spread_mm": 2.5,
+        "rotation_spread_deg": 0.8,
+        "mean_reprojection_rms_px": 0.45,
+    }])
+
+    record = accumulator.tag_records()[0]
+    assert restored == [1]
+    assert record["observations"] == 1
+    assert record["stable"] is False
+    assert record["viewpoint_requirement_met"] is False
 
 
 def test_robot_completion_uses_physical_positions_and_accepts_replacement_ids() -> None:

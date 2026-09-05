@@ -103,6 +103,8 @@ export interface ZeroSurveyPosition {
   state: 'not_seen' | 'seen_needs_another_view' | 'measured'
   observations?: number
   used_observations?: number
+  viewpoint_span_deg?: number
+  required_viewpoint_span_deg?: number
   expected_world_position_m?: [number, number, number] | null
   kind?: 'chassis_tag' | 'servo_lid' | 'yoke_face' | string | null
   surface?: 'horizontal' | 'vertical' | string | null
@@ -135,6 +137,8 @@ export interface ZeroSurveyTag {
   used_observations: number
   translation_spread_mm?: number
   rotation_spread_deg?: number
+  viewpoint_span_deg?: number
+  required_viewpoint_span_deg?: number
   stable: boolean
   possible_duplicate_id_or_tracking_jump?: boolean
 }
@@ -155,6 +159,10 @@ export interface ZeroSurveyState {
     target_position: string | null
     target_state: string
     remaining_targets: number
+    accepted_frames?: number
+    required_frames?: number
+    viewpoint_span_deg?: number
+    required_viewpoint_span_deg?: number
   } | null
   quality: {
     level: 'good' | 'caution' | 'poor'
@@ -212,6 +220,8 @@ export interface ZeroSurveyState {
       state: 'not_seen' | 'seen_needs_another_view' | 'measured'
       observations: number
       used_observations?: number
+      viewpoint_span_deg?: number
+      required_viewpoint_span_deg?: number
     }>
     unseen_robot_positions: string[]
     robot_positions_needing_another_view: string[]

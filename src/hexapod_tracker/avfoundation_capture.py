@@ -105,6 +105,8 @@ class AVFoundationYuvCapture:
 
         self.capture_image_size_px: tuple[int, int] | None = None
         self.image_size_px: tuple[int, int] | None = None
+        self.device_unique_id: str | None = None
+        self.device_name: str | None = None
         self.detection_gray: np.ndarray | None = None
         self.tracking_gray: np.ndarray | None = None
         self.last_error: str | None = None
@@ -142,6 +144,9 @@ class AVFoundationYuvCapture:
         descriptors: list[dict[str, Any]] = []
         for index, device in enumerate(cls._devices()):
             name = str(device.localizedName())
+            unique_id = str(
+                device.uniqueID() if hasattr(device, "uniqueID") else ""
+            )
             device_type = str(
                 device.deviceType() if hasattr(device, "deviceType") else ""
             )
@@ -165,6 +170,7 @@ class AVFoundationYuvCapture:
             descriptors.append({
                 "index": index,
                 "name": name,
+                "stable_id": unique_id or f"avfoundation:{name}",
                 "kind": kind,
                 "available": connected and not suspended,
             })
@@ -215,6 +221,10 @@ class AVFoundationYuvCapture:
                 f"camera index {self.index} is unavailable ({len(devices)} found)"
             )
         device = devices[self.index]
+        self.device_name = str(device.localizedName())
+        self.device_unique_id = str(
+            device.uniqueID() if hasattr(device, "uniqueID") else ""
+        ) or f"avfoundation:{self.device_name}"
         capture_format = self._select_format(device)
 
         # Configure the device before it belongs to a capture session.  A
@@ -415,6 +425,8 @@ class AVFoundationYuvCapture:
             "pixel_format": self.pixel_format,
             "native_luma": True,
             "capture_fps": self.fps,
+            "device_name": self.device_name,
+            "device_stable_id": self.device_unique_id,
             "capture_image_size_px": (
                 None
                 if self.capture_image_size_px is None

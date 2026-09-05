@@ -40,6 +40,7 @@ class TagSurveyOptions:
     ground_height_tolerance_m: float = 0.035
     ground_normal_tolerance_deg: float = 25.0
     max_observations_per_tag: int = 120
+    min_viewpoint_span_deg: float = 0.0
     freeze_stable_tags: bool = False
     robot_slot_match_tolerance_m: float = 0.060
 
@@ -61,6 +62,14 @@ class TagSurveyOptions:
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f"{name} must be a positive finite number")
+        if (
+            not math.isfinite(float(self.min_viewpoint_span_deg))
+            or self.min_viewpoint_span_deg < 0.0
+            or self.min_viewpoint_span_deg >= 180.0
+        ):
+            raise ValueError(
+                "min_viewpoint_span_deg must be finite and between 0 and 180"
+            )
 
 
 @dataclass(frozen=True)
@@ -71,6 +80,7 @@ class TagSurveyObservation:
     reprojection_rms_px: float
     image_heading_deg: float
     confidence: float
+    camera_position_world: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -114,24 +124,28 @@ def _transform_consensus(
         item.rotation.as_quat() for item in transforms
     ]))
     # Use an observed medoid to avoid a quaternion mean landing between the two
-    # planar IPPE branches before outlier rejection.
-    scores = []
-    for index, transform in enumerate(transforms):
-        translation_error = np.linalg.norm(
-            translations - transform.translation_m, axis=1
-        )
-        rotation_error = _rotation_errors_deg(transform.rotation, rotations)
-        scores.append(float(np.median(
-            translation_error / max_translation_spread_m
-            + rotation_error / max_rotation_spread_deg
-        )))
-    medoid = transforms[int(np.argmin(scores))]
+    # planar IPPE branches before outlier rejection. Compute all pairwise
+    # distances in NumPy: the former Python/SciPy loop starved Record3D's
+    # callback thread once dozens of tags each had a full observation window.
+    translation_distances = np.linalg.norm(
+        translations[:, None, :] - translations[None, :, :], axis=2
+    )
+    quaternions = rotations.as_quat()
+    quaternion_dots = np.clip(
+        np.abs(quaternions @ quaternions.T), 0.0, 1.0
+    )
+    rotation_distances_deg = np.degrees(2.0 * np.arccos(quaternion_dots))
+    scores = np.median(
+        translation_distances / max_translation_spread_m
+        + rotation_distances_deg / max_rotation_spread_deg,
+        axis=1,
+    )
+    medoid_index = int(np.argmin(scores))
+    medoid = transforms[medoid_index]
     keep = (
-        np.linalg.norm(translations - medoid.translation_m, axis=1)
-        <= max_translation_spread_m
+        translation_distances[medoid_index] <= max_translation_spread_m
     ) & (
-        _rotation_errors_deg(medoid.rotation, rotations)
-        <= max_rotation_spread_deg
+        rotation_distances_deg[medoid_index] <= max_rotation_spread_deg
     )
     indexes = np.flatnonzero(keep)
     if not len(indexes):
@@ -139,28 +153,20 @@ def _transform_consensus(
     rejected_indexes = np.flatnonzero(~keep)
     ambiguous_cluster = False
     if len(rejected_indexes) >= min_observations:
-        rejected_rotations = Rotation.from_quat(
-            rotations.as_quat()[rejected_indexes]
+        rejected_translation_distances = translation_distances[
+            np.ix_(rejected_indexes, rejected_indexes)
+        ]
+        rejected_rotation_distances = rotation_distances_deg[
+            np.ix_(rejected_indexes, rejected_indexes)
+        ]
+        compatible = (
+            rejected_translation_distances <= max_translation_spread_m
+        ) & (
+            rejected_rotation_distances <= max_rotation_spread_deg
         )
-        for candidate_index in rejected_indexes:
-            translation_neighbors = (
-                np.linalg.norm(
-                    translations[rejected_indexes]
-                    - translations[candidate_index],
-                    axis=1,
-                ) <= max_translation_spread_m
-            )
-            rotation_neighbors = (
-                _rotation_errors_deg(
-                    transforms[candidate_index].rotation,
-                    rejected_rotations,
-                ) <= max_rotation_spread_deg
-            )
-            if int(np.count_nonzero(
-                translation_neighbors & rotation_neighbors
-            )) >= min_observations:
-                ambiguous_cluster = True
-                break
+        ambiguous_cluster = bool(np.any(
+            np.count_nonzero(compatible, axis=1) >= min_observations
+        ))
     kept_translations = translations[indexes]
     kept_rotations = Rotation.from_quat(rotations.as_quat()[indexes])
     kept_weights = (
@@ -215,10 +221,14 @@ class HandheldWorldAlignment:
         min_observations: int = 8,
         max_translation_spread_m: float = 0.025,
         max_rotation_spread_deg: float = 2.5,
+        max_observations: int = 48,
     ) -> None:
         self.min_observations = min_observations
         self.max_translation_spread_m = max_translation_spread_m
         self.max_rotation_spread_deg = max_rotation_spread_deg
+        if max_observations < min_observations:
+            raise ValueError("max_observations cannot be below min_observations")
+        self.max_observations = int(max_observations)
         self._candidates: list[RigidTransform] = []
 
     def add(
@@ -232,6 +242,8 @@ class HandheldWorldAlignment:
         self._candidates.append(
             world_from_opencv_camera.compose(arkit_from_cv.inverse())
         )
+        if len(self._candidates) > self.max_observations:
+            del self._candidates[:-self.max_observations]
 
     @property
     def observation_count(self) -> int:
@@ -390,6 +402,7 @@ class TagSurveyAccumulator:
         self.options = options or TagSurveyOptions()
         self._observations: dict[int, list[TagSurveyObservation]] = {}
         self._frozen: dict[int, TransformConsensus] = {}
+        self._restored_viewpoint_spans: dict[int, float] = {}
         self._replacement_specs: dict[int, dict[str, Any]] = {}
         self._multi_floor_reference_frames: list[
             tuple[tuple[int, ...], float, float]
@@ -421,17 +434,24 @@ class TagSurveyAccumulator:
         *,
         frames: int = 0,
     ) -> list[int]:
-        """Restore accepted landmarks from an atomic progress snapshot.
+        """Restore accepted landmarks and trustworthy same-angle pose seeds.
 
         A reconnected Record3D session has a new ARKit origin, so camera
         alignment must be acquired again. Stable tag transforms are already in
-        the survey board's world frame, however, and can safely remain frozen.
-        Unstable records are deliberately not restored: their compact status
-        lacks the individual observations needed to re-evaluate consensus.
+        the survey board's world frame and can safely remain frozen. A record
+        that failed *only* the viewpoint-diversity gate is retained as one
+        provisional observation, so reconnecting asks for a fresh side view
+        without throwing away its identity and approximate pose. Ambiguous or
+        otherwise noisy records remain excluded.
         """
         restored: list[int] = []
         for raw in records:
-            if not raw.get("stable"):
+            stable = bool(raw.get("stable"))
+            recoverable_viewpoint_seed = (
+                raw.get("viewpoint_requirement_met") is False
+                and not raw.get("possible_duplicate_id_or_tracking_jump", False)
+            )
+            if not stable and not recoverable_viewpoint_seed:
                 continue
             try:
                 tag_id = int(raw["tag_id"])
@@ -451,6 +471,15 @@ class TagSurveyAccumulator:
                 continue
             if tag_id < 0 or not math.isfinite(marker_size_m) or marker_size_m <= 0.0:
                 continue
+            if recoverable_viewpoint_seed and (
+                used_count < self.options.min_observations
+                or translation_spread_mm
+                > self.options.max_translation_spread_m * 1000.0
+                or rotation_spread_deg > self.options.max_rotation_spread_deg
+                or mean_reprojection_rms_px
+                > self.options.max_reprojection_rms_px
+            ):
+                continue
             self._observations[tag_id] = [TagSurveyObservation(
                 tag_id=tag_id,
                 world_from_tag=transform,
@@ -458,17 +487,28 @@ class TagSurveyAccumulator:
                 reprojection_rms_px=max(0.0, mean_reprojection_rms_px),
                 image_heading_deg=0.0,
                 confidence=1.0,
+                camera_position_world=transform.translation_m.copy(),
             )]
-            self._frozen[tag_id] = TransformConsensus(
-                transform=transform,
-                input_count=input_count,
-                used_count=min(input_count, used_count),
-                translation_spread_mm=max(0.0, translation_spread_mm),
-                rotation_spread_deg=max(0.0, rotation_spread_deg),
-                stable=True,
-                ambiguous_cluster=False,
-                mean_reprojection_rms_px=max(0.0, mean_reprojection_rms_px),
-            )
+            if stable:
+                self._frozen[tag_id] = TransformConsensus(
+                    transform=transform,
+                    input_count=input_count,
+                    used_count=min(input_count, used_count),
+                    translation_spread_mm=max(0.0, translation_spread_mm),
+                    rotation_spread_deg=max(0.0, rotation_spread_deg),
+                    stable=True,
+                    ambiguous_cluster=False,
+                    mean_reprojection_rms_px=max(
+                        0.0, mean_reprojection_rms_px
+                    ),
+                )
+                self._restored_viewpoint_spans[tag_id] = max(
+                    float(raw.get(
+                        "viewpoint_span_deg",
+                        self.options.min_viewpoint_span_deg,
+                    )),
+                    self.options.min_viewpoint_span_deg,
+                )
             restored.append(tag_id)
         self.frames = max(self.frames, max(0, int(frames)))
         return sorted(restored)
@@ -637,6 +677,18 @@ class TagSurveyAccumulator:
                 "used_observations": (
                     0 if record is None else int(record["used_observations"])
                 ),
+                "viewpoint_span_deg": (
+                    0.0 if record is None
+                    else float(record.get("viewpoint_span_deg", 0.0))
+                ),
+                "required_viewpoint_span_deg": (
+                    self.options.min_viewpoint_span_deg
+                    if record is None
+                    else float(record.get(
+                        "required_viewpoint_span_deg",
+                        self.options.min_viewpoint_span_deg,
+                    ))
+                ),
             })
 
         # The photographed layout has no metric side-tag translations.  A
@@ -755,6 +807,13 @@ class TagSurveyAccumulator:
                     ),
                     "observations": int(candidate["observations"]),
                     "used_observations": int(candidate["used_observations"]),
+                    "viewpoint_span_deg": float(
+                        candidate.get("viewpoint_span_deg", 0.0)
+                    ),
+                    "required_viewpoint_span_deg": float(candidate.get(
+                        "required_viewpoint_span_deg",
+                        self.options.min_viewpoint_span_deg,
+                    )),
                 })
         replacement_specs: dict[int, dict[str, Any]] = {}
         for item in positions:
@@ -891,6 +950,7 @@ class TagSurveyAccumulator:
                 # A restored checkpoint remains immediately usable, then starts
                 # refining again as soon as the operator revisits this tag.
                 self._frozen.pop(detection.tag_id, None)
+                self._restored_viewpoint_spans.pop(detection.tag_id, None)
             marker_size = self.marker_sizes_m.get(
                 detection.tag_id, self.marker_size_m
             )
@@ -947,12 +1007,13 @@ class TagSurveyAccumulator:
                 continue
             observations = self._observations.setdefault(detection.tag_id, [])
             observations.append(TagSurveyObservation(
-                    tag_id=detection.tag_id,
-                    world_from_tag=world_from_tag,
-                    marker_size_m=marker_size,
-                    reprojection_rms_px=pose.reprojection_rms_px,
-                    image_heading_deg=detection.tag_y_clockwise_from_image_up_deg,
-                    confidence=detection.confidence,
+                tag_id=detection.tag_id,
+                world_from_tag=world_from_tag,
+                marker_size_m=marker_size,
+                reprojection_rms_px=pose.reprojection_rms_px,
+                image_heading_deg=detection.tag_y_clockwise_from_image_up_deg,
+                confidence=detection.confidence,
+                camera_position_world=world_from_camera.translation_m.copy(),
             ))
             if len(observations) > self.options.max_observations_per_tag:
                 del observations[0]
@@ -1039,11 +1100,38 @@ class TagSurveyAccumulator:
             ],
         )
 
+    def _viewpoint_span_deg(
+        self,
+        tag_id: int,
+        tag_transform: RigidTransform,
+    ) -> float:
+        """Largest camera-to-tag bearing change among accepted observations."""
+        if tag_id in self._restored_viewpoint_spans:
+            return self._restored_viewpoint_spans[tag_id]
+        directions: list[np.ndarray] = []
+        for observation in self._observations[tag_id]:
+            direction = (
+                observation.camera_position_world
+                - tag_transform.translation_m
+            )
+            magnitude = float(np.linalg.norm(direction))
+            if magnitude > 1e-6:
+                directions.append(direction / magnitude)
+        if len(directions) < 2:
+            return 0.0
+        unit = np.stack(directions)
+        smallest_dot = float(np.min(np.clip(unit @ unit.T, -1.0, 1.0)))
+        return math.degrees(math.acos(smallest_dot))
+
     def tag_records(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         for tag_id in sorted(self._observations):
             consensus = self._consensus_for(tag_id)
             transform = consensus.transform
+            viewpoint_span_deg = self._viewpoint_span_deg(tag_id, transform)
+            viewpoint_requirement_met = (
+                viewpoint_span_deg >= self.options.min_viewpoint_span_deg
+            )
             known_role = self._known_role(tag_id)
             role = known_role
             if role is None:
@@ -1087,10 +1175,15 @@ class TagSurveyAccumulator:
                 "mean_reprojection_rms_px": round(
                     float(consensus.mean_reprojection_rms_px or 0.0), 5
                 ),
+                "viewpoint_span_deg": round(viewpoint_span_deg, 3),
+                "required_viewpoint_span_deg": round(
+                    self.options.min_viewpoint_span_deg, 3
+                ),
+                "viewpoint_requirement_met": viewpoint_requirement_met,
                 "possible_duplicate_id_or_tracking_jump": (
                     consensus.ambiguous_cluster
                 ),
-                "stable": consensus.stable,
+                "stable": consensus.stable and viewpoint_requirement_met,
             })
         return records
 
@@ -1224,8 +1317,15 @@ class TagSurveyAccumulator:
             },
         }
 
-    def progress(self) -> dict[str, Any]:
-        records = {item["tag_id"]: item for item in self.tag_records()}
+    def progress(
+        self,
+        record_list: Sequence[Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Return UI coverage, reusing a caller's consensus snapshot when given."""
+        records = {
+            int(item["tag_id"]): dict(item)
+            for item in (self.tag_records() if record_list is None else record_list)
+        }
         stable = {
             tag_id for tag_id, item in records.items() if item["stable"]
         }
@@ -1262,6 +1362,18 @@ class TagSurveyAccumulator:
                 "observations": 0 if record is None else record["observations"],
                 "used_observations": (
                     0 if record is None else record["used_observations"]
+                ),
+                "viewpoint_span_deg": (
+                    0.0 if record is None
+                    else float(record.get("viewpoint_span_deg", 0.0))
+                ),
+                "required_viewpoint_span_deg": (
+                    self.options.min_viewpoint_span_deg
+                    if record is None
+                    else float(record.get(
+                        "required_viewpoint_span_deg",
+                        self.options.min_viewpoint_span_deg,
+                    ))
                 ),
             })
         coverage_complete = not missing_robot_positions and not missing_ground

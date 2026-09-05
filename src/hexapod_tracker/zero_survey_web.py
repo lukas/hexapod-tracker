@@ -148,12 +148,24 @@ class ZeroPoseSurveyManager:
                 )
             )
             self._wifi_address = str(self._settings.get("wifi_address", ""))
-            if self._result_path.is_file():
-                if int(progress.get("calibration_model_version", 1)) < 2:
-                    self._legacy_completed_run = True
-                    self._status = "idle"
-                else:
-                    self._status = str(progress.get("status", "incomplete"))
+            restored_status = str(progress.get("status", "incomplete"))
+            was_running = restored_status in {
+                "connecting", "locking_origin", "scanning", "finishing", "stopping"
+            }
+            if (
+                self._result_path.is_file()
+                and int(progress.get("calibration_model_version", 1)) < 2
+            ):
+                self._legacy_completed_run = True
+                self._status = "idle"
+            elif was_running:
+                # A process cannot still be active after this server has just
+                # started. Preserve its checkpoint as interrupted even if an
+                # older partial survey.json also exists from a prior resume.
+                self._status = "connection_lost"
+                self._error = None
+            elif self._result_path.is_file():
+                self._status = restored_status
             elif progress_details.get("stable_tag_ids") or progress.get("records"):
                 self._status = "connection_lost"
                 self._error = None
@@ -230,8 +242,19 @@ class ZeroPoseSurveyManager:
                 "Put the stationary robot in zero pose near floor tags 100–105 and 112.",
             )
             if status == "connection_lost":
-                message = f"Connection lost. {stable_count} stable tags are saved."
-                instruction = "Reconnect the phone, then continue this calibration."
+                if can_resume:
+                    provisional_count = max(
+                        0,
+                        len(progress_state.get("records", [])) - stable_count,
+                    )
+                    message = (
+                        f"Connection lost. {stable_count} finished and "
+                        f"{provisional_count} provisional tag measurements are saved."
+                    )
+                    instruction = "Reconnect the phone, then continue this calibration."
+                else:
+                    message = "The phone stream never connected; no measurements were saved."
+                    instruction = "Restart streaming in Record3D, then retry the connection."
             elif self._legacy_completed_run:
                 message = (
                     "The previous result used the old 13-tag, single-floor-anchor model."

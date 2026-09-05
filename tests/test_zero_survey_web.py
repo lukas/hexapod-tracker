@@ -102,6 +102,32 @@ def test_manager_recovers_latest_interrupted_run_and_resumes_it(tmp_path) -> Non
         manager.shutdown()
 
 
+def test_manager_does_not_mistake_stale_scanning_result_for_active_run(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "zero_pose_20260904_120000"
+    run_dir.mkdir()
+    (run_dir / "survey.json").write_text("{}")
+    (run_dir / "progress.json").write_text(json.dumps({
+        "calibration_model_version": 2,
+        "status": "scanning",
+        "phase": "survey",
+        "records": [_stable_record(1)],
+        "progress": {"stable_tag_ids": [1]},
+    }))
+
+    manager = ZeroPoseSurveyManager(
+        config_path=CONFIG_PATH,
+        survey_dir=tmp_path,
+        process_factory=lambda *_args, **_kwargs: _RunningProcess(),
+    )
+    state = manager.public_state()
+
+    assert state["active"] is False
+    assert state["status"] == "connection_lost"
+    assert state["can_resume"] is True
+
+
 def test_manager_invalidates_completed_legacy_13_tag_result(tmp_path) -> None:
     run_dir = tmp_path / "zero_pose_20260904_120000"
     run_dir.mkdir()
@@ -123,6 +149,33 @@ def test_manager_invalidates_completed_legacy_13_tag_result(tmp_path) -> None:
     assert state["can_resume"] is False
     assert len(state["progress"]["robot_positions"]) == 37
     assert "old 13-tag" in state["message"]
+
+
+def test_connection_failure_without_observations_is_a_retry_not_a_checkpoint(tmp_path) -> None:
+    run_dir = tmp_path / "zero_pose_20260904_120000"
+    run_dir.mkdir()
+    (run_dir / "progress.json").write_text(json.dumps({
+        "status": "connection_lost",
+        "records": [],
+        "progress": {"stable_tag_ids": []},
+    }))
+
+    manager = ZeroPoseSurveyManager(
+        config_path=CONFIG_PATH,
+        survey_dir=tmp_path,
+        process_factory=lambda *_args, **_kwargs: _RunningProcess(),
+    )
+    # A no-frame run is intentionally not restored across a server restart,
+    # so model the state while the current server is still reporting it.
+    manager._run_dir = run_dir
+    manager._progress_path = run_dir / "progress.json"
+    manager._status = "connection_lost"
+    state = manager.public_state()
+
+    assert state["status"] == "connection_lost"
+    assert state["can_resume"] is False
+    assert "no measurements were saved" in state["message"]
+    assert "retry" in state["instruction"].lower()
 
 
 def test_manager_accepts_browser_relayed_wifi_frame(tmp_path) -> None:

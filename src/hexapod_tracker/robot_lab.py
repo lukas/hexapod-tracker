@@ -212,3 +212,43 @@ class RobotLabPublisher:
             "artifacts": ["configuration", "survey"],
             "transport": "calibration_config",
         }
+
+    def publish_lab_camera_calibration(
+        self,
+        calibration_path: Path,
+    ) -> dict[str, Any]:
+        """Publish one quality-gated fixed-camera calibration revision."""
+        calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+        quality = calibration.get("quality") or {}
+        if quality.get("passed") is not True:
+            raise ValueError("only a passed lab camera calibration may be published")
+        saved = self._request_json(
+            "POST",
+            "/api/camera-calibrations",
+            payload={
+                "lab_id": calibration["lab_id"],
+                "camera_id": calibration["camera_id"],
+                "camera_name": calibration["camera_name"],
+                "camera_kind": calibration.get("camera_kind", "camera"),
+                "source": calibration.get(
+                    "source", "hexapod_tracker_fixed_camera_workflow"
+                ),
+                "capture_mode": calibration["capture_mode"],
+                "intrinsics": calibration["intrinsics"],
+                "extrinsics": calibration["extrinsics"],
+                "floor_map_sha256": calibration["extrinsics"].get(
+                    "floor_map_sha256"
+                ),
+                "quality": quality,
+                "evidence": calibration.get("evidence", {}),
+            },
+        )
+        calibration_id = saved.get("id")
+        return {
+            "status": "published",
+            "camera_calibration_id": calibration_id,
+            "url": saved.get("url") or (
+                f"{self.base_url}/camera-calibrations/{calibration_id}"
+            ),
+            "transport": "camera_calibration_revision",
+        }

@@ -70,8 +70,10 @@ export default function SurveyScene({survey}: {survey: ZeroSurveyState}) {
   const [yaw, setYaw] = useState(DEFAULT_YAW)
   const [pitch, setPitch] = useState(DEFAULT_PITCH)
   const [zoom, setZoom] = useState(1)
+  const [pan, setPan] = useState<[number, number]>([0, 0])
   const [selected, setSelected] = useState<number | null>(null)
-  const drag = useRef<{x: number; y: number; yaw: number; pitch: number; moved: boolean} | null>(null)
+  const drag = useRef<{x: number; y: number; yaw: number; pitch: number; pan: [number, number]; mode: 'orbit' | 'pan'; moved: boolean} | null>(null)
+  const suppressedClick = useRef(false)
 
   const tags = survey.records.filter((tag) => tag.world_from_tag?.translation_m)
   const assignedRobotIds = new Set(
@@ -83,7 +85,11 @@ export default function SurveyScene({survey}: {survey: ZeroSurveyState}) {
     assignedRobotIds.has(tag.tag_id) ? 'robot' as const : roleFor(tag)
   )
   const robotTags = tags.filter((tag) => displayRole(tag) === 'robot')
-  const displayTags = scope === 'robot' ? robotTags : tags
+  const floorTags = tags.filter((tag) => displayRole(tag) === 'floor')
+  // The metric floor anchors are part of the reconstruction, not optional
+  // scene clutter. Only genuinely unassigned detections are hidden in the
+  // focused view.
+  const displayTags = scope === 'robot' ? [...robotTags, ...floorTags] : tags
   const selectedTag = tags.find((tag) => tag.tag_id === selected)
   const body = robotTags.find((tag) => tag.robot_frame === 'body')
   const hips = Array.from({length: 6}, (_, leg) => (
@@ -125,6 +131,17 @@ export default function SurveyScene({survey}: {survey: ZeroSurveyState}) {
 
   const gridBounds = useMemo(() => {
     if (scope === 'robot') {
+      const focusedPoints = [...robotTags, ...floorTags].map(
+        (tag) => tag.world_from_tag.translation_m,
+      )
+      if (focusedPoints.length) {
+        return {
+          minX: Math.min(...focusedPoints.map((point) => point[0])) - 0.06,
+          maxX: Math.max(...focusedPoints.map((point) => point[0])) + 0.06,
+          minY: Math.min(...focusedPoints.map((point) => point[1])) - 0.06,
+          maxY: Math.max(...focusedPoints.map((point) => point[1])) + 0.06,
+        }
+      }
       return {
         minX: robotCenter[0] - 0.24, maxX: robotCenter[0] + 0.24,
         minY: robotCenter[1] - 0.24, maxY: robotCenter[1] + 0.24,
@@ -138,7 +155,7 @@ export default function SurveyScene({survey}: {survey: ZeroSurveyState}) {
       minY: Math.min(...points.map((point) => point[1])) - 0.08,
       maxY: Math.max(...points.map((point) => point[1])) + 0.08,
     }
-  }, [scope, robotCenter[0], robotCenter[1], tags, scenePoints])
+  }, [scope, robotCenter[0], robotCenter[1], tags, scenePoints, robotTags, floorTags])
 
   const gridCorners: Vec3[] = [
     [gridBounds.minX, gridBounds.minY, 0],
@@ -167,8 +184,8 @@ export default function SurveyScene({survey}: {survey: ZeroSurveyState}) {
   const project = (point: Vec3) => {
     const rotated = rotate(point)
     return {
-      x: 380 + (rotated.x - frameMidX) * viewScale,
-      y: 226 + (rotated.y - frameMidY) * viewScale,
+      x: 380 + pan[0] + (rotated.x - frameMidX) * viewScale,
+      y: 226 + pan[1] + (rotated.y - frameMidY) * viewScale,
       depth: rotated.depth,
     }
   }
@@ -205,18 +222,27 @@ export default function SurveyScene({survey}: {survey: ZeroSurveyState}) {
     setYaw(DEFAULT_YAW)
     setPitch(DEFAULT_PITCH)
     setZoom(1)
+    setPan([0, 0])
   }
   const onPointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
+    event.preventDefault()
     event.currentTarget.setPointerCapture(event.pointerId)
-    drag.current = {x: event.clientX, y: event.clientY, yaw, pitch, moved: false}
+    const panMode = event.shiftKey || event.button === 1 || event.button === 2
+    drag.current = {x: event.clientX, y: event.clientY, yaw, pitch, pan, mode: panMode ? 'pan' : 'orbit', moved: false}
+    suppressedClick.current = false
   }
   const onPointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
     if (!drag.current) return
     const dx = event.clientX - drag.current.x
     const dy = event.clientY - drag.current.y
     drag.current.moved ||= Math.hypot(dx, dy) > 3
-    setYaw(drag.current.yaw + dx * 0.45)
-    setPitch(Math.max(6, Math.min(84, drag.current.pitch - dy * 0.35)))
+    suppressedClick.current = drag.current.moved
+    if (drag.current.mode === 'pan') {
+      setPan([drag.current.pan[0] + dx, drag.current.pan[1] + dy])
+    } else {
+      setYaw(drag.current.yaw - dx * 0.36)
+      setPitch(Math.max(4, Math.min(86, drag.current.pitch - dy * 0.32)))
+    }
   }
   const onPointerUp = (event: ReactPointerEvent<SVGSVGElement>) => {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -226,7 +252,7 @@ export default function SurveyScene({survey}: {survey: ZeroSurveyState}) {
   }
   const onWheel = (event: ReactWheelEvent<SVGSVGElement>) => {
     event.preventDefault()
-    setZoom((current) => Math.max(0.72, Math.min(2.4, current * (event.deltaY > 0 ? 0.9 : 1.1))))
+    setZoom((current) => Math.max(0.45, Math.min(4.0, current * Math.exp(-event.deltaY * 0.0015))))
   }
 
   if (!tags.length) {
@@ -266,12 +292,14 @@ export default function SurveyScene({survey}: {survey: ZeroSurveyState}) {
   return (
     <div className="survey-map survey-scene">
       <div className="map-heading">
-        <div><span>Measured reconstruction</span><b>{scope === 'robot' ? 'Robot + mounted tags' : 'Robot in the full scan'}</b></div>
+        <div><span>Measured reconstruction</span><b>{scope === 'robot' ? 'Robot + metric floor tags' : 'Robot, floor, extras + walk path'}</b></div>
         <div className="scene-controls">
           <div className="map-view-toggle">
-            <button className={scope === 'robot' ? 'active' : ''} onClick={() => { setScope('robot'); setZoom(1) }}>Robot</button>
+            <button className={scope === 'robot' ? 'active' : ''} onClick={() => { setScope('robot'); setZoom(1); setPan([0, 0]) }}>Robot + floor</button>
             <button className={scope === 'world' ? 'active' : ''} onClick={() => { setScope('world'); setZoom(1) }}>Full scan</button>
           </div>
+          <button className="scene-reset zoom-button" aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(0.45, value / 1.2))}>−</button>
+          <button className="scene-reset zoom-button" aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(4, value * 1.2))}>+</button>
           <button className="scene-reset" onClick={resetView}>Reset view</button>
         </div>
       </div>
@@ -284,6 +312,8 @@ export default function SurveyScene({survey}: {survey: ZeroSurveyState}) {
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
         onWheel={onWheel}
+        onDoubleClick={resetView}
+        onContextMenu={(event) => event.preventDefault()}
       >
         <defs>
           <linearGradient id="sceneFloor" x1="0" y1="0" x2="1" y2="1"><stop stopColor="#f7fbff"/><stop offset="1" stopColor="#eaf3fb"/></linearGradient>
@@ -331,8 +361,10 @@ export default function SurveyScene({survey}: {survey: ZeroSurveyState}) {
             <g
               key={tag.tag_id}
               className={`map-tag ${role} ${tag.stable ? 'stable' : 'warming'} ${selected === tag.tag_id ? 'selected' : ''} ${survey.guidance?.target_tag_id === tag.tag_id ? 'targeted' : ''}`}
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={() => setSelected(tag.tag_id)}
+              onClick={() => {
+                if (!suppressedClick.current) setSelected(tag.tag_id)
+                suppressedClick.current = false
+              }}
             >
               {arrow && role !== 'extra' && <line className="orientation-arrow" x1={centerPoint.x} y1={centerPoint.y} x2={arrow.x} y2={arrow.y} />}
               <polygon points={cornerPoints} filter="url(#sceneShadow)" />
@@ -352,10 +384,10 @@ export default function SurveyScene({survey}: {survey: ZeroSurveyState}) {
             return <g key={axis.name}><line x1={projectedOrigin.x} y1={projectedOrigin.y} x2={end.x} y2={end.y}/><text x={end.x + 5} y={end.y + 4}>{axis.name}</text></g>
           })}
         </g>
-        <g className="orbit-hint"><path d="M24 30 C38 16 62 16 76 30"/><path d="M72 22 L77 30 L68 31"/><text x="24" y="49">drag to orbit · scroll to zoom</text></g>
+        <g className="orbit-hint"><path d="M24 30 C38 16 62 16 76 30"/><path d="M72 22 L77 30 L68 31"/><text x="24" y="49">drag: orbit · shift-drag: pan · wheel: zoom · double-click: reset</text></g>
       </svg>
       <div className="map-legend"><span><i className="robot" />Robot mount</span><span><i className="floor" />Floor tag</span><span><i className="extra" />Unassigned detection</span><span className="legend-arrow">↗ measured tag +Y</span></div>
-      <div className="scene-note">Measured chassis, lid tags, and all visible vertical femur/tibia angle tags. Geometry is drawn only between measured references.</div>
+      <div className="scene-note">Blue markers are measured metric floor references; green markers are robot mounts. Geometry is drawn only between measured references.</div>
       {selectedTag && <div className="selected-tag"><b>Tag #{selectedTag.tag_id}</b><span>{selectedTag.robot_frame || selectedTag.label || roleFor(selectedTag)}</span><span>{selectedTag.observations} views · {selectedTag.translation_spread_mm?.toFixed(1) || '—'} mm spread · {selectedTag.rotation_spread_deg?.toFixed(1) || '—'}°</span></div>}
     </div>
   )

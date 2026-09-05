@@ -569,7 +569,7 @@ function ZeroSurveyWorkspace({
                 <div className="eyebrow">Before you start</div><h2>Robot down. Tags up. Phone ready.</h2>
                 <div className="transport-picker"><button className={connectionMode === 'usb' ? 'active' : ''} onClick={() => setConnectionMode('usb')}><b>USB</b><span>Best LiDAR precision</span></button><button className={connectionMode === 'wifi' ? 'active' : ''} onClick={() => setConnectionMode('wifi')}><b>Wi‑Fi</b><span>No cable · lower depth quality</span></button></div>
                 {emptyConnectionFailure && <div className="connection-retry-notice"><i /><span><b>{survey.message}</b><small>{survey.instruction}</small></span></div>}
-                <div className="prep-list"><span><i>1</i>Place the stationary robot in its zero pose.</span><span><i>2</i>Leave floor tags 100–105 and 112 in their mapped one-foot grid.</span><span><i>3</i>In Record3D, select {connectionMode === 'usb' ? 'USB' : 'Wi‑Fi'} under Live RGBD Video Streaming.</span><span><i>4</i>Press Connect here, then tap the red stream button on the phone. Keep Record3D open.</span></div>
+                <div className="prep-list"><span><i>1</i>Place the stationary robot in its zero pose.</span><span><i>2</i>Keep visible floor tags 100–105 around the robot. Covered tags are discovered if seen but are not required.</span><span><i>3</i>In Record3D, select {connectionMode === 'usb' ? 'USB' : 'Wi‑Fi'} under Live RGBD Video Streaming.</span><span><i>4</i>Press Connect here, then tap the red stream button on the phone. Keep Record3D open.</span></div>
                 {connectionMode === 'wifi' && <div className="wifi-connect"><label>iPhone address<input value={wifiAddress} placeholder="for example 192.168.1.100 or myiPhone.local" onChange={(event) => setWifiAddress(event.target.value)} /></label><button disabled={busy || !wifiAddress.trim()} onClick={onConnectWifi}>Connect phone</button><small>{wifiStatus}. Requires Record3D 1.11+ and its Wi‑Fi Streaming extension; USB remains more accurate.</small></div>}
                 <button className="launch-survey" disabled={busy || !survey?.available} onClick={onStart}>{busy ? 'Checking for RGB‑D frames…' : emptyConnectionFailure ? 'Recheck phone connection' : 'Start iPhone LiDAR calibration'}<span>→</span></button>
               </div>
@@ -657,7 +657,7 @@ export default function App() {
   const [surveyAck, setSurveyAck] = useState(false)
   const [showSurvey, setShowSurvey] = useState(false)
   const [activeView, setActiveView] = useState<'survey' | 'pose'>('survey')
-  const [zeroFloorIds, setZeroFloorIds] = useState('100, 101, 102, 103, 104, 105, 112')
+  const [zeroFloorIds, setZeroFloorIds] = useState('100, 101, 102, 103, 104, 105')
   const [zeroOriginId, setZeroOriginId] = useState('104')
   const [zeroL0Id, setZeroL0Id] = useState('1')
   const [zeroDefaultsLoaded, setZeroDefaultsLoaded] = useState(false)
@@ -1019,6 +1019,7 @@ export default function App() {
           connection_mode: zeroConnectionMode,
           wifi_address: zeroWifiAddress,
           record3d_device: state?.zero_survey.defaults.record3d_device ?? 0,
+          floor_tag_ids: zeroFloorIds.split(',').map((value) => Number(value.trim())).filter(Number.isFinite),
         }),
       })
       wifiUploadEnabled.current = zeroConnectionMode === 'wifi'

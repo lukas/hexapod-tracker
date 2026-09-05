@@ -82,6 +82,7 @@ def test_publisher_uses_first_class_calibration_endpoint(
     config_path = tmp_path / "tracker.json"
     result_path.write_text(json.dumps({
         "schema_version": 1,
+        "created_utc": "2026-09-05T00:00:00+00:00",
         "leg_zero_reference": {"declared_tag_id": 1},
         "survey": {
             "robot_positions": [{"position": "L0 hip", "tag_id": 1}],
@@ -90,7 +91,11 @@ def test_publisher_uses_first_class_calibration_endpoint(
             "stable_tag_count": 2,
         },
     }))
-    config_path.write_text(json.dumps({"floor_tags": {"104": {}}, "robot_pose": {}}))
+    config_path.write_text(json.dumps({
+        "schema_version": 1,
+        "floor_tags": {"104": {}},
+        "robot_pose": {},
+    }))
     calls = []
 
     def fake_urlopen(outgoing, timeout):
@@ -117,9 +122,14 @@ def test_publisher_uses_first_class_calibration_endpoint(
     assert timeout == 20.0
     body = json.loads(outgoing.data)
     assert body["scope"] == "combined"
-    assert body["robot_id"] == "hexapod-1"
-    assert body["configuration"]["floor_tags"] == {"104": {}}
-    assert body["survey"]["survey"]["stable_tag_count"] == 2
+    assert body["report"]["kind"] == "iphone_lidar_zero_pose_survey"
+    assert body["report"]["robot_id"] == "hexapod-1"
+    assert body["report"]["observed_at"] == "2026-09-05T00:00:00+00:00"
+    assert body["report"]["motor_commands_sent"] is False
+    assert body["report"]["servo_zeros_changed"] is False
+    assert body["pose_config"]["floor_tags"] == {"104": {}}
+    assert body["report"]["survey"]["stable_tag_count"] == 2
+    assert outgoing.get_header("Idempotency-key").startswith("zero-pose-")
 
 
 def test_publisher_does_not_fall_back_to_legacy_result_api(

@@ -828,6 +828,15 @@ def test_buildviz_refinement_corrects_noisy_multiview_mounts(
             _detection(tag_id, 0.027, tag, camera)
             for tag_id, tag in all_tags.items()
         ]
+        if index == 0:
+            detections = [
+                TagCorners(
+                    item.tag_id,
+                    item.corners_px + np.asarray([80.0, -55.0]),
+                )
+                if item.tag_id == 105 else item
+                for item in detections
+            ]
         arkit_gl = camera.compose(cv_from_gl.inverse())
         np.savez_compressed(
             archive / f"frame-{index:02d}.npz",
@@ -888,6 +897,12 @@ def test_buildviz_refinement_corrects_noisy_multiview_mounts(
     assert report["ok"] is True
     assert report["frames"] == 5
     assert report["robot_tag_count"] == len(true_tags)
+    assert report["rejected_corner_observations"] == 1
+    assert report["used_corner_observations"] == (
+        report["corner_observations"] - 1
+    )
+    assert report["outlier_filter"]["rejected_by_tag_id"] == {"105": 1}
+    assert report["bundle_optimizer"]["inlier_polish"]["accepted"] is True
     assert report["final_coordinate_rms_px"] < 0.25
     assert (
         report["final_coordinate_rms_px"]

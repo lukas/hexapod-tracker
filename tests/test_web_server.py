@@ -230,7 +230,7 @@ def test_shared_server_worker_leaves_camera_off_until_explicit_start() -> None:
         assert state["zero_survey"]["available"] is True
         assert state["zero_survey"]["active"] is False
         assert state["zero_survey"]["defaults"]["floor_tag_ids"] == [
-            100, 101, 102, 103, 104, 105, 112
+            100, 101, 102, 103, 104, 105
         ]
         positions = state["zero_survey"]["progress"]["robot_positions"]
         assert len(positions) == 37

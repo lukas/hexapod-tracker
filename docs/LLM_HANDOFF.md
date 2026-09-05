@@ -32,7 +32,7 @@ make check
 git status --short --branch
 ```
 
-`make check` currently runs 58 synthetic/off-robot Python tests and the React
+`make check` currently runs 81 synthetic/off-robot Python tests and the React
 type-check. It does not prove that a particular camera index, intrinsic
 calibration, tag placement, or physical measurement is valid.
 
@@ -160,10 +160,12 @@ switch to a different Continuity Camera crop. See `docs/RGBD_CALIBRATION.md`.
 `hexapod-zero-survey` is the moving-phone companion. The production web flow
 merges `configs/hexapod-1-apriltag-layout.json`, yielding 37 named robot mounts:
 13 horizontal chassis/lid tags and 24 vertical yoke tags (four on each leg).
-The seven mapped floor tags jointly align Record3D's OpenGL/ARKit trajectory;
-their direct RGB-D solution takes precedence whenever visible. A slow walk then
+The six normally visible mapped floor tags (100–105) jointly align Record3D's
+OpenGL/ARKit trajectory; tag 112 is normally covered by the zero-pose robot and
+is therefore not required. It can be included explicitly when it is visible.
+Their direct RGB-D solution takes precedence whenever visible. A slow walk then
 aggregates every decoded tag's 6-D transform. Completion is one stable tag per
-named robot mount position plus every expected floor ID, not the
+named robot mount position plus every expected visible floor ID, not the
 continued presence of every old robot ID. A missing configured robot ID may be
 replaced by a nearby stable newly discovered ID after fitting the original
 calibration-photo layout to recognized tags. The configured L0 hip tag is the
@@ -178,12 +180,19 @@ archived camera poses plus every robot and floor tag from full-resolution
 corners. One floor tag defines the final origin; the others are remeasured as
 coplanar landmarks instead of being forced onto the nominal grid. BuildViz is
 used to initialize the leg/face branches and diagnose disagreement, not as a
-fixed answer. A one-pose result still cannot independently identify new link
-lengths or joint axes.
-Coverage is necessary but not sufficient: the quality gate requires every floor
-tag to be co-visible with another mapped tag, at least six multi-tag reference
-frames, and bounded grid, LiDAR-plane, position, height, and orientation
-residuals. Estimates continue refining after first becoming stable. Known yoke
+fixed answer. Long capture gaps split the ARKit relative-motion prior because
+each reconnect may reset the phone's coordinate frame. A robust pass identifies
+the largest mutually consistent set of robot/floor observations, and an
+ordinary least-squares finish reports calibration RMS only on that set while
+recording every rejected observation and its residual. A one-pose result still
+cannot independently identify new link lengths or joint axes.
+Coverage is necessary but not sufficient: the quality gate requires every
+expected floor tag to be co-visible with another mapped tag, at least six
+multi-tag reference frames, a bounded LiDAR floor-plane residual, at least two
+accepted image views per floor tag, and bounded final image reprojection error.
+Previous-grid position, height, orientation, and reprojection disagreements are
+diagnostic because the purpose of the survey is to remeasure moved tags.
+Estimates continue refining after first becoming stable. Known yoke
 faces use their +Y/-Y surface normal to select the planar PnP branch.
 The web workflow can receive the same synchronized RGB-D/pose data over
 Record3D 1.11+ WebRTC Wi-Fi through a browser relay, though USB remains the
@@ -250,8 +259,9 @@ Important limitations in the current checked-in configs:
 - Several `frame_from_tag` translations are zero/photo-inferred placeholders.
   Measure tag-to-joint-axis transforms before calling a tag center a mechanical
   joint center.
-- The planar floor map is provisional. Active anchors are tags 100, 101, 102,
-  103, 104, 105, and 112. Their one-foot center spacing comes from the
+- The planar floor map is provisional. Active visible anchors are tags 100,
+  101, 102, 103, 104, and 105; tag 112 is optional because it is normally under
+  the robot. Their one-foot center spacing comes from the
   operator's placement description, while yaw comes from two photographed
   planar rectifications; survey the centers before millimeter-level claims.
 - The current Hexapod 1 and floor inventory has no duplicate IDs. Other loose

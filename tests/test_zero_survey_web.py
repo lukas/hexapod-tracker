@@ -215,7 +215,7 @@ def test_manager_accepts_browser_relayed_wifi_frame(tmp_path) -> None:
         manager.shutdown()
 
 
-def test_manager_uses_all_seven_metric_floor_tags(tmp_path) -> None:
+def test_manager_requires_only_visible_metric_floor_tags(tmp_path) -> None:
     manager = ZeroPoseSurveyManager(
         config_path=CONFIG_PATH,
         survey_dir=tmp_path,
@@ -230,7 +230,7 @@ def test_manager_uses_all_seven_metric_floor_tags(tmp_path) -> None:
     ) == 24
     assert board["marker_size_m"] == 0.0272
     assert set(board["floor_tags"]) == {
-        "100", "101", "102", "103", "104", "105", "112"
+        "100", "101", "102", "103", "104", "105"
     }
     assert board["floor_tags"]["104"]["world_from_tag"]["translation_m"] == [
         0.0, 0.0, 0.0

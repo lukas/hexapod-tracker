@@ -23,7 +23,9 @@ from .tag_survey import (
 from .zero_pose_survey import CALIBRATION_MODEL_VERSION
 
 
-DEFAULT_FLOOR_IDS = (100, 101, 102, 103, 104, 105, 112)
+# Tag 112 is normally underneath a robot in zero pose. It remains available in
+# the physical inventory, but is not an occluded prerequisite by default.
+DEFAULT_FLOOR_IDS = (100, 101, 102, 103, 104, 105)
 DEFAULT_ORIGIN_TAG_ID = 104
 DEFAULT_MARKER_SIZE_MM = 27.2
 DEFAULT_SURVEY_DIR = REPO_ROOT / "artifacts" / "zero_pose_surveys"
@@ -248,7 +250,7 @@ class ZeroPoseSurveyManager:
             )
             instruction = progress_state.get(
                 "instruction",
-                "Put the stationary robot in zero pose near floor tags 100–105 and 112.",
+                "Put the stationary robot in zero pose near floor tags 100–105.",
             )
             if self._legacy_completed_run:
                 message = (
@@ -508,7 +510,7 @@ class ZeroPoseSurveyManager:
             "tag_family": "tag36h11",
             "marker_size_m": marker_size_m,
             "world_frame": (
-                f"tag {origin_id} center; metric seven-tag floor grid"
+                f"tag {origin_id} center; metric visible floor-tag grid"
             ),
             "floor_tags": mapped,
             "reference_grid_spacing_m": self.robot_layout.get(
@@ -600,14 +602,23 @@ class ZeroPoseSurveyManager:
                 "wifi_address": payload.get(
                     "wifi_address", self._wifi_address
                 ),
-                "origin_tag_id": (progress.get("anchor_ids") or [
-                    self._defaults["origin_tag_id"]
-                ])[0],
+                # anchor_ids contains the whole floor board in sorted order;
+                # its first element is not necessarily the chosen origin.
+                "origin_tag_id": self._settings.get(
+                    "origin_tag_id", self._defaults["origin_tag_id"]
+                ),
                 "floor_tag_ids": progress_details.get(
                     "expected_ground_tag_ids", self._defaults["floor_tag_ids"]
                 ),
             }
             settings = self._validated_settings(payload, fallback=fallback)
+            # A resumed survey may deliberately narrow its required floor set
+            # when a marker is covered by the zero-pose robot.  Rebuild the
+            # board manifest so the capture process and its quality gate use
+            # the same visible set while preserving all saved robot records.
+            _atomic_json(
+                self._run_dir / "floor-origin.json", self._floor_board(settings)
+            )
             self._result_path = self._run_dir / "survey.json"
             self._camera_path = self._run_dir / "camera.jpg"
             self._wifi_dir = self._run_dir / "wifi_frames"

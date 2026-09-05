@@ -1,6 +1,8 @@
 """Publish completed camera calibrations to the authenticated Robot Lab."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -145,6 +147,7 @@ class RobotLabPublisher:
         payload: Mapping[str, Any] | None = None,
         body: bytes | None = None,
         content_type: str = "application/json",
+        headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         if not self.token:
             raise RuntimeError("Robot Lab token is not available to the vision server")
@@ -152,14 +155,16 @@ class RobotLabPublisher:
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
         target = path if path.startswith("http") else f"{self.base_url}{path}"
+        outgoing_headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": content_type,
+        }
+        outgoing_headers.update(headers or {})
         outgoing = request.Request(
             target,
             method=method,
             data=data,
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": content_type,
-            },
+            headers=outgoing_headers,
         )
         try:
             with request.urlopen(outgoing, timeout=self.timeout_s) as response:
@@ -181,6 +186,7 @@ class RobotLabPublisher:
     ) -> dict[str, Any]:
         result = json.loads(result_path.read_text(encoding="utf-8"))
         configuration = json.loads(config_path.read_text(encoding="utf-8"))
+        configuration.setdefault("schema_version", 1)
         survey = result.get("survey") or {}
         positions = survey.get("robot_positions") or []
         replacements = [
@@ -197,14 +203,41 @@ class RobotLabPublisher:
             "The robot remained stationary and no motor commands were sent.\n\n"
             f"Replacement assignments: {replacements or 'none'}.\n"
         )
-        saved = self._request_json("POST", "/api/calibrations", payload={
+        observed_at = result.get("created_utc")
+        if not observed_at:
+            observed_at = datetime.fromtimestamp(
+                result_path.stat().st_mtime, timezone.utc
+            ).isoformat()
+        # Robot Lab archives a typed immutable calibration report and an exact
+        # pose-config sidecar. Keep the complete survey as the report body so
+        # its raw evidence, quality gates, and rejected-view diagnostics remain
+        # replayable instead of flattening them into source metadata.
+        report = {
+            **result,
+            "kind": "iphone_lidar_zero_pose_survey",
+            "schema_version": int(result.get("schema_version", 1)),
             "robot_id": "hexapod-1",
+            "observed_at": observed_at,
+            "advisory_only": False,
+            "motor_commands_sent": False,
+            "servo_zeros_changed": False,
+        }
+        payload = {
+            "report": report,
+            "pose_config": configuration,
             "scope": "combined",
             "source": "iphone_lidar_zero_pose_survey",
-            "configuration": configuration,
-            "survey": result,
             "summary": summary,
-        })
+        }
+        request_digest = hashlib.sha256(json.dumps(
+            payload, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")).hexdigest()
+        saved = self._request_json(
+            "POST",
+            "/api/calibrations",
+            payload=payload,
+            headers={"Idempotency-Key": f"zero-pose-{request_digest}"},
+        )
         return {
             "status": "published",
             "calibration_id": saved.get("id"),

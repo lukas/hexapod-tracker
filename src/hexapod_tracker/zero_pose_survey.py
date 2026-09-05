@@ -40,6 +40,9 @@ from .tag_survey import (
 )
 
 
+CALIBRATION_MODEL_VERSION = 3
+
+
 def _parse_ids(value: str) -> tuple[int, ...]:
     try:
         result = tuple(sorted({
@@ -546,13 +549,17 @@ def _alignment_record(alignment: HandheldWorldAlignment) -> dict[str, Any] | Non
     consensus = alignment.consensus()
     if consensus is None:
         return None
+    locked = alignment.locked_transform
     return {
-        "world_from_arkit_world": consensus.transform.to_dict(),
+        "world_from_arkit_world": (
+            consensus.transform if locked is None else locked
+        ).to_dict(),
         "observations": consensus.input_count,
         "used_observations": consensus.used_count,
         "translation_spread_mm": round(consensus.translation_spread_mm, 4),
         "rotation_spread_deg": round(consensus.rotation_spread_deg, 5),
-        "stable": consensus.stable,
+        "stable": alignment.has_lock,
+        "current_window_stable": consensus.stable,
         "ambiguous_cluster": consensus.ambiguous_cluster,
     }
 
@@ -1088,17 +1095,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             min_viewpoint_span_deg=(
                 8.0 if args.robot_layout is not None else 0.0
             ),
-            freeze_stable_tags=False,
+            # Once a stationary landmark has passed both its pose and
+            # viewpoint checks, keep it fixed. It can then localize later
+            # close-up frames without feeding ARKit drift back into itself.
+            freeze_stable_tags=True,
         ),
     )
     resume_snapshot: dict[str, Any] = {}
     if args.resume_progress is not None and args.resume_progress.is_file():
         resume_snapshot = _load_json(args.resume_progress)
+    resume_model_version = int(
+        resume_snapshot.get("calibration_model_version", 1)
+    )
+    resume_compatible = (
+        not resume_snapshot
+        or resume_model_version >= CALIBRATION_MODEL_VERSION
+    )
+    resume_seed = resume_snapshot if resume_compatible else {}
     restored_ids = survey.restore_stable_records(
-        resume_snapshot.get("records", []),
-        frames=int(resume_snapshot.get("frame_sequence", 0)),
+        resume_seed.get("records", []),
+        frames=int(resume_seed.get("frame_sequence", 0)),
     )
     resumed = bool(restored_ids)
+    reset_incompatible_checkpoint = bool(
+        resume_snapshot and not resume_compatible
+    )
     small_single_tag_anchor = (
         len(anchors) == 1 and anchor_marker_size_m <= 0.035
     )
@@ -1134,13 +1155,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     last_preview: np.ndarray | None = None
     camera_path = [
         np.asarray(item, dtype=float).reshape(3)
-        for item in resume_snapshot.get("camera_path_m", [])[-240:]
+        for item in resume_seed.get("camera_path_m", [])[-240:]
     ]
     phase = "anchor"
     last_message = (
         f"Restored {len(restored_ids)} tag measurements; re-lock the floor origin"
         if resumed else "Find the calibration board"
     )
+    if reset_incompatible_checkpoint:
+        last_message = (
+            "The previous checkpoint used the retired fusion model; saved "
+            "photos remain available, but its inaccurate poses were not reused"
+        )
     last_camera_matrix: np.ndarray | None = None
     last_quality: dict[str, Any] | None = None
     camera_speed_m_s: float | None = None
@@ -1157,7 +1183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         resumed=resumed,
     )
     _write_progress(args.progress_output, {
-        "calibration_model_version": 2,
+        "calibration_model_version": CALIBRATION_MODEL_VERSION,
         "status": "connecting",
         "phase": "connect",
         "message": (
@@ -1178,7 +1204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "alignment_count": 0,
         "anchor_frames": args.anchor_frames,
         "detected_tag_ids": [],
-        "frame_sequence": int(resume_snapshot.get("frame_sequence", 0)),
+        "frame_sequence": int(resume_seed.get("frame_sequence", 0)),
         "elapsed_s": 0.0,
         "progress": initial_progress,
         "records": survey.tag_records(),
@@ -1294,36 +1320,79 @@ def main(argv: Sequence[str] | None = None) -> int:
                     last_floor_refinement_time = time.monotonic()
 
             alignment_consensus = alignment.consensus()
-            if alignment_consensus is not None and alignment_consensus.stable:
+            if alignment.has_lock:
                 phase = "survey"
                 predicted_world_from_camera = alignment.world_from_camera(
                     frame.arkit_world_from_opengl_camera
                 )
                 world_from_camera = predicted_world_from_camera
-                if direct_anchor_pose is not None:
+                landmark_reference = survey.estimate_world_from_camera(
+                    detections,
+                    predicted_world_from_camera,
+                    frame.camera_matrix,
+                    np.zeros(5),
+                )
+                locked_to_landmarks = False
+                if (
+                    landmark_reference is not None
+                    and landmark_reference.stable
+                    and landmark_reference.used_count >= 2
+                ):
+                    landmark_correction_m = float(np.linalg.norm(
+                        landmark_reference.transform.translation_m
+                        - predicted_world_from_camera.translation_m
+                    ))
+                    landmark_correction_deg = _rotation_error_deg(
+                        landmark_reference.transform,
+                        predicted_world_from_camera,
+                    )
+                    if (
+                        landmark_correction_m <= 0.250
+                        and landmark_correction_deg <= 20.0
+                    ):
+                        world_from_camera = landmark_reference.transform
+                        locked_to_landmarks = True
+                        last_message = (
+                            f"Stationary-map lock {landmark_reference.used_count} tags; "
+                            f"corrected ARKit by {landmark_correction_m * 1000.0:.0f}mm"
+                        )
+                reliable_direct_anchor = (
+                    direct_anchor_pose is not None
+                    and (len(anchors) == 1 or len(anchor_detections) >= 2)
+                )
+                if not locked_to_landmarks and reliable_direct_anchor:
+                    assert direct_anchor_pose is not None
                     direct_correction_m = float(np.linalg.norm(
                         direct_anchor_pose.world_from_camera.translation_m
                         - predicted_world_from_camera.translation_m
                     ))
-                    if len(anchors) == 1 or len(anchor_detections) >= 2:
+                    direct_correction_deg = _rotation_error_deg(
+                        direct_anchor_pose.world_from_camera,
+                        predicted_world_from_camera,
+                    )
+                    # A large discrepancy with a jointly visible metric floor
+                    # grid means ARKit relocalized or jumped. Use the absolute
+                    # board pose for this frame instead of contaminating every
+                    # newly discovered tag with the stale trajectory lock.
+                    if (
+                        direct_correction_m > 0.060
+                        or direct_correction_deg > 5.0
+                    ):
+                        world_from_camera = direct_anchor_pose.world_from_camera
                         last_message = (
-                            f"Floor-grid lock {len(anchor_detections)} tags; "
-                            f"smoothed correction {direct_correction_m * 1000.0:.0f}mm"
+                            f"Floor-grid re-lock {len(anchor_detections)} tags; "
+                            f"rejected {direct_correction_m * 1000.0:.0f}mm "
+                            "ARKit jump"
                         )
                     else:
                         last_message = (
-                            "One floor tag visible; using the smooth ARKit path "
-                            "until two floor tags can re-lock the grid"
+                            f"Floor check {len(anchor_detections)} tags; ARKit differs "
+                            f"by {direct_correction_m * 1000.0:.0f}mm"
                         )
-                else:
-                    # Do not feed tag estimates back into the camera pose used
-                    # to estimate those same tags. That self-reference created
-                    # incompatible pose clusters. ARKit supplies the smooth
-                    # between-anchor trajectory; seeing two floor tags updates
-                    # its rolling metric alignment above.
+                elif not locked_to_landmarks:
                     last_message = (
-                        "Smooth ARKit path; include two floor tags periodically "
-                        "to correct drift"
+                        "Following the last good floor lock; keep a measured "
+                        "robot tag in view while moving closer"
                     )
                 current_world_from_camera = world_from_camera
                 sample_time = time.monotonic()
@@ -1476,7 +1545,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 last_quality = quality
                 _write_progress(args.progress_output, {
-                    "calibration_model_version": 2,
+                    "calibration_model_version": CALIBRATION_MODEL_VERSION,
                     "status": "locking_origin" if phase == "anchor" else (
                         "finishing" if progress["complete"] else "scanning"
                     ),
@@ -1492,7 +1561,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "alignment_count": alignment.observation_count,
                     "anchor_frames": args.anchor_frames,
                     "detected_tag_ids": sorted(item.tag_id for item in detections),
-                    "frame_sequence": int(resume_snapshot.get("frame_sequence", 0)) + frame_index + 1,
+                    "frame_sequence": int(resume_seed.get("frame_sequence", 0)) + frame_index + 1,
                     "elapsed_s": round(now - start, 2),
                     "progress": progress,
                     "records": records,
@@ -1531,7 +1600,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     payload = {
         "schema_version": 2,
-        "calibration_model_version": 2,
+        "calibration_model_version": CALIBRATION_MODEL_VERSION,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "source_tracker_config": str(args.tracker_config),
         "source_board_manifest": str(args.board),
@@ -1580,7 +1649,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         resumed=resumed,
     )
     _write_progress(args.progress_output, {
-        "calibration_model_version": 2,
+        "calibration_model_version": CALIBRATION_MODEL_VERSION,
         "status": (
             "connection_lost" if connection_error is not None
             else "complete" if final_ok else "incomplete"

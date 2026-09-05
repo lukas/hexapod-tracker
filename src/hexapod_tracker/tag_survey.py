@@ -213,7 +213,16 @@ def _transform_consensus(
 
 
 class HandheldWorldAlignment:
-    """Estimate ``world_from_arkit_world`` from repeated board sightings."""
+    """Estimate ``world_from_arkit_world`` from repeated board sightings.
+
+    The rolling consensus is useful for diagnosing ARKit drift, but it must
+    not also be the switch that turns surveying on and off.  Once a clean
+    floor lock has been established, retain that transform as the trajectory
+    fallback.  Later floor viewpoints can legitimately form a second cluster
+    because tiny planar tags and LiDAR plane fits have view-dependent range
+    bias.  Losing every subsequent tag observation in that situation is much
+    worse than temporarily following the last good ARKit alignment.
+    """
 
     def __init__(
         self,
@@ -230,6 +239,7 @@ class HandheldWorldAlignment:
             raise ValueError("max_observations cannot be below min_observations")
         self.max_observations = int(max_observations)
         self._candidates: list[RigidTransform] = []
+        self._locked_transform: RigidTransform | None = None
 
     def add(
         self,
@@ -244,10 +254,24 @@ class HandheldWorldAlignment:
         )
         if len(self._candidates) > self.max_observations:
             del self._candidates[:-self.max_observations]
+        if self._locked_transform is None:
+            consensus = self.consensus()
+            if consensus is not None and consensus.stable:
+                self._locked_transform = consensus.transform
 
     @property
     def observation_count(self) -> int:
         return len(self._candidates)
+
+    @property
+    def has_lock(self) -> bool:
+        """Whether a clean board lock has ever been established."""
+        return self._locked_transform is not None
+
+    @property
+    def locked_transform(self) -> RigidTransform | None:
+        """The persistent trajectory alignment used after initial lock."""
+        return self._locked_transform
 
     def consensus(self) -> TransformConsensus | None:
         if not self._candidates:
@@ -263,10 +287,9 @@ class HandheldWorldAlignment:
         self,
         arkit_world_from_opengl_camera_pose: RigidTransform,
     ) -> RigidTransform:
-        consensus = self.consensus()
-        if consensus is None or not consensus.stable:
+        if self._locked_transform is None:
             raise ValueError("ARKit trajectory is not aligned to the board yet")
-        return consensus.transform.compose(arkit_world_from_opencv_camera(
+        return self._locked_transform.compose(arkit_world_from_opencv_camera(
             arkit_world_from_opengl_camera_pose
         ))
 

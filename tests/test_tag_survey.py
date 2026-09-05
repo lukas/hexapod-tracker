@@ -148,6 +148,55 @@ def test_handheld_alignment_uses_a_bounded_recent_window() -> None:
     assert np.isclose(alignment.consensus().transform.translation_m[0], 0.0045)
 
 
+def test_handheld_alignment_keeps_last_good_lock_when_floor_views_split() -> None:
+    alignment = HandheldWorldAlignment(
+        min_observations=3,
+        max_translation_spread_m=0.015,
+        max_rotation_spread_deg=1.5,
+        max_observations=12,
+    )
+    arkit_pose = RigidTransform.identity()
+    initial = RigidTransform(
+        np.asarray([0.20, -0.50, 0.80]), Rotation.identity()
+    )
+    for offset_mm in (0.0, 1.0, -1.0):
+        alignment.add(
+            RigidTransform(
+                initial.translation_m + [offset_mm / 1000.0, 0.0, 0.0],
+                initial.rotation,
+            ).compose(arkit_world_from_opencv_camera(arkit_pose)),
+            arkit_pose,
+        )
+
+    assert alignment.has_lock
+    locked_camera = alignment.world_from_camera(arkit_pose)
+
+    # A later view-dependent floor solve forms a second internally consistent
+    # cluster. This is exactly what happened in the saved iPhone walk: the
+    # diagnostic rolling window becomes ambiguous, but mapping must continue.
+    shifted = RigidTransform(
+        initial.translation_m + [0.045, 0.0, 0.0], initial.rotation
+    )
+    for offset_mm in (0.0, 1.0, -1.0):
+        alignment.add(
+            RigidTransform(
+                shifted.translation_m + [offset_mm / 1000.0, 0.0, 0.0],
+                shifted.rotation,
+            ).compose(arkit_world_from_opencv_camera(arkit_pose)),
+            arkit_pose,
+        )
+
+    diagnostic = alignment.consensus()
+    assert diagnostic is not None
+    assert diagnostic.ambiguous_cluster is True
+    assert diagnostic.stable is False
+    assert alignment.has_lock
+    assert np.allclose(
+        alignment.world_from_camera(arkit_pose).translation_m,
+        locked_camera.translation_m,
+    )
+
+
 def test_wifi_frame_spool_decodes_packed_rgbd_and_pose(tmp_path) -> None:
     hsv_depth = np.zeros((40, 50, 3), dtype=np.uint8)
     hsv_depth[:, :, 0] = 60

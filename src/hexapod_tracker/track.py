@@ -117,6 +117,19 @@ class FeedbackClient:
                 "live_joint_count": len(angles),
                 "roll_deg": payload.get("roll_deg"),
                 "pitch_deg": payload.get("pitch_deg"),
+                "body_roll_deg": payload.get("body_roll_deg"),
+                "body_pitch_deg": payload.get("body_pitch_deg"),
+                # The robot's older wire format calls this a "target", but it
+                # is fixed metadata captured in the known rear-lean IMU
+                # calibration pose, not a live controller setpoint.
+                "rear_pose_pitch_reference_deg": payload.get(
+                    "rear_pose_pitch_reference_deg",
+                    payload.get("body_pitch_target_deg"),
+                ),
+                "body_frame_calibrated": payload.get(
+                    "body_frame_calibrated"
+                ),
+                "gyro_dps": payload.get("gyro_dps"),
             }
         except (OSError, URLError, ValueError, json.JSONDecodeError) as error:
             angles = None

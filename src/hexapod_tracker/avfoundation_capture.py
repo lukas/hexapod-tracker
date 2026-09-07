@@ -97,6 +97,7 @@ class AVFoundationYuvCapture:
         self._sequence = 0
         self._read_sequence = 0
         self._latest_planes: tuple[np.ndarray, np.ndarray] | None = None
+        self._last_read_planes: tuple[np.ndarray, np.ndarray] | None = None
         self._session: Any | None = None
         self._output: Any | None = None
         self._delegate: Any | None = None
@@ -433,8 +434,19 @@ class AVFoundationYuvCapture:
                 return False, None
             self._read_sequence = self._sequence
             y, uv = self._latest_planes
+            # Each callback allocates new arrays, so these references remain
+            # immutable and valid while a consumer exports this exact frame.
+            self._last_read_planes = (y, uv)
         self.last_error = None
         return True, self._frame_from_planes(y, uv)
+
+    def native_planes(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """Return the full-resolution Y and interleaved UV planes last read.
+
+        The arrays are the unscaled 8-bit video-range NV12 data delivered by
+        AVFoundation.  Callers must treat them as read-only.
+        """
+        return self._last_read_planes
 
     def capture_info(self) -> dict[str, object]:
         return {
@@ -465,3 +477,4 @@ class AVFoundationYuvCapture:
             self._thread.join(timeout=3.0)
         self.detection_gray = None
         self.tracking_gray = None
+        self._last_read_planes = None

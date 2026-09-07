@@ -32,7 +32,7 @@ make check
 git status --short --branch
 ```
 
-`make check` currently runs 81 synthetic/off-robot Python tests and the React
+`make check` currently runs the synthetic/off-robot Python tests and the React
 type-check. It does not prove that a particular camera index, intrinsic
 calibration, tag placement, or physical measurement is valid.
 
@@ -74,10 +74,42 @@ They solve different problems and should not be accidentally merged.
 
 Entry point: `hexapod_tracker.camera_server` / `hexapod-camera-server`.
 
+This is the intended server whenever an operator asks to **show all cameras**,
+**show the available cameras**, or **show both USB cameras**. It serves the
+camera grid at `/`. Do not answer those requests by launching the React
+`/vision` interface described below; that interface owns only one active camera
+at a time and is for a different workflow.
+
 ```sh
 uv run hexapod-camera-server \
-  --indices 0 1 --host 0.0.0.0 --port 8766
+  --indices 0 1 --host 0.0.0.0 --port 8766 \
+  --rotate-180 0 1 \
+  --robot-url http://hexapod.local:8080
 ```
+
+The September 3 three-camera setup is saved as one named profile. Use it so
+capture modes, rotations, and intrinsic calibration remain paired:
+
+```sh
+OPENCV_AVFOUNDATION_SKIP_AUTH=1 uv run hexapod-camera-server \
+  --capture-profile lab-tracking \
+  --host 127.0.0.1 --port 8766 \
+  --robot-url http://192.168.4.39:8080
+```
+
+For that boot, native index 0 is `lukas's iPhone Camera`, while OpenCV indices
+1 and 2 are the OV9281 devices. AVFoundation-native and OpenCV enumeration are
+different namespaces; never assume an index identifies the same device in
+both.
+
+`configs/camera_capture_profiles.json` is the source of truth. The
+`lab-tracking` profile captures the iPhone's full 1920x1440 420v/NV12 source at
+30 fps, processes a 1280x960 color preview, uses both OV9281 cameras at their
+full 1280x800/100 fps mode, publishes 10 fps, rotates USB indices 1 and 2, and
+loads `camera_intrinsics.json`. Full-resolution unscaled iPhone data remains
+available on `/native-frame/0.nv12` (Y followed by interleaved UV) and
+`/native-luma/0.png` (lossless luminance). Continuity Camera supplies decoded
+8-bit video-range NV12, not Bayer sensor RAW or ProRAW.
 
 The code default is port `8765`; `8766` is commonly used to avoid colliding
 with an already-running local viewer. Each `CameraWorker` independently opens
@@ -85,20 +117,109 @@ an OpenCV AVFoundation index, requests MJPG input, drops excess capture frames,
 detects tag36h11 markers, and publishes raw plus annotated JPEGs. It reconnects
 after three consecutive capture failures.
 
+Starting the standard CLI also starts every `CameraWorker`, so it turns on the
+requested cameras. If the operator explicitly wants an inventory-only page
+with cameras off, run this standalone `CameraHTTPServer` with dormant workers
+(construct the workers but do not call `worker.start()`). Verify
+`/status.json` reports `frames: 0` for each camera. This is still the
+multi-camera server; the dormant requirement is not a reason to use `/vision`.
+
+Do not use `AVFoundationYuvCapture.device_descriptors()` to infer the numeric
+indices accepted by OpenCV `VideoCapture`; the two APIs can enumerate the same
+devices in different orders. Once capture is enabled, verify identity from the
+live images and capture modes. On the September 3 setup, the two OV9281 feeds
+reported 1280x800 at 100 fps, while the Studio Display feed reported 1280x720
+at 30 fps, but these numeric indices remain ephemeral.
+
+Physically inverted cameras must be listed under `--rotate-180`. This rotates
+frames before tag detection, annotation, raw/annotated JPEG encoding, and pose
+snapshots. Never implement orientation as an `img` CSS transform: that makes
+labels upside down and leaves displayed coordinates inconsistent with pose
+coordinates.
+
 The embedded HTML at `/` shows every requested camera. Relevant routes are:
 
 - `/status.json`: capture backend/mode, frame counters, errors, and tag IDs.
 - `/stream/<index>.mjpg`: annotated stream.
 - `/raw-stream/<index>.mjpg`: raw stream.
 - `/snapshot/<index>.jpg`: raw current frame.
+- `/native-luma/<index>.png`: lossless unscaled native luminance, when the
+  worker uses native AVFoundation.
+- `/native-frame/<index>.nv12`: exact unscaled NV12 video frame, with size and
+  pixel-format response headers, when the worker uses native AVFoundation.
 - `/api/poses`: planar floor-referenced fusion from visible cameras.
+- `/api/pose-state`: the planar camera result together with read-only encoder
+  angles and calibrated IMU fields from the robot's `GET /api/feedback` route.
 - `/calibration-status.json`: state produced by an optional external
   calibration capture directory.
 
+The page's Pose tab presents camera pose, all 18 encoder angles, and IMU tilt.
+Use body-frame roll/pitch only when `body_frame_calibrated` is true; retain the
+sensor-frame values for diagnosis. Camera and encoder sources remain separate
+until the USB cameras have validated metric 3-D calibration—do not label this
+display as fused 6-D pose.
+
+The upstream robot feedback has a legacy field named
+`body_pitch_target_deg`. Despite that name, it is not a live measurement or a
+currently commanded controller setpoint. It is the fixed pitch magnitude
+recorded in the known rear-lean pose used to establish the IMU body-frame
+axis. `FeedbackClient` accepts that legacy wire key but exposes it to tracker
+clients as `rear_pose_pitch_reference_deg`. Keep this calibration metadata out
+of the live IMU UI; showing it beside current roll and pitch makes a level
+robot look as though it has a large pitch error.
+
+Raw planar tag yaw is an absolute floor-world direction, while encoder values
+use robot-relative `robot_abs`; never compare those raw numbers directly. The
+standalone estimator does make one explicit conversion: a floor homography
+rectifies headings parallel to the floor, and the documented
+`frame_from_tag` rotations convert the horizontal chassis tag and each visible
+horizontal coxa servo-lid tag into a robot-relative `L*_yaw`. Those values are
+reported under `camera_joint_pose` with `joint_frame = robot_abs`. This assumes
+the tag faces remain parallel to the floor and does not replace lens
+calibration. Yaw uncertainty must come from paired same-camera relative
+headings, tag-corner precision, and simultaneous cross-camera disagreement.
+Do not add the chassis and coxa tags' absolute floor-heading bounds: those
+bounds are strongly correlated and their shared homography component cancels
+in the relative joint angle. Retain the provisional 5° 95% repeatability floor
+until a larger stationary and moving validation dataset supports replacing it;
+simultaneous cross-camera disagreement may raise the reported value.
+
+For vertical yoke tags, the planar `parts` estimator reports
+`projection_only`, sets part yaw and uncertainty to null, and retains the old
+ray/floor intersection under `projection_diagnostic` for debugging only. The
+joint-orientation path is separate: configured camera intrinsics plus chassis
+tag `0` and any documented femur tag in the same view recover hip pitch from
+relative tag rotations. Tag translation is not needed for this angle. The two
+IPPE square-pose branches are scored against the robot's `Rz(yaw) * Ry(hip)`
+kinematic model; high-residual branches are rejected. Documented tibia tags
+use the same calculation to recover `robot_abs_tibia_v2`'s absolute
+tibia/knee angle. The knee-servo lid itself is on the femur and cannot observe
+its own output; one of that leg's rigid `L*_tibia` yoke tags must be visible.
+
+`configs/camera_intrinsics.json` contains the September 3 provisional profiles
+for the iPhone and both USB cameras. Each was fitted to 40 frames against the
+floor grid while fixing the principal point, enforcing square pixels/zero
+skew, and holding distortion at zero. Native camera 0 (iPhone Continuity
+Camera, 1280x960) fit `f=1042.096 px` at `2.095 px` RMS; OpenCV camera 1 fit
+`f=947.666 px` at `0.841 px` RMS; and OpenCV camera 2 fit `f=893.875 px` at
+`1.333 px` RMS. This is sufficient for provisional hip and absolute tibia/knee
+estimates but is not a substitute for a multi-pose ChArUco calibration.
+
+Separate intrinsic from extrinsic calibration. A saved intrinsic profile
+remains useful after the camera moves only while physical lens, zoom,
+resolution, crop, orientation, and stabilization mode remain identical.
+Camera extrinsics become stale as soon as the camera moves, but this viewer
+fits each current view to visible surveyed floor tags, so it re-establishes
+the world transform automatically rather than storing the old camera pose.
+After a reconnect, camera indices must still be revalidated before attaching
+an index-keyed intrinsic profile.
+
 `PlanarPoseEstimator` fits a separate floor homography for every view and then
-fuses ground-projected part estimates. This is useful for relative flex and
-walking displacement. It is not calibrated stereo and does not triangulate
-3-D points between cameras.
+fuses ground-projected part estimates and horizontal tag headings in the
+shared floor frame. Its optional intrinsic-calibrated path compares body and
+femur orientation within each camera, then fuses the resulting robot-relative
+angles; camera extrinsics cancel for same-view relative rotation. It is not
+calibrated stereo and does not triangulate 3-D points between cameras.
 
 ### 2. Calibrated tracker and React UI
 

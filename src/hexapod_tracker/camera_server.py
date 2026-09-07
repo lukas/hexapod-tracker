@@ -6,7 +6,7 @@
 #   "numpy>=1.24",
 # ]
 # ///
-"""Serve two annotated AprilTag camera feeds to a local web browser.
+"""Serve multiple annotated AprilTag camera feeds to a local web browser.
 
 This is a camera-only diagnostic: it never connects to or moves the robot.
 Each capture explicitly requests MJPG input and reports whether the selected
@@ -31,6 +31,8 @@ from urllib.parse import urlparse
 import cv2
 import numpy as np
 
+from .housing_pose import JOINT_NAMES
+from .joint_contract import FRAME_ROBOT_ABS, JOINT_CONTRACT
 from .paths import CONFIG_DIR
 from .planar_pose import PlanarPoseEstimator
 
@@ -177,6 +179,7 @@ def placeholder_jpeg(index: int, message: str) -> bytes:
 @dataclass
 class CameraStatus:
     index: int
+    device_name: str | None = None
     backend: str = "AVFOUNDATION"
     state: str = "starting"
     requested_fourcc: str = "MJPG"
@@ -186,9 +189,13 @@ class CameraStatus:
     requested_height: int = 800
     requested_fps: float = 30.0
     output_fps: float = 10.0
+    rotation_degrees: int = 0
     reported_width: int = 0
     reported_height: int = 0
     reported_fps: float = 0.0
+    native_capture_width: int | None = None
+    native_capture_height: int | None = None
+    native_luma_available: bool = False
     measured_fps: float = 0.0
     frames: int = 0
     consecutive_failures: int = 0
@@ -207,6 +214,8 @@ class CameraWorker:
         fps: float,
         output_fps: float,
         jpeg_quality: int,
+        rotate_180: bool = False,
+        native_avfoundation: bool = False,
     ):
         self.index = index
         self.width = width
@@ -214,15 +223,38 @@ class CameraWorker:
         self.fps = fps
         self.output_fps = output_fps
         self.jpeg_quality = jpeg_quality
+        self.rotate_180 = rotate_180
+        self.native_avfoundation = native_avfoundation
+        device_name = None
+        if native_avfoundation:
+            try:
+                from .avfoundation_capture import AVFoundationYuvCapture
+
+                descriptors = AVFoundationYuvCapture.device_descriptors()
+                device_name = next(
+                    (
+                        str(item["name"])
+                        for item in descriptors
+                        if int(item["index"]) == index
+                    ),
+                    None,
+                )
+            except Exception:
+                device_name = None
         self.status = CameraStatus(
             index=index,
+            device_name=device_name,
+            backend="AVFOUNDATION_NATIVE" if native_avfoundation else "AVFOUNDATION",
+            requested_fourcc="420v" if native_avfoundation else "MJPG",
             requested_width=width,
             requested_height=height,
             requested_fps=fps,
             output_fps=output_fps,
+            rotation_degrees=180 if rotate_180 else 0,
         )
         self._jpeg = placeholder_jpeg(index, "waiting for frames")
         self._raw_jpeg = self._jpeg
+        self._native_planes: tuple[np.ndarray, np.ndarray] | None = None
         self._tag_corners: dict[int, np.ndarray] = {}
         self._last_frame_at: float | None = None
         self._condition = threading.Condition()
@@ -246,6 +278,30 @@ class CameraWorker:
     def raw_snapshot(self) -> bytes:
         with self._condition:
             return self._raw_jpeg
+
+    def native_luma_snapshot(self) -> tuple[bytes, int, int] | None:
+        """Encode the unscaled native luminance plane as a lossless PNG."""
+        with self._condition:
+            planes = self._native_planes
+        if planes is None:
+            return None
+        y = planes[0]
+        ok, encoded = cv2.imencode(
+            ".png", y, [cv2.IMWRITE_PNG_COMPRESSION, 3]
+        )
+        if not ok:
+            return None
+        return encoded.tobytes(), int(y.shape[1]), int(y.shape[0])
+
+    def native_nv12_snapshot(self) -> tuple[bytes, int, int] | None:
+        """Pack the exact unscaled AVFoundation Y and UV planes as NV12."""
+        with self._condition:
+            planes = self._native_planes
+        if planes is None:
+            return None
+        y, uv = planes
+        height, width = y.shape
+        return y.tobytes() + uv.tobytes(), int(width), int(height)
 
     def pose_snapshot(self) -> dict[str, Any]:
         """Return one coherent set of corners and capture metadata for fusion."""
@@ -281,6 +337,7 @@ class CameraWorker:
         jpeg: bytes,
         tag_ids: list[int],
         tag_corners: dict[int, np.ndarray],
+        native_planes: tuple[np.ndarray, np.ndarray] | None = None,
     ) -> None:
         with self._condition:
             self._raw_jpeg = raw_jpeg
@@ -290,6 +347,11 @@ class CameraWorker:
             self._tag_corners = {
                 tag_id: corners.copy() for tag_id, corners in tag_corners.items()
             }
+            self._native_planes = native_planes
+            self.status.native_luma_available = native_planes is not None
+            if native_planes is not None:
+                self.status.native_capture_width = int(native_planes[0].shape[1])
+                self.status.native_capture_height = int(native_planes[0].shape[0])
             self.status.consecutive_failures = 0
             self.status.state = "streaming"
             self.status.error = None
@@ -303,7 +365,26 @@ class CameraWorker:
             self._jpeg = placeholder_jpeg(self.index, message)
             self._condition.notify_all()
 
-    def _open(self) -> cv2.VideoCapture | None:
+    def _open(self) -> Any | None:
+        if self.native_avfoundation:
+            from .avfoundation_capture import AVFoundationYuvCapture
+
+            cap = AVFoundationYuvCapture(
+                self.index,
+                preferred_sizes=((1920, 1440), (1920, 1080), (1280, 720)),
+                fps=self.fps,
+                processing_width=self.width,
+            )
+            if not cap.isOpened():
+                self._set_waiting("could not open native AVFoundation device", "open_failed")
+                cap.release()
+                return None
+            self.status.mjpg_request_accepted = None
+            self.status.reported_fourcc = "420v"
+            self.status.reported_fps = self.fps
+            self.status.state = "opened"
+            return cap
+
         cap = cv2.VideoCapture(self.index, cv2.CAP_AVFOUNDATION)
         if not cap.isOpened():
             self._set_waiting("could not open device", "open_failed")
@@ -345,11 +426,17 @@ class CameraWorker:
                         break
                     continue
 
+                self.status.reported_width = int(frame.shape[1])
+                self.status.reported_height = int(frame.shape[0])
+
                 sample_frames += 1
                 now = time.monotonic()
                 if now < next_output_at:
                     continue
                 next_output_at = now + 1.0 / self.output_fps
+
+                if self.rotate_180:
+                    frame = cv2.rotate(frame, cv2.ROTATE_180)
 
                 raw_ok, raw_encoded = cv2.imencode(
                     ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95]
@@ -361,8 +448,18 @@ class CameraWorker:
                     ".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
                 )
                 if raw_ok and ok:
+                    native_planes = (
+                        cap.native_planes()
+                        if self.native_avfoundation
+                        and hasattr(cap, "native_planes")
+                        else None
+                    )
                     self._publish(
-                        raw_encoded.tobytes(), encoded.tobytes(), tag_ids, tag_corners
+                        raw_encoded.tobytes(),
+                        encoded.tobytes(),
+                        tag_ids,
+                        tag_corners,
+                        native_planes,
                     )
 
                 elapsed = time.monotonic() - sample_started
@@ -387,8 +484,12 @@ INDEX_HTML = """<!doctype html>
   body { margin: 20px; background: #101214; color: #eef1f3; }
   header { display:flex; align-items:baseline; gap:16px; flex-wrap:wrap; }
   h1 { font-size: 22px; margin: 0 0 14px; }
+  h2 { font-size:16px; margin:0; }
   #summary { color:#aeb8bf; }
   a { color:#8bc7ff; }
+  nav { display:flex; gap:8px; margin:0 0 16px; }
+  nav button { padding:8px 14px; color:#c8d1d8; background:#1b1f22; border:1px solid #30363b; border-radius:8px; cursor:pointer; }
+  nav button[aria-selected="true"] { color:#fff; background:#245c8a; border-color:#3984bd; }
   #calibration { margin:0 0 16px; padding:14px 16px; background:#1b1f22; border:1px solid #30363b; border-radius:10px; }
   #calibration-head { display:flex; justify-content:space-between; gap:16px; margin-bottom:9px; }
   #calibration-message { margin-top:9px; color:#d6dde2; }
@@ -398,28 +499,80 @@ INDEX_HTML = """<!doctype html>
   #calibration[data-state="moving"] #calibration-progress,
   #calibration[data-state="holding"] #calibration-progress { background:#ffba5a; }
   #calibration[data-state="complete"] { border-color:#397f49; }
-  main { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+  #cameras { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
   article { background:#1b1f22; border:1px solid #30363b; border-radius:10px; overflow:hidden; }
+  article h2 { padding:12px 14px 0; }
   img { width:100%; aspect-ratio:16/10; object-fit:contain; background:#000; display:block; }
   .meta { padding:10px 12px 12px; font:13px ui-monospace,monospace; white-space:pre-wrap; }
   .ok { color:#67db83; } .bad { color:#ffba5a; }
-  @media (max-width:850px) { main { grid-template-columns:1fr; } }
+  #pose-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+  #pose-grid article { padding:14px; }
+  #pose-grid article h2 { padding:0; margin-bottom:10px; }
+  #pose-grid .wide { grid-column:1 / -1; }
+  .pose-copy { color:#aeb8bf; font-size:13px; line-height:1.45; }
+  .pose-values { font:13px ui-monospace,monospace; white-space:pre-wrap; line-height:1.55; }
+  table { width:100%; border-collapse:collapse; font:13px ui-monospace,monospace; }
+  th, td { padding:7px 9px; text-align:right; border-bottom:1px solid #30363b; }
+  th:first-child, td:first-child { text-align:left; }
+  [hidden] { display:none !important; }
+  @media (max-width:850px) { #cameras, #pose-grid { grid-template-columns:1fr; } #pose-grid .wide { grid-column:auto; } }
 </style>
-<header><h1>Hexapod AprilTag cameras</h1><span id="summary">starting…</span><a href="/api/poses">pose API</a></header>
-<section id="calibration" data-state="waiting">
-  <div id="calibration-head"><strong>Stereo calibration</strong><span id="calibration-count">checking…</span></div>
-  <div class="progress"><div id="calibration-progress"></div></div>
-  <div id="calibration-message">Checking automatic capture…</div>
-  <div id="calibration-meta"></div>
+<header><h1>Hexapod tracker</h1><span id="summary">starting…</span></header>
+<nav aria-label="Tracker views">
+  <button type="button" data-tab="cameras" aria-selected="true">Cameras</button>
+  <button type="button" data-tab="pose" aria-selected="false">Pose</button>
+</nav>
+<section id="camera-panel">
+  <section id="calibration" data-state="waiting">
+    <div id="calibration-head"><strong>Stereo calibration</strong><span id="calibration-count">checking…</span></div>
+    <div class="progress"><div id="calibration-progress"></div></div>
+    <div id="calibration-message">Checking automatic capture…</div>
+    <div id="calibration-meta"></div>
+  </section>
+  <main id="cameras"></main>
 </section>
-<main id="cameras"></main>
+<section id="pose-panel" hidden>
+  <div id="pose-grid">
+    <article>
+      <h2>Camera-estimated joint pose</h2>
+      <div id="camera-status" class="pose-copy">waiting for camera estimates…</div>
+      <table>
+        <thead><tr><th>Leg</th><th>Yaw</th><th>Hip</th><th>Knee</th><th>Visible tags</th></tr></thead>
+        <tbody id="camera-joint-rows"></tbody>
+      </table>
+    </article>
+    <article>
+      <h2>Calibrated IMU</h2>
+      <div id="imu-pose" class="pose-values">waiting…</div>
+    </article>
+    <article class="wide">
+      <h2>Robot motor pose</h2>
+      <div id="motor-status" class="pose-copy">waiting for read-only feedback…</div>
+      <table>
+        <thead><tr><th>Leg</th><th>Yaw</th><th>Hip</th><th>Knee</th></tr></thead>
+        <tbody id="joint-rows"></tbody>
+      </table>
+    </article>
+    <article class="wide">
+      <h2>Source contract</h2>
+      <div id="fusion-status" class="pose-copy"></div>
+      <div class="pose-copy"><a href="/api/pose-state">combined JSON API</a> · read-only; no motor commands</div>
+    </article>
+  </div>
+</section>
 <script>
-const cameraNames = {
-  0: 'Camera 0 — OV9281',
-  1: 'Camera 1 — OV9281',
-  2: 'MacBook camera',
-  3: 'Continuity camera',
-};
+let activeTab = 'cameras';
+document.querySelectorAll('nav button').forEach(button => {
+  button.addEventListener('click', () => {
+    activeTab = button.dataset.tab;
+    document.querySelectorAll('nav button').forEach(item => {
+      item.setAttribute('aria-selected', String(item === button));
+    });
+    document.getElementById('camera-panel').hidden = activeTab !== 'cameras';
+    document.getElementById('pose-panel').hidden = activeTab !== 'pose';
+    if (activeTab === 'pose') updatePose();
+  });
+});
 function ensureCameraCard(c) {
   let article = document.getElementById(`camera-${c.index}`);
   if (!article) {
@@ -427,9 +580,8 @@ function ensureCameraCard(c) {
     article.id = `camera-${c.index}`;
     article.dataset.index = String(c.index);
     const img = document.createElement('img');
-    const raw = c.index >= 2;
-    img.src = `${raw ? '/raw-stream/' : '/stream/'}${c.index}.mjpg`;
-    img.alt = `${cameraNames[c.index] || `Camera ${c.index}`} — ${raw ? 'raw high quality' : 'AprilTag annotated'}`;
+    img.src = `/stream/${c.index}.mjpg`;
+    img.alt = `Camera ${c.index} — AprilTag annotated`;
     const meta = document.createElement('div');
     meta.className = 'meta';
     meta.id = `meta-${c.index}`;
@@ -441,11 +593,117 @@ function ensureCameraCard(c) {
 function describe(c) {
   const accepted = c.mjpg_request_accepted === true ? 'accepted' :
     c.mjpg_request_accepted === false ? 'rejected by AVFoundation' : 'pending';
-  return `camera ${c.index}: ${c.state}\n` +
-    `USB input MJPG request: ${accepted}; reported: ${c.reported_fourcc || 'unavailable'}\n` +
-    `mode: ${c.reported_width}x${c.reported_height}; camera measured ${c.measured_fps} fps; browser ${c.output_fps} fps\n` +
+  const input = c.backend === 'AVFOUNDATION_NATIVE'
+    ? `native input: ${c.reported_fourcc || '420v'}`
+    : `USB input MJPG request: ${accepted}; reported: ${c.reported_fourcc || 'unavailable'}`;
+  const nativeCapture = c.native_capture_width
+    ? `; native source ${c.native_capture_width}x${c.native_capture_height}`
+    : '';
+  const nativeExport = c.native_luma_available
+    ? `\nfull native frame: /native-frame/${c.index}.nv12 · lossless luma: /native-luma/${c.index}.png`
+    : '';
+  return `camera ${c.index}${c.device_name ? ` · ${c.device_name}` : ''}: ${c.state}\n` +
+    `${input}${nativeCapture}\n` +
+    `mode: ${c.reported_width}x${c.reported_height}; rotation: ${c.rotation_degrees || 0}°; camera measured ${c.measured_fps} fps; browser ${c.output_fps} fps\n` +
     `frames: ${c.frames}; age: ${c.last_frame_age_s ?? 'n/a'} s; reconnects: ${c.reconnects}\n` +
-    `tag36h11 IDs: ${c.tag_ids.length ? c.tag_ids.join(', ') : 'none'}${c.error ? `\n${c.error}` : ''}`;
+    `tag36h11 IDs: ${c.tag_ids.length ? c.tag_ids.join(', ') : 'none'}${nativeExport}${c.error ? `\n${c.error}` : ''}`;
+}
+function degrees(value) {
+  return value == null ? '—' : `${Number(value).toFixed(2)}°`;
+}
+function cameraDegrees(joint) {
+  if (!joint || joint.status !== 'tracked' || joint.value_deg == null) return '—';
+  const uncertainty = joint.error_95_estimate_deg == null
+    ? '' : ` ± ${Number(joint.error_95_estimate_deg).toFixed(1)}°`;
+  return `${Number(joint.value_deg).toFixed(2)}°${uncertainty}`;
+}
+function renderPose(state) {
+  const camera = state.camera_pose || {};
+  const calibrations = Object.entries(camera.calibration?.cameras || {});
+  const intrinsicCameras = camera.calibration?.intrinsics?.cameras || {};
+  const calibrationLine = calibrations.length
+    ? calibrations.map(([index, value]) => {
+        const lens = intrinsicCameras[index];
+        const lensText = lens
+          ? `${lens.quality} lens${lens.floor_reprojection_rms_px == null ? '' : `, ${Number(lens.floor_reprojection_rms_px).toFixed(2)} px fit`}`
+          : 'no lens profile';
+        return `camera ${index}: floor ${value.status} (${value.quality}) · ${lensText}`;
+      }).join('\\n')
+    : 'No camera calibration status.';
+  const cameraJoints = camera.camera_joint_pose || {};
+  const trackedYaw = Number(cameraJoints.tracked_yaw_count || 0);
+  const trackedHip = Number(cameraJoints.tracked_hip_count || 0);
+  const trackedKnee = Number(cameraJoints.tracked_knee_count || 0);
+  const cameraStatus = document.getElementById('camera-status');
+  const intrinsicQuality = camera.calibration?.intrinsics?.quality || 'unavailable';
+  cameraStatus.textContent = `${calibrationLine}\nlens set: ${intrinsicQuality}; provisional means single-plane, not precision calibrated\n${trackedYaw}/6 yaw · ${trackedHip}/6 hip · ${trackedKnee}/6 knee from rigid link-tag orientations`;
+  cameraStatus.className = `pose-copy ${trackedYaw || trackedHip || trackedKnee ? 'ok' : 'bad'}`;
+  const parts = Object.values(camera.parts || {});
+  const cameraRows = document.getElementById('camera-joint-rows');
+  cameraRows.replaceChildren();
+  for (let leg = 0; leg < 6; leg++) {
+    const row = document.createElement('tr');
+    const yaw = cameraJoints.joints?.[`L${leg}_yaw`];
+    const hip = cameraJoints.joints?.[`L${leg}_hip`];
+    const knee = cameraJoints.joints?.[`L${leg}_knee`];
+    const observed = parts
+      .filter(part => part.part_id?.startsWith(`leg${leg}_`))
+      .flatMap(part => part.observed_tag_ids || []);
+    const visibleTags = [
+      yaw?.status === 'tracked' ? yaw.servo_lid_tag_id : null,
+      ...(hip?.status === 'tracked' ? hip.tag_ids || [] : []),
+      ...(knee?.status === 'tracked' ? knee.tag_ids || [] : []),
+      ...observed,
+    ]
+      .filter((value, index, values) => value != null && values.indexOf(value) === index);
+    const values = [`L${leg}`, cameraDegrees(yaw), cameraDegrees(hip), cameraDegrees(knee), visibleTags.length ? visibleTags.join(', ') : '—'];
+    values.forEach(value => {
+      const cell = document.createElement('td');
+      cell.textContent = value;
+      row.append(cell);
+    });
+    cameraRows.append(row);
+  }
+
+  const motor = state.motor_feedback || {};
+  const age = motor.sample_age_s == null ? 'unknown age' : `${Number(motor.sample_age_s).toFixed(2)} s old`;
+  const motorStatus = document.getElementById('motor-status');
+  motorStatus.textContent = motor.ok
+    ? `${motor.live_joint_count}/18 live angles · ${age} · ${motor.joint_frame}`
+    : `Telemetry unavailable: ${motor.error || (motor.configured ? 'waiting for feedback' : 'server has no --robot-url')}`;
+  motorStatus.className = `pose-copy ${motor.ok ? 'ok' : 'bad'}`;
+  const byName = Object.fromEntries((motor.joints || []).map(joint => [joint.name, joint]));
+  const rows = document.getElementById('joint-rows');
+  rows.replaceChildren();
+  for (let leg = 0; leg < 6; leg++) {
+    const row = document.createElement('tr');
+    const values = [`L${leg}`, ...['yaw', 'hip', 'knee'].map(axis => degrees(byName[`L${leg}_${axis}`]?.degrees))];
+    values.forEach(value => {
+      const cell = document.createElement('td');
+      cell.textContent = value;
+      row.append(cell);
+    });
+    rows.append(row);
+  }
+
+  const imu = state.imu || {};
+  const calibrated = imu.body_frame_calibrated === true;
+  const gyro = Array.isArray(imu.gyro_dps) ? imu.gyro_dps.map(value => Number(value).toFixed(2)).join(', ') : '—';
+  const imuElement = document.getElementById('imu-pose');
+  imuElement.textContent = `${calibrated ? 'body frame calibrated' : 'body frame NOT calibrated'}\nbody roll: ${degrees(imu.body_roll_deg)}\nbody pitch: ${degrees(imu.body_pitch_deg)}\nsensor roll: ${degrees(imu.sensor_roll_deg)}\nsensor pitch: ${degrees(imu.sensor_pitch_deg)}\ngyro x/y/z: ${gyro} °/s`;
+  imuElement.className = `pose-values ${calibrated ? 'ok' : 'bad'}`;
+  document.getElementById('fusion-status').textContent = state.fusion?.reason || 'Camera and robot sources are shown separately.';
+}
+async function updatePose() {
+  if (activeTab !== 'pose') return;
+  try {
+    const response = await fetch('/api/pose-state', {cache:'no-store'});
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    renderPose(await response.json());
+  } catch (error) {
+    document.getElementById('motor-status').textContent = `pose status error: ${error}`;
+    document.getElementById('motor-status').className = 'pose-copy bad';
+  }
 }
 async function update() {
   try {
@@ -482,7 +740,7 @@ async function update() {
     document.getElementById('summary').textContent = `status error: ${e}`;
   }
 }
-update(); setInterval(update, 1000);
+update(); setInterval(update, 1000); setInterval(updatePose, 1000);
 </script>
 </html>
 """
@@ -522,6 +780,15 @@ class StreamHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if path in ("/api/pose-state", "/api/pose-state.json"):
+            body = json.dumps(self.server.combined_pose_status()).encode()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/calibration-status.json":
             body = json.dumps(self.server.calibration_status()).encode()
             self.send_response(HTTPStatus.OK)
@@ -542,6 +809,51 @@ class StreamHandler(BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path.startswith("/native-luma/") and path.endswith(".png"):
+            try:
+                index = int(path.removeprefix("/native-luma/").removesuffix(".png"))
+                worker = next(item for item in self.server.workers if item.index == index)
+            except (ValueError, StopIteration):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            snapshot = worker.native_luma_snapshot()
+            if snapshot is None:
+                self.send_error(HTTPStatus.NOT_FOUND, "native luma unavailable")
+                return
+            body, width, height = snapshot
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Width", str(width))
+            self.send_header("X-Frame-Height", str(height))
+            self.send_header("X-Pixel-Format", "Y8-video-range-from-NV12")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path.startswith("/native-frame/") and path.endswith(".nv12"):
+            try:
+                index = int(path.removeprefix("/native-frame/").removesuffix(".nv12"))
+                worker = next(item for item in self.server.workers if item.index == index)
+            except (ValueError, StopIteration):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            snapshot = worker.native_nv12_snapshot()
+            if snapshot is None:
+                self.send_error(HTTPStatus.NOT_FOUND, "native NV12 unavailable")
+                return
+            body, width, height = snapshot
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Disposition", f'attachment; filename="camera-{index}.nv12"')
+            self.send_header("X-Frame-Width", str(width))
+            self.send_header("X-Frame-Height", str(height))
+            self.send_header("X-Pixel-Format", "NV12-video-range")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -593,11 +905,13 @@ class CameraHTTPServer(ThreadingHTTPServer):
         calibration_directory: Path | None = None,
         calibration_target: int = 12,
         pose_estimator: PlanarPoseEstimator | None = None,
+        feedback_client: Any | None = None,
     ):
         self.workers = workers
         self.calibration_directory = calibration_directory
         self.calibration_target = calibration_target
         self.pose_estimator = pose_estimator
+        self.feedback_client = feedback_client
         super().__init__(address, StreamHandler)
 
     def pose_status(self) -> dict[str, Any]:
@@ -609,6 +923,75 @@ class CameraHTTPServer(ThreadingHTTPServer):
         return self.pose_estimator.estimate(
             [worker.pose_snapshot() for worker in self.workers]
         )
+
+    def combined_pose_status(self) -> dict[str, Any]:
+        """Return camera pose plus read-only encoder and calibrated IMU state."""
+        if self.feedback_client is None:
+            angles: dict[str, float] = {}
+            feedback: dict[str, Any] = {
+                "configured": False,
+                "ok": False,
+                "error": "restart with --robot-url to read robot telemetry",
+            }
+        else:
+            angles, feedback = self.feedback_client.sample()
+
+        sample_time = feedback.get("sample_time_unix")
+        sample_age = None
+        if isinstance(sample_time, (int, float)):
+            sample_age = max(0.0, time.time() - float(sample_time))
+        joints = [
+            {
+                "name": name,
+                "leg": int(name[1]),
+                "axis": name.split("_", 1)[1],
+                "degrees": angles.get(name),
+            }
+            for name in JOINT_NAMES
+        ]
+        return {
+            "schema_version": 1,
+            "generated_at_unix_s": round(time.time(), 6),
+            "read_only": True,
+            "fusion": {
+                "status": "sources_presented_separately",
+                "reason": (
+                    "provisional camera yaw, hip, and absolute tibia/knee angles "
+                    "are presented beside, not fused with, encoders"
+                ),
+            },
+            "camera_pose": self.pose_status(),
+            "motor_feedback": {
+                "configured": bool(feedback.get("configured")),
+                "ok": bool(feedback.get("ok")),
+                "endpoint": feedback.get("endpoint"),
+                "error": feedback.get("error"),
+                "sample_time_unix": sample_time,
+                "sample_age_s": (
+                    None if sample_age is None else round(sample_age, 3)
+                ),
+                "live_joint_count": int(
+                    feedback.get("live_joint_count", len(angles))
+                ),
+                "joint_frame": FRAME_ROBOT_ABS,
+                "joint_contract": JOINT_CONTRACT,
+                "joints": joints,
+            },
+            "imu": {
+                "source": "robot GET /api/feedback with apply_calib=True",
+                "body_frame_calibrated": bool(
+                    feedback.get("body_frame_calibrated", False)
+                ),
+                "body_roll_deg": feedback.get("body_roll_deg"),
+                "body_pitch_deg": feedback.get("body_pitch_deg"),
+                "rear_pose_pitch_reference_deg": feedback.get(
+                    "rear_pose_pitch_reference_deg"
+                ),
+                "sensor_roll_deg": feedback.get("roll_deg"),
+                "sensor_pitch_deg": feedback.get("pitch_deg"),
+                "gyro_dps": feedback.get("gyro_dps"),
+            },
+        }
 
     def calibration_status(self) -> dict[str, Any]:
         if self.calibration_directory is None:
@@ -645,6 +1028,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--output-fps", type=float, default=10.0)
     parser.add_argument("--jpeg-quality", type=int, default=82)
+    parser.add_argument(
+        "--capture-profile",
+        help="named camera setup from --capture-profiles-file",
+    )
+    parser.add_argument(
+        "--capture-profiles-file",
+        type=Path,
+        default=CONFIG_DIR / "camera_capture_profiles.json",
+        help="saved capture modes, backends, rotations, and calibration pairing",
+    )
+    parser.add_argument(
+        "--robot-url",
+        help=(
+            "optional robot HTTP base URL; only read-only GET /api/feedback "
+            "is used"
+        ),
+    )
+    parser.add_argument(
+        "--feedback-hz",
+        type=float,
+        default=3.0,
+        help="read-only robot feedback rate (default: 3 Hz)",
+    )
     parser.add_argument("--calibration-directory", type=Path)
     parser.add_argument("--calibration-target", type=int, default=12)
     parser.add_argument(
@@ -660,11 +1066,39 @@ def parse_args() -> argparse.Namespace:
         help="tag-to-part grouping used by /api/poses",
     )
     parser.add_argument(
+        "--robot-tag-layout",
+        type=Path,
+        default=CONFIG_DIR / "hexapod-1-apriltag-layout.json",
+        help="chassis and link tag orientations used for camera joints",
+    )
+    parser.add_argument(
+        "--camera-calibration",
+        type=Path,
+        default=CONFIG_DIR / "camera_intrinsics.json",
+        help="per-camera intrinsic calibration used for 3-D joint orientation",
+    )
+    parser.add_argument(
         "--camera-mode",
         action="append",
         default=[],
         metavar="INDEX:WIDTH:HEIGHT:FPS",
         help="override capture mode for one camera; may be repeated",
+    )
+    parser.add_argument(
+        "--rotate-180",
+        type=int,
+        nargs="+",
+        default=[],
+        metavar="INDEX",
+        help="rotate selected camera frames 180 degrees before detection and display",
+    )
+    parser.add_argument(
+        "--native-avfoundation",
+        type=int,
+        nargs="+",
+        default=[],
+        metavar="INDEX",
+        help="capture selected AVFoundation device indices through native 420v/NV12",
     )
     return parser.parse_args()
 
@@ -688,12 +1122,78 @@ def parse_camera_modes(values: list[str]) -> dict[int, tuple[int, int, float]]:
     return modes
 
 
+def load_capture_profile(path: Path, name: str) -> dict[str, Any]:
+    """Load and validate one saved camera setup."""
+    try:
+        document = json.loads(path.read_text())
+        profile = document["profiles"][name]
+    except FileNotFoundError as error:
+        raise SystemExit(f"capture profile file not found: {path}") from error
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"invalid capture profile JSON in {path}: {error}") from error
+    except KeyError as error:
+        choices = sorted(document.get("profiles", {})) if "document" in locals() else []
+        suffix = f"; available: {', '.join(choices)}" if choices else ""
+        raise SystemExit(f"unknown capture profile {name!r}{suffix}") from error
+
+    try:
+        indices = [int(index) for index in profile["indices"]]
+        raw_modes = profile["camera_modes"]
+        modes = {
+            int(index): (
+                int(spec["width"]),
+                int(spec["height"]),
+                float(spec["fps"]),
+            )
+            for index, spec in raw_modes.items()
+        }
+        rotate_180 = [int(index) for index in profile.get("rotate_180", [])]
+        native = [int(index) for index in profile.get("native_avfoundation", [])]
+    except (KeyError, TypeError, ValueError) as error:
+        raise SystemExit(f"invalid capture profile {name!r} in {path}") from error
+
+    if not indices or set(modes) != set(indices):
+        raise SystemExit(
+            f"capture profile {name!r} must define exactly one camera mode per index"
+        )
+    if any(min(width, height, fps) <= 0 for width, height, fps in modes.values()):
+        raise SystemExit(f"capture profile {name!r} contains a non-positive mode")
+    if not set(rotate_180).issubset(indices) or not set(native).issubset(indices):
+        raise SystemExit(f"capture profile {name!r} references an unknown camera index")
+
+    result = dict(profile)
+    result["indices"] = indices
+    result["camera_modes"] = modes
+    result["rotate_180"] = rotate_180
+    result["native_avfoundation"] = native
+    return result
+
+
 def main() -> None:
     args = parse_args()
-    camera_modes = parse_camera_modes(args.camera_mode)
+    if args.feedback_hz <= 0.0:
+        raise SystemExit("--feedback-hz must be positive")
+    profile = None
+    if args.capture_profile:
+        profile = load_capture_profile(args.capture_profiles_file, args.capture_profile)
+        args.indices = profile["indices"]
+        args.rotate_180 = profile["rotate_180"]
+        args.native_avfoundation = profile["native_avfoundation"]
+        args.output_fps = float(profile.get("output_fps", args.output_fps))
+        args.jpeg_quality = int(profile.get("jpeg_quality", args.jpeg_quality))
+        camera_modes = profile["camera_modes"]
+        if profile.get("camera_calibration"):
+            calibration_path = Path(str(profile["camera_calibration"]))
+            if not calibration_path.is_absolute():
+                calibration_path = args.capture_profiles_file.parent / calibration_path
+            args.camera_calibration = calibration_path
+    else:
+        camera_modes = parse_camera_modes(args.camera_mode)
     pose_estimator = PlanarPoseEstimator(
         json.loads(args.floor_map.read_text()),
         json.loads(args.part_map.read_text()),
+        json.loads(args.robot_tag_layout.read_text()),
+        json.loads(args.camera_calibration.read_text()),
     )
     workers = [
         CameraWorker(
@@ -703,6 +1203,8 @@ def main() -> None:
             camera_modes.get(index, (args.width, args.height, args.fps))[2],
             args.output_fps,
             args.jpeg_quality,
+            rotate_180=index in args.rotate_180,
+            native_avfoundation=index in args.native_avfoundation,
         )
         for index in args.indices
     ]
@@ -710,12 +1212,18 @@ def main() -> None:
         worker.start()
         time.sleep(0.4)
 
+    feedback_client = None
+    if args.robot_url:
+        from .track import FeedbackClient
+
+        feedback_client = FeedbackClient(args.robot_url, hz=args.feedback_hz)
     server = CameraHTTPServer(
         (args.host, args.port),
         workers,
         calibration_directory=args.calibration_directory,
         calibration_target=args.calibration_target,
         pose_estimator=pose_estimator,
+        feedback_client=feedback_client,
     )
     stop_requested = threading.Event()
 
@@ -727,6 +1235,12 @@ def main() -> None:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
     print(f"AprilTag camera viewer: http://{args.host}:{args.port}", flush=True)
+    if profile is not None:
+        print(
+            f"Capture profile: {args.capture_profile} — "
+            f"{profile.get('description', 'saved camera setup')}",
+            flush=True,
+        )
     print("Input format requested: MJPG; see /status.json for backend acceptance", flush=True)
     try:
         server.serve_forever(poll_interval=0.2)

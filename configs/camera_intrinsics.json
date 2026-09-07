@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "name": "Local camera intrinsic profiles",
+  "captured": "2026-09-03",
+  "quality": "mixed_provisional",
+  "image_size": {"width": 1280, "height": 800},
+  "method": "Per-camera constrained single-plane fits; see each camera record.",
+  "cameras": {
+    "0": {
+      "device_model": "iPhone18,1 Continuity Camera",
+      "image_size": {"width": 1280, "height": 960},
+      "camera_matrix": [[1042.096423, 0.0, 639.77591], [0.0, 1042.096423, 480.0], [0.0, 0.0, 1.0]],
+      "distortion_coefficients": [0.0, 0.0, 0.0, 0.0, 0.0],
+      "quality": "provisional",
+      "method": "Constrained single-plane fit to 40 frames of floor anchors 101, 102, 104, 105, and 112 in the 1280x960 Continuity Camera stream; EXIF-derived focal length used as the initial guess, principal point fixed, square pixels, zero skew and zero distortion.",
+      "floor_reprojection_rms_px": 2.095,
+      "focal_sample_standard_deviation_px": 0.507
+    },
+    "1": {
+      "device_model": "Arducam OV9281 USB Camera",
+      "image_size": {"width": 1280, "height": 800},
+      "camera_matrix": [[947.666149, 0.0, 639.5], [0.0, 947.666149, 399.5], [0.0, 0.0, 1.0]],
+      "distortion_coefficients": [0.0, 0.0, 0.0, 0.0, 0.0],
+      "quality": "provisional",
+      "method": "Constrained single-plane fit to 40 frames of the surveyed floor grid; centered principal point, square pixels, zero skew and zero distortion.",
+      "floor_reprojection_rms_px": 0.841,
+      "focal_sample_standard_deviation_px": 11.465
+    },
+    "2": {
+      "device_model": "Arducam OV9281 USB Camera",
+      "image_size": {"width": 1280, "height": 800},
+      "camera_matrix": [[893.875175, 0.0, 639.5], [0.0, 893.875175, 399.5], [0.0, 0.0, 1.0]],
+      "distortion_coefficients": [0.0, 0.0, 0.0, 0.0, 0.0],
+      "quality": "provisional",
+      "method": "Constrained single-plane fit to 40 frames of the surveyed floor grid; centered principal point, square pixels, zero skew and zero distortion.",
+      "floor_reprojection_rms_px": 1.333,
+      "focal_sample_standard_deviation_px": 4.315
+    }
+  },
+  "validation": {
+    "robot_pose": "stationary encoder-zero pose",
+    "visible_ov9281_femur_hip_estimates_deg": {
+      "L1": 3.9,
+      "L2": [-4.1, 1.1],
+      "L3": -2.0
+    },
+    "iphone_live_coverage": {
+      "floor_anchor_ids": [101, 102, 104, 105, 112],
+      "tracked_yaw_count": 6,
+      "tracked_hip_count": 4
+    },
+    "note": "Replace provisional profiles with multi-pose ChArUco calibrations before metrology-grade 3-D claims. Camera intrinsics remain reusable after a camera is moved only when its physical lens, zoom, resolution, crop, orientation, and stabilization mode are unchanged. Floor tags re-establish extrinsics live. Camera indices are ephemeral; visually re-identify cameras after topology changes."
+  },
+  "source": {
+    "floor_map": "floor_tag_map.json",
+    "robot_layout": "hexapod-1-apriltag-layout.json",
+    "ov9281_manufacturer_horizontal_fov_deg": 70.0,
+    "ov9281_manufacturer_lens_description": "low distortion M12 lens",
+    "iphone_reference_config": "apriltag_pose_config_20260831.json"
+  }
+}

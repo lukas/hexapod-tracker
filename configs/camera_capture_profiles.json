@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "captured": "2026-09-03",
+  "default_profile": "lab-tracking",
+  "profiles": {
+    "lab-tracking": {
+      "description": "Recommended three-camera setup: full native iPhone data with responsive previews plus both full-frame OV9281 feeds.",
+      "indices": [0, 1, 2],
+      "native_avfoundation": [0],
+      "rotate_180": [1, 2],
+      "output_fps": 10.0,
+      "jpeg_quality": 82,
+      "camera_calibration": "camera_intrinsics.json",
+      "camera_modes": {
+        "0": {"width": 1280, "height": 960, "fps": 30.0},
+        "1": {"width": 1280, "height": 800, "fps": 100.0},
+        "2": {"width": 1280, "height": 800, "fps": 100.0}
+      },
+      "expected_devices": {
+        "0": "lukas's iPhone Camera (iPhone18,1 Continuity Camera)",
+        "1": "Arducam OV9281 USB Camera",
+        "2": "Arducam OV9281 USB Camera"
+      },
+      "native_sources": {
+        "0": {
+          "capture_size": [1920, 1440],
+          "pixel_format": "420v / 8-bit video-range NV12",
+          "processed_preview_size": [1280, 960],
+          "raw_routes": ["/native-frame/0.nv12", "/native-luma/0.png"]
+        },
+        "1": {"capture_size": [1280, 800], "reported_fps": 100.0},
+        "2": {"capture_size": [1280, 800], "reported_fps": 100.0}
+      }
+    },
+    "lab-usb-only": {
+      "description": "Two-camera fallback when Continuity Camera is disconnected: both full-frame OV9281 feeds, with no native AVFoundation slot that can fall back to a USB device.",
+      "indices": [1, 2],
+      "native_avfoundation": [],
+      "rotate_180": [1, 2],
+      "output_fps": 10.0,
+      "jpeg_quality": 82,
+      "camera_calibration": "camera_intrinsics.json",
+      "camera_modes": {
+        "1": {"width": 1280, "height": 800, "fps": 100.0},
+        "2": {"width": 1280, "height": 800, "fps": 100.0}
+      },
+      "expected_devices": {
+        "1": "Arducam OV9281 USB Camera",
+        "2": "Arducam OV9281 USB Camera"
+      }
+    }
+  },
+  "observed_avfoundation_modes": {
+    "iphone_continuity_camera": {
+      "pixel_format": "420v",
+      "modes": [
+        {"size": [1920, 1440], "maximum_fps": 60.0},
+        {"size": [1920, 1080], "maximum_fps": 60.0},
+        {"size": [1280, 720], "maximum_fps": 60.0},
+        {"size": [640, 480], "maximum_fps": 60.0}
+      ]
+    },
+    "arducam_ov9281": {
+      "preferred_pixel_format": "420v",
+      "preferred_mode": {"size": [1280, 800], "fps": 100.0},
+      "alternate_fps": 120.0,
+      "note": "Use the full 1280x800 sensor mode; 1280x720 crops the vertical field of view."
+    }
+  },
+  "identity_warning": "Camera indices are ephemeral. Confirm camera 0 by its Continuity Camera name and visually distinguish USB cameras 1 and 2 after reconnecting."
+}

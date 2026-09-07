@@ -15,26 +15,150 @@ fastest orientation document for both human and LLM maintainers.
 
 ## Quick start
 
-Install the Python environment and launch the two-camera viewer:
+Install the Python environment and launch the multi-camera viewer:
 
 ```sh
 uv sync --extra dev
 uv run hexapod-camera-server \
-  --indices 0 1 --host 0.0.0.0 --port 8766
+  --indices 0 1 --host 0.0.0.0 --port 8766 \
+  --rotate-180 0 1 \
+  --robot-url http://hexapod.local:8080
 ```
 
 Open `http://localhost:8766/` locally, or replace `localhost` with the
 computer's LAN address. The viewer exposes annotated and raw MJPEG feeds,
 snapshots, tag/calibration status, and the current planar pose estimate.
+The optional `--robot-url` enables read-only motor-angle and calibrated IMU
+telemetry in the Pose tab. The tracker only calls `GET /api/feedback` and has
+no robot command path.
+
+On the September 3 macOS setup, use the saved profile so the Continuity Camera
+native path, USB modes, rotations, and matching intrinsic calibration cannot
+drift apart:
+
+```sh
+OPENCV_AVFOUNDATION_SKIP_AUTH=1 uv run hexapod-camera-server \
+  --capture-profile lab-tracking \
+  --host 127.0.0.1 --port 8766 \
+  --robot-url http://192.168.4.39:8080
+```
+
+If Continuity Camera is disconnected, use the USB-only profile instead. This
+is intentionally a separate profile: leaving native camera index 0 enabled can
+silently select an OV9281 after the iPhone disappears and duplicate one of the
+OpenCV USB feeds.
+
+```sh
+OPENCV_AVFOUNDATION_SKIP_AUTH=1 uv run hexapod-camera-server \
+  --capture-profile lab-usb-only \
+  --host 127.0.0.1 --port 8766 \
+  --robot-url http://192.168.4.39:8080
+```
+
+Here native AVFoundation index 0 is `lukas's iPhone Camera`; OpenCV indices 1
+and 2 are the OV9281 USB cameras. These numbers describe this boot only and
+must be checked from `/status.json` and the live images after reconnecting.
+The source of truth for this setup and the observed device mode inventory is
+`configs/camera_capture_profiles.json`.
+
+The live IMU card shows measurements only. The combined JSON API renames the
+robot's legacy `body_pitch_target_deg` field to
+`rear_pose_pitch_reference_deg`: it is fixed metadata captured during the
+known rear-lean body-frame calibration pose, not a current measurement or a
+live controller target, and it is intentionally not displayed in the UI.
+
+### Choose the correct camera web server
+
+There are two different camera web interfaces in this repository:
+
+- **Show all configured cameras:** use the standalone
+  `hexapod-camera-server` above. Its page is served at `/` and displays one
+  card per index passed with `--indices`. A request such as “show the available
+  cameras” or “show both USB cameras” refers to this server, not the React
+  vision UI.
+- **Inspect one selected camera in the robot application:** use
+  `hexapod_tracker.web_server.VisionRuntime`, mounted at `/vision`. This is the
+  single-camera calibrated-tracking interface and is not the all-camera page.
+
+The normal `hexapod-camera-server` command starts capture workers immediately.
+If the operator asks to list camera cards without turning cameras on, serve the
+standalone page with dormant `CameraWorker` instances; do not substitute the
+single-camera `/vision` UI. In that state `/status.json` must report zero
+frames for every camera until capture is explicitly started by a later action.
+
+On macOS, do not assume AVFoundation discovery-list indices match the indices
+used by OpenCV's `VideoCapture`. Treat the live image and reported capture mode
+as the identity check, and visually confirm every selected feed after a server
+restart. Camera indices are ephemeral and can change when a display, iPhone, or
+USB camera reconnects.
+
+Use `--rotate-180 INDEX [INDEX ...]` for physically inverted cameras. Rotation
+is applied before AprilTag detection and JPEG encoding so the annotated feed,
+raw snapshots, and pose coordinates all share the same upright image frame;
+do not rotate only the browser image with CSS.
 
 Useful endpoints include:
 
 - `/` — camera grid and tracking status
 - `/status.json` — capture details and detected tags
 - `/api/poses` — floor-referenced part poses
+- `/api/pose-state` — camera poses plus read-only motor and calibrated IMU data
 - `/stream/0.mjpg` and `/raw-stream/0.mjpg` — annotated and raw video
-- `/snapshot/0.jpg` — current annotated frame
+- `/snapshot/0.jpg` — current raw frame
+- `/native-luma/0.png` — lossless, full-resolution iPhone luminance plane
+- `/native-frame/0.nv12` — exact full-resolution iPhone NV12 video frame
 - `/calibration-status.json` — calibration capture state
+
+The recommended `lab-tracking` profile asks Continuity Camera for its full
+1920x1440, 30 fps, 8-bit video-range NV12 source. It keeps the browser/color
+processing path at 1280x960 for responsiveness, but the two native routes
+retain the unscaled 1920x1440 data. The `.nv12` response concatenates the Y
+plane and interleaved UV plane and includes `X-Frame-Width`, `X-Frame-Height`,
+and `X-Pixel-Format` headers. This is raw decoded video—not Bayer sensor RAW
+or ProRAW, which Continuity Camera does not expose to this capture path.
+
+The USB profile uses the full 1280x800 sensor field at its reported 100 fps;
+the server publishes 10 fps to the browser to control CPU and bandwidth. Do
+not replace it with 1280x720 unless the vertical crop is intentional.
+
+The floor homography produces physical `x`, `y`, and yaw for markers on the
+floor plane. It also rectifies directions parallel to that plane, so the Pose
+tab can calculate each visible leg's robot-relative yaw from the horizontal
+chassis tag plus that leg's horizontal coxa servo-lid tag. The documented tag
+mount rotations come from `configs/hexapod-1-apriltag-layout.json` (override
+with `--robot-tag-layout`). This yaw assumes both tag faces remain parallel to
+the floor. Its uncertainty comes from paired tag headings in the same camera,
+corner precision, and simultaneous cross-camera disagreement. It does not add
+the two absolute floor-heading bounds because their shared component cancels
+in the robot-relative angle. A provisional 5° 95% floor reflects the observed
+stationary repeatability; simultaneous camera disagreement can raise it.
+
+Elevated vertical yoke tags are still returned only as `projection_only`
+diagnostics in the planar `parts` output: their camera-ray/floor intersections
+are not physical part positions. Joint orientation is handled separately.
+With `configs/camera_intrinsics.json`, a camera that sees chassis tag
+`0`, floor anchors, and any documented `L*_femur` tag uses square-tag PnP and
+the layout's mount rotation to calculate robot-relative hip pitch. The solver
+enumerates both planar pose branches and rejects the one inconsistent with the
+hexapod's yaw-then-pitch kinematics. A visible documented `L*_tibia` tag uses
+the same body-relative 3-D orientation path to calculate the contract's
+absolute tibia/knee angle. The value is unavailable only when no accepted
+tibia tag shares a calibrated camera view with chassis tag `0`.
+
+The checked-in iPhone and OV9281 calibrations are explicitly provisional:
+they are constrained fits to the single floor plane, with fixed principal
+points, square pixels, and zero distortion. Replace them with multi-pose
+ChArUco calibrations before treating 3-D results as metrology-grade.
+
+Intrinsic calibration describes the camera/lens and can be reused after the
+camera is moved if the physical lens, zoom, resolution, crop, orientation,
+and stabilization mode stay unchanged. Extrinsic calibration describes the
+camera's position in the room and changes whenever the camera moves. This
+server re-establishes extrinsics from the surveyed floor tags on every current
+frame, so moving a camera does not normally require a new manual extrinsic
+calibration; keep at least enough floor anchors visible. Lens switching,
+digital zoom, a different Continuity Camera mode, or a changed crop/resolution
+does require a new intrinsic profile.
 
 ## Calibrated tracking
 

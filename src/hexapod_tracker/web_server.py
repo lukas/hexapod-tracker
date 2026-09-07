@@ -902,7 +902,7 @@ class VisionRuntime:
             from .avfoundation_capture import AVFoundationYuvCapture
 
             preferred = [(self.capture_width, self.capture_height)]
-            for fallback in ((1920, 1080), (1280, 720)):
+            for fallback in ((1920, 1080), (1280, 800), (1280, 720)):
                 if fallback not in preferred:
                     preferred.append(fallback)
             native = AVFoundationYuvCapture(

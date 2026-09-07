@@ -330,6 +330,13 @@ def test_temporal_tag_tracker_bridges_a_decoder_miss_with_optical_flow() -> None
     )
 
 
+def test_temporal_tags_drop_old_coordinates_after_frame_resize() -> None:
+    tracker = TemporalTagCornerTracker()
+    corners = np.array([[20, 20], [60, 20], [60, 60], [20, 60]], dtype=np.float32)
+    tracker.update(np.zeros((100, 100), dtype=np.uint8), [TagCorners(3, corners)])
+    assert tracker.update(np.zeros((120, 140), dtype=np.uint8), []) == []
+
+
 def _synthetic_red_foot_scene() -> tuple[np.ndarray, np.ndarray, dict[int, np.ndarray]]:
     image = np.full((900, 900, 3), 80, dtype=np.uint8)
     body = np.asarray([450.0, 450.0])
@@ -351,6 +358,15 @@ def _synthetic_red_foot_scene() -> tuple[np.ndarray, np.ndarray, dict[int, np.nd
             -1,
         )
     return image, body, anchors
+
+
+def test_feet_drop_old_coordinates_after_frame_resize() -> None:
+    image, body, anchors = _synthetic_red_foot_scene()
+    tracker = FootTipTracker()
+    assert len(tracker.update(image, body_center_px=body, femur_anchor_px=anchors,
+                              tag_scale_px=60)) == 6
+    assert tracker.update(np.zeros((600, 800, 3), dtype=np.uint8),
+                          body_center_px=None, femur_anchor_px={}, tag_scale_px=60) == []
 
 
 def test_red_boot_detector_associates_all_six_legs_by_outward_ray() -> None:

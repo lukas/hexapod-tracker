@@ -165,6 +165,8 @@ class FootTipTracker:
                     "gray_image must match the BGR foot-tracking image"
                 )
         scale = max(8.0, float(tag_scale_px))
+        if any(state.gray.shape != gray.shape for state in self._states.values()):
+            self.reset()
         measured: dict[int, tuple[np.ndarray, np.ndarray, float]] = {}
 
         if body_center_px is not None and femur_anchor_px:

@@ -177,18 +177,36 @@ class AVFoundationYuvCapture:
         return descriptors
 
     def _select_format(self, device: Any) -> Any:
-        formats: dict[tuple[int, int], Any] = {}
+        formats: dict[tuple[int, int], list[tuple[float, Any]]] = {}
         for candidate in device.formats():
             description = candidate.formatDescription()
             subtype = CM.CMFormatDescriptionGetMediaSubType(description)
-            if subtype != Quartz.kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
+            # USB cameras may expose their low-rate modes as packed YUV. The output
+            # converts those frames to the same NV12 planes used below.
+            if subtype not in {
+                Quartz.kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                getattr(Quartz, "kCVPixelFormatType_422YpCbCr8", None),
+                getattr(Quartz, "kCVPixelFormatType_422YpCbCr8_yuvs", None),
+            }:
                 continue
             dimensions = CM.CMVideoFormatDescriptionGetDimensions(description)
-            formats.setdefault((dimensions.width, dimensions.height), candidate)
+            rates = list(candidate.videoSupportedFrameRateRanges())
+            if not rates:
+                continue
+            supported_rate = min(
+                (max(float(item.minFrameRate()),
+                     min(self.fps, float(item.maxFrameRate()))) for item in rates),
+                key=lambda rate: abs(rate - self.fps),
+            )
+            formats.setdefault((dimensions.width, dimensions.height), []).append(
+                (supported_rate, candidate)
+            )
         for size in self.preferred_sizes:
             if size in formats:
                 self.capture_image_size_px = size
-                return formats[size]
+                rate, selected = min(formats[size], key=lambda item: abs(item[0] - self.fps))
+                self.fps = rate
+                return selected
         available = ", ".join(f"{w}x{h}" for w, h in sorted(formats))
         requested = ", ".join(f"{w}x{h}" for w, h in self.preferred_sizes)
         raise RuntimeError(
@@ -202,8 +220,7 @@ class AVFoundationYuvCapture:
             raise RuntimeError(f"could not configure camera: {error}")
         try:
             device.setActiveFormat_(capture_format)
-            rate = max(1, int(round(self.fps)))
-            duration = CM.CMTimeMake(1, rate)
+            duration = CM.CMTimeMakeWithSeconds(1.0 / self.fps, 1_000_000_000)
             ranges = list(capture_format.videoSupportedFrameRateRanges())
             if any(
                 float(item.minFrameRate()) <= self.fps <= float(item.maxFrameRate())

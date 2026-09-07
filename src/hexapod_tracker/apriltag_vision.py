@@ -186,6 +186,8 @@ class TemporalTagCornerTracker:
         self, image: np.ndarray, detections: Sequence[TagCorners]
     ) -> list[TagCorners]:
         gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if self._previous_gray is not None and self._previous_gray.shape != gray.shape:
+            self.reset()
         current = {
             item.tag_id: TagCorners(
                 item.tag_id,

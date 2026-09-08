@@ -259,6 +259,31 @@ single rate, and only computes a duration for a range that genuinely spans
 rates. The OV9281 modules never hit this because their durations happen to
 match the synthesised value; do not assume a new camera will.
 
+Pinning the rate also has to survive the session. `_select_format` picks the
+lowest advertised rate that still meets the request -- for an OV9281 at
+1280x720 that is the 10 fps `yuvs` mode rather than 420v at 120 fps -- and
+`_configure_device` sets the matching active format and frame duration before
+the session exists, because a Continuity Camera refuses
+`lockForConfiguration` once an `AVCaptureDeviceInput` owns it. A
+format-governing preset then overrides all of that as the session starts.
+
+`AVCaptureSessionPresetInputPriority` is the documented way to say "respect my
+active format", but this macOS rejects it outright
+(`AVCaptureSessionPresetInputPriority is not a supported preset`), so the
+session falls back to `Photo`, which re-imposes its own format. Re-applying
+after `addInput_` does not help either, since the preset is assigned after
+that. The active format therefore has to be re-applied **after
+`startRunning()`**, which is where `_start_session` now does it, best-effort.
+
+The cost of getting this wrong was not obvious from any single camera: each
+OV9281 ran at about 92 fps instead of 10, nine times the frames that anything
+downstream consumes, and the surplus starved the slower 12MP module into
+constant reconnects while looking like a bad camera or a bus limit. After the
+fix all four cameras hold zero reconnects, the OV9281s sit at ~10 fps, the
+12MP at ~25 fps, and the server's CPU dropped from about 760% to 535%. When a
+camera looks starved, check `measured_fps` against the rate that was actually
+requested before suspecting the hardware.
+
 #### The 12MP AF module
 
 `12MP AF Camera` (uniqueID `0x412000032e40362`) is colour, unlike the mono
@@ -270,24 +295,15 @@ changed. It also autofocuses, which is worth remembering before trusting it
 for metric work: a refocus changes intrinsics, so a saved profile is only
 valid while focus is fixed.
 
-Its delivery is less even than the OV9281s', and **it must occupy the first
-slot**. `main` starts workers in `--indices` order, 0.4 s apart, and by the
-time three OV9281s are running their capture loops at 70-90 fps the machine
-is busy enough that a camera starting last is starved: pinned to the last
-slot the 12MP managed 5 frames with 3 reconnects and a 19-second frame age,
-while the identical run with it pinned to slot 0 stayed live. This is about
-start order, not about pinning -- the OV9281s tolerate either position, so
-put the 12MP first and give it the lowest slot number.
+Its delivery was erratic until the capture-rate bug below was fixed: it took
+23 reconnects and delivered 1.4 fps while three OV9281s ran flat out. With the
+fix it is the steadiest camera in the rig -- about 25-26 fps at 1920x1080 with
+zero reconnects, in any slot. An earlier revision of this document claimed the
+12MP had to occupy the first `--indices` slot; that was a symptom. Start order
+only decided which camera lost the contention, and the note no longer applies.
 
-Even in the good position it is marginal: about 4-9 fps against a 10 fps
-target, a reconnect every minute or so, and occasional multi-second gaps
-(`last_frame_age_s` above 2). Tag detection is unaffected when a frame does
-arrive -- it reported 19 tags throughout. The three OV9281s meanwhile hold 0
-reconnects. Its frames come from a CPU-side MJPEG decode rather than a raw
-transfer, which is the likely reason it loses to the flat-out OV9281 loops;
-the untested lever is accepting `yuvs` in the native adapter so the OV9281s
-can use their 1280x800/10 fps mode instead of 100-120 fps that nothing
-consumes. Autofocus is the likely cause and has not been confirmed. Do not
+Autofocus remains a real caveat for metric work: a refocus changes intrinsics,
+so a saved profile is only valid while focus is fixed. Autofocus is the likely cause and has not been confirmed. Do not
 read a gap here as the bus problem described above; check
 `reconnects`/`last_frame_age_s` per camera before concluding anything. A
 reconnect can also silently renegotiate a smaller capture mode -- this camera

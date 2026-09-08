@@ -246,9 +246,13 @@ class AVFoundationYuvCapture:
             f"({requested}); available: {available or 'none'}"
         )
 
-    def _configure_device(self, device: Any, capture_format: Any) -> None:
+    def _configure_device(
+        self, device: Any, capture_format: Any, *, required: bool = True
+    ) -> bool:
         locked, error = device.lockForConfiguration_(None)
         if not locked:
+            if not required:
+                return False
             raise RuntimeError(f"could not configure camera: {error}")
         try:
             device.setActiveFormat_(capture_format)
@@ -267,6 +271,7 @@ class AVFoundationYuvCapture:
                 device.setActiveVideoMaxFrameDuration_(_frame_duration(selected, self.fps))
         finally:
             device.unlockForConfiguration()
+        return True
 
     def _start_session(self) -> None:
         devices = self._devices()
@@ -300,14 +305,6 @@ class AVFoundationYuvCapture:
         self._configure_device(device, capture_format)
 
         session = AV.AVCaptureSession.alloc().init()
-        # InputPriority preserves the exact active device format selected
-        # above.  Photo is the older fallback that keeps Continuity Camera's
-        # full 4:3 1920x1440 mode instead of silently cropping it to 16:9.
-        input_priority = getattr(AV, "AVCaptureSessionPresetInputPriority", None)
-        if input_priority and session.canSetSessionPreset_(input_priority):
-            session.setSessionPreset_(input_priority)
-        elif session.canSetSessionPreset_(AV.AVCaptureSessionPresetPhoto):
-            session.setSessionPreset_(AV.AVCaptureSessionPresetPhoto)
         camera_input, error = AV.AVCaptureDeviceInput \
             .deviceInputWithDevice_error_(device, None)
         if camera_input is None:
@@ -315,6 +312,20 @@ class AVFoundationYuvCapture:
         if not session.canAddInput_(camera_input):
             raise RuntimeError(f"camera {self.index} cannot be added to capture")
         session.addInput_(camera_input)
+
+        # InputPriority preserves the exact active device format selected
+        # above, but it is only settable once an input exists: asked before
+        # addInput_, canSetSessionPreset_ answers False and the Photo fallback
+        # silently overrides the active format.  That is how a 1280x800/10 fps
+        # yuvs selection turned back into 420v at 120 fps, so choose the preset
+        # here rather than earlier.  Photo remains the fallback because it
+        # keeps Continuity Camera's full 4:3 1920x1440 mode instead of
+        # cropping it to 16:9.
+        input_priority = getattr(AV, "AVCaptureSessionPresetInputPriority", None)
+        if input_priority and session.canSetSessionPreset_(input_priority):
+            session.setSessionPreset_(input_priority)
+        elif session.canSetSessionPreset_(AV.AVCaptureSessionPresetPhoto):
+            session.setSessionPreset_(AV.AVCaptureSessionPresetPhoto)
 
         output = AV.AVCaptureVideoDataOutput.alloc().init()
         output.setAlwaysDiscardsLateVideoFrames_(True)
@@ -340,6 +351,16 @@ class AVFoundationYuvCapture:
         session.startRunning()
         if not session.isRunning():
             raise RuntimeError(f"camera {self.index} did not start")
+
+        # A format-governing preset overrides the active format chosen before
+        # the session existed, and it does so as the session starts, so this
+        # re-apply has to come after startRunning rather than after addInput_.
+        # Without it an OV9281 asked for 1280x720/10 fps yuvs ran 420v at
+        # ~92 fps -- nine times the frames nothing downstream consumes, which
+        # starved a slower camera sharing the machine. Best-effort: a
+        # Continuity Camera can refuse lockForConfiguration once an input owns
+        # it, and the pre-session configuration already covers that case.
+        self._configure_device(device, capture_format, required=False)
 
     def _session_loop(self) -> None:
         try:

@@ -30,3 +30,27 @@ def test_selects_supported_rate_instead_of_first_format(monkeypatch, requested, 
     selected = camera._select_format(SimpleNamespace(formats=lambda: formats))
     assert selected.rate == expected
     assert camera.fps == expected
+
+
+def _range(min_rate, max_rate, duration):
+    return SimpleNamespace(
+        minFrameRate=lambda: min_rate,
+        maxFrameRate=lambda: max_rate,
+        maxFrameDuration=lambda: duration,
+    )
+
+
+def test_fixed_rate_range_reuses_the_devices_own_duration():
+    # The 12MP AF module advertises 30 fps as 1000000/30000030 and rejects a
+    # duration synthesised from the float rate.
+    advertised = ('device', 1000000, 30000030)
+    assert capture._frame_duration(_range(30.0, 30.0, advertised), 30.0) is advertised
+
+
+def test_spanning_rate_range_computes_a_duration(monkeypatch):
+    monkeypatch.setattr(capture, 'CM', SimpleNamespace(
+        CMTimeMakeWithSeconds=lambda seconds, scale: ('computed', seconds, scale),
+    ))
+    computed = capture._frame_duration(_range(5.0, 60.0, ('unused',)), 30.0)
+    assert computed[0] == 'computed'
+    assert computed[1] == pytest.approx(1.0 / 30.0)

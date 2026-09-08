@@ -46,6 +46,24 @@ def _dispatch_queue(label: bytes) -> Any:
     return objc.objc_object(c_void_p=pointer)
 
 
+def _frame_duration(frame_rate_range: Any, fps: float) -> Any:
+    """Pick the CMTime to pin a device to ``fps`` within one advertised range.
+
+    A duration synthesised from the float rate is not always accepted. The
+    12MP AF module advertises its fixed 30 fps as ``1000000/30000030``, and
+    rejects ``CMTimeMakeWithSeconds(1/30)`` with an
+    ``NSInvalidArgumentException`` because the rationals differ slightly. When
+    a range pins a single rate, reuse the range's own duration verbatim; only
+    a range that genuinely spans rates needs a computed duration.
+    """
+
+    if float(frame_rate_range.minFrameRate()) == float(
+        frame_rate_range.maxFrameRate()
+    ):
+        return frame_rate_range.maxFrameDuration()
+    return CM.CMTimeMakeWithSeconds(1.0 / fps, 1_000_000_000)
+
+
 if _frameworks_available():
     _CAPTURE_PROTOCOL = objc.protocolNamed(
         "AVCaptureVideoDataOutputSampleBufferDelegate"
@@ -221,14 +239,19 @@ class AVFoundationYuvCapture:
             raise RuntimeError(f"could not configure camera: {error}")
         try:
             device.setActiveFormat_(capture_format)
-            duration = CM.CMTimeMakeWithSeconds(1.0 / self.fps, 1_000_000_000)
-            ranges = list(capture_format.videoSupportedFrameRateRanges())
-            if any(
-                float(item.minFrameRate()) <= self.fps <= float(item.maxFrameRate())
-                for item in ranges
-            ):
-                device.setActiveVideoMinFrameDuration_(duration)
-                device.setActiveVideoMaxFrameDuration_(duration)
+            selected = next(
+                (
+                    item
+                    for item in capture_format.videoSupportedFrameRateRanges()
+                    if float(item.minFrameRate())
+                    <= self.fps
+                    <= float(item.maxFrameRate())
+                ),
+                None,
+            )
+            if selected is not None:
+                device.setActiveVideoMinFrameDuration_(_frame_duration(selected, self.fps))
+                device.setActiveVideoMaxFrameDuration_(_frame_duration(selected, self.fps))
         finally:
             device.unlockForConfiguration()
 

@@ -147,13 +147,14 @@ at 30 fps, but these numeric indices remain ephemeral.
 Measured 2026-09-08 on the lab Mac Studio (`Mac15,14`) with four Arducam
 OV9281 modules attached.
 
-These cameras advertise no compressed format. AVFoundation reports only
+The OV9281 modules advertise no compressed format. AVFoundation reports only
 uncompressed `420v` (320x240, 640x480, 800x600, 1280x720, and 1280x800 at
 100–120 fps) plus `yuvs` 1280x800 at 10 fps, and MJPG requests are refused
-(`mjpg_request_accepted: false`). Every stream therefore costs full raw bytes
-on its bus.
+(`mjpg_request_accepted: false`). Every OV9281 stream therefore costs full raw
+bytes on its bus. The 12MP AF module is different — see below.
 
-All four modules were plugged into a single hub, which put them on one USB 2.0
+The 2026-09-08 rig went through three cablings, and the difference is
+instructive. With all four modules on a single hub they shared one USB 2.0
 domain:
 
 ```text
@@ -162,16 +163,31 @@ AppleT8122USBXHCI@04000000
     Arducam @04110000 .. @04140000       Device Speed = 2
 ```
 
-On that one bus, two cameras streamed 1280x800 cleanly at the same time while a
-third opened but received no frames (`camera N produced no native 420v frame`).
-The host has six independent USB XHCI controllers (`@00000000`–`@05000000`)
-plus an ASMedia controller at `@08000000`, so the remedy for more simultaneous
-full-resolution feeds is physical: distribute the cameras across separate
-controllers by using different ports on the host, not more ports on one hub. A
-hub adds no bandwidth, and a USB 3 hub does not help either — these are USB 2.0
-devices, so behind any hub they share that hub's single USB 2.0 upstream.
-Confirm a split worked by checking that the `ioreg` `locationID` prefixes
-differ (for example `0x04…` versus `0x01…`).
+Two of them streamed 1280x800 cleanly while a third opened and received no
+frames. Moving two cameras onto their own controllers did not simply raise
+that count: the two direct cameras became flawless in every combination, while
+the pair still behind the hub got *worse* as unrelated streams started
+elsewhere. Both hub cameras failed once four ran at once, one delivering torn
+frames and the other an all-green invalid frame, and through `camera_server`
+(which adds tag detection and JPEG encoding per frame) even a single hub camera
+tore alongside two direct ones.
+
+Giving every camera its own host controller resolved it completely. The final
+working rig is four cameras on four controllers, all clean at once:
+
+```text
+@01000000  Arducam OV9281  @01100000
+@02000000  Arducam OV9281  @02100000
+@08000000  Arducam OV9281  @08400000   (ASMedia controller)
+@04000000  12MP AF Camera  @04120000   (alone behind USB2.0 Hub@04100000)
+```
+
+So the rule is **one camera per USB host controller**, not a byte budget per
+bus. A hub adds no bandwidth, and a USB 3 hub does not help these USB 2.0
+devices, which share that hub's single USB 2.0 upstream. The host has six
+USB XHCI controllers (`@00000000`–`@05000000`) plus the ASMedia one, so there
+is room to keep them separate. Confirm a split worked by checking that the
+`ioreg` `locationID` prefixes differ.
 
 Do not trade resolution for camera count. Dropping to 320x240 does let more
 cameras stream at once, but the operator has ruled that out: full-resolution
@@ -194,6 +210,40 @@ runtime each held one device, that feed came back sheared into displaced blocks
 and its tag count collapsed to 0–4, while the same camera alone was pristine.
 Rule out a second owner before blaming bandwidth; the stop-route caveat under
 the React UI section below explains the usual second owner.
+
+#### Frame durations must come from the device, not from the rate
+
+`_configure_device` pins capture rate by setting the active min/max frame
+duration. A duration synthesised from the requested rate is not always
+accepted: the 12MP AF module advertises its fixed 30 fps as the exact rational
+`1000000/30000030`, and rejects `CMTimeMakeWithSeconds(1/30)` with
+
+```text
+NSInvalidArgumentException -[AVCaptureDevice setActiveVideoMinFrameDuration:]
+Not supported - Supported ranges: (... 30.00 - 30.00 (1000000 / 30000030 ...))
+tried to set maxFrameRate to 30.000031
+```
+
+The camera then opens and delivers nothing. `_frame_duration` therefore reuses
+an advertised range's own `maxFrameDuration()` whenever that range pins a
+single rate, and only computes a duration for a range that genuinely spans
+rates. The OV9281 modules never hit this because their durations happen to
+match the synthesised value; do not assume a new camera will.
+
+#### The 12MP AF module
+
+`12MP AF Camera` (uniqueID `0x412000032e40362`) is colour, unlike the mono
+OV9281s, and advertises `420v` from 320x240 up to 4000x3000 at 15/10/5 fps --
+macOS decodes its MJPEG stream, which is how a 12MP sensor fits on a USB 2.0
+link. Because `camera_server` hardcodes the native `preferred_sizes`, it runs
+at 1920x1080; 2592x1944 and 4000x3000 are available but need that list
+changed. It also autofocuses, which is worth remembering before trusting it
+for metric work: a refocus changes intrinsics, so a saved profile is only
+valid while focus is fixed.
+
+One OV9281 is physically mounted rotated about 90 degrees. `--rotate-180` is
+the only rotation the server offers, so a 90-degree mount cannot be corrected
+in software -- rotate it in hardware, or add 90/270 support.
 
 Physically inverted cameras must be listed under `--rotate-180`. This rotates
 frames before tag detection, annotation, raw/annotated JPEG encoding, and pose
@@ -472,12 +522,15 @@ Important limitations in the current checked-in configs:
   prints in the garage are outside this map and must not be introduced without
   checking for collisions.
 - Camera indexes are not identities. iPhone Continuity Camera and reconnecting
-  USB devices can reorder indexes. AVFoundation's own device order was also
-  observed shifting between runs inside a single session, and
-  `camera_server`'s in-process order differed from a separate probe's order at
+  USB devices reorder indexes. Repeated probes agree while the attached set is
+  unchanged, but the order moved every time a device joined or left — a
+  Continuity Camera appearing was enough to renumber the USB cameras — and
+  `camera_server`'s in-process order has differed from a separate probe's at
   the same moment. Address a specific device by its AVFoundation `uniqueID`
   when identity matters, and otherwise confirm device names and live images
-  after every rescan/restart.
+  after every rescan/restart. Device *names* now distinguish the mono
+  `Arducam OV9281 USB Camera` from the colour `12MP AF Camera`, which makes
+  `/status.json` enough to spot a mis-selected slot.
 
 ## What the latest physical tests established
 

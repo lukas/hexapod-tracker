@@ -98,8 +98,19 @@ For that boot, native index 0 is `lukas's iPhone Camera`, while OpenCV indices
 different namespaces; never assume an index identifies the same device in
 both.
 
-`configs/camera_capture_profiles.json` is the source of truth. The
-`lab-tracking` profile captures the iPhone's full 1920x1440 420v/NV12 source at
+`configs/camera_capture_profiles.json` is the source of truth for a saved
+setup, but both checked-in profiles describe the September 3 layout and no
+longer match the hardware. As of 2026-09-08 there are four Arducam OV9281
+modules attached and no Continuity Camera slot in use, so `lab-tracking`
+(iPhone at index 0 plus two OV9281s) and `lab-usb-only` (two OV9281s at
+indexes 1 and 2) both mis-describe the rig. Do not pass `--capture-profile`
+until a profile is rewritten for the current cabling. The same staleness
+applies to `configs/camera_intrinsics.json`, whose index-keyed entries assume
+index 0 is the iPhone; supplying an empty `cameras` map is the safe way to run
+the planar-only pose API without silently attaching iPhone intrinsics to an
+Arducam.
+
+The `lab-tracking` profile captures the iPhone's full 1920x1440 420v/NV12 source at
 30 fps, processes a 1280x960 color preview, uses both OV9281 cameras at their
 full 1280x800/100 fps mode, publishes 10 fps, rotates USB indices 1 and 2, and
 loads `camera_intrinsics.json`. Full-resolution unscaled iPhone data remains
@@ -126,6 +137,59 @@ devices in different orders. Once capture is enabled, verify identity from the
 live images and capture modes. On the September 3 setup, the two OV9281 feeds
 reported 1280x800 at 100 fps, while the Studio Display feed reported 1280x720
 at 30 fps, but these numeric indices remain ephemeral.
+
+#### USB bus bandwidth, not camera count, sets the ceiling
+
+Measured 2026-09-08 on the lab Mac Studio (`Mac15,14`) with four Arducam
+OV9281 modules attached.
+
+These cameras advertise no compressed format. AVFoundation reports only
+uncompressed `420v` (320x240, 640x480, 800x600, 1280x720, and 1280x800 at
+100–120 fps) plus `yuvs` 1280x800 at 10 fps, and MJPG requests are refused
+(`mjpg_request_accepted: false`). Every stream therefore costs full raw bytes
+on its bus.
+
+All four modules were plugged into a single hub, which put them on one USB 2.0
+domain:
+
+```text
+AppleT8122USBXHCI@04000000
+  USB2.0 Hub@04100000                    480 Mbps, shared by all four
+    Arducam @04110000 .. @04140000       Device Speed = 2
+```
+
+On that one bus, two cameras streamed 1280x800 cleanly at the same time while a
+third opened but received no frames (`camera N produced no native 420v frame`).
+The host has six independent USB XHCI controllers (`@00000000`–`@05000000`)
+plus an ASMedia controller at `@08000000`, so the remedy for more simultaneous
+full-resolution feeds is physical: distribute the cameras across separate
+controllers by using different ports on the host, not more ports on one hub. A
+hub adds no bandwidth, and a USB 3 hub does not help either — these are USB 2.0
+devices, so behind any hub they share that hub's single USB 2.0 upstream.
+Confirm a split worked by checking that the `ioreg` `locationID` prefixes
+differ (for example `0x04…` versus `0x01…`).
+
+Do not trade resolution for camera count. Dropping to 320x240 does let more
+cameras stream at once, but the operator has ruled that out: full-resolution
+feeds are the requirement, because low-resolution AprilTag pose is not useful
+for this work.
+
+Prefer `--native-avfoundation` for these cameras. The native adapter delivered
+pristine 1280x800 frames with 14–17 tags detected, while the OpenCV
+`AVFOUNDATION` backend produced torn frames in every test here and silently
+ignores `--camera-mode` width and height. The OpenCV runs were confounded by
+the same-device contention described next, so that backend is not proven at
+fault; the native path is simply the one verified clean. Note that
+`camera_server.py` hardcodes the native `preferred_sizes` to
+`((1920, 1440), (1920, 1080), (1280, 720))`, so `--camera-mode` cannot select a
+native capture size.
+
+Torn, blocky frames usually mean two processes opened the same camera, not a
+saturated bus. When this server and the main repository's `:8898` vision
+runtime each held one device, that feed came back sheared into displaced blocks
+and its tag count collapsed to 0–4, while the same camera alone was pristine.
+Rule out a second owner before blaming bandwidth; the stop-route caveat under
+the React UI section below explains the usual second owner.
 
 Physically inverted cameras must be listed under `--rotate-180`. This rotates
 frames before tag detection, annotation, raw/annotated JPEG encoding, and pose
@@ -251,6 +315,18 @@ runtime reports `read_only: true`.
 Do not add robot-control HTTP calls here to make the standalone UI's survey
 buttons work. That would break the intentional safety and ownership boundary.
 
+`POST /api/vision/camera/stop` reports the camera as off without releasing the
+capture device. After a stop, `/api/vision/state` shows `enabled: false`,
+`status: "off"`, and `error: null`, yet the serving process can still hold the
+AVFoundation device. Another process that tries to open it then fails with
+`AVFoundationErrorDomain Code=-11817 "Cannot Use <device>"`, naming the holder
+in `AVErrorPIDKey`. Read that PID instead of assuming a hardware fault or a
+bandwidth limit; freeing the device requires restarting the holding process,
+because a second stop call will not do it. Restarting the main repository's
+`:8898` hub is not a free action — it is the robot-control surface, and
+`make web-8898-restart` relaunches from the working tree, which changes the
+served code. This route leaking its device is a bug worth fixing.
+
 ## Data flow
 
 ```text
@@ -307,8 +383,12 @@ Important limitations in the current checked-in configs:
   prints in the garage are outside this map and must not be introduced without
   checking for collisions.
 - Camera indexes are not identities. iPhone Continuity Camera and reconnecting
-  USB devices can reorder indexes. Confirm device names and live images after
-  every rescan/restart.
+  USB devices can reorder indexes. AVFoundation's own device order was also
+  observed shifting between runs inside a single session, and
+  `camera_server`'s in-process order differed from a separate probe's order at
+  the same moment. Address a specific device by its AVFoundation `uniqueID`
+  when identity matters, and otherwise confirm device names and live images
+  after every rescan/restart.
 
 ## What the latest physical tests established
 
@@ -381,15 +461,20 @@ not assume the present wheel has self-contained defaults.
 
 In roughly descending value:
 
-1. Calibrate each Arducam's intrinsics at every capture mode actually used.
-2. Establish a measured common world/extrinsic calibration if true multi-view
+1. Release the capture device in `POST /api/vision/camera/stop` so stopping a
+   camera actually frees it for other processes.
+2. Rewrite `camera_capture_profiles.json` and `camera_intrinsics.json` for the
+   current four-Arducam cabling once the cameras are distributed across USB
+   controllers, and key intrinsics by device `uniqueID` rather than by index.
+3. Calibrate each Arducam's intrinsics at every capture mode actually used.
+4. Establish a measured common world/extrinsic calibration if true multi-view
    3-D or stereo claims are needed.
-3. Replace the operator-described floor coordinates with a surveyed map.
-4. Measure tag-to-joint-axis mount transforms or add component-local markers
+5. Replace the operator-described floor coordinates with a surveyed map.
+6. Measure tag-to-joint-axis mount transforms or add component-local markers
    before trying to localize flex within an assembly.
-5. Add recorded-camera regression clips with expected tag/pose summaries. Keep
+7. Add recorded-camera regression clips with expected tag/pose summaries. Keep
    large media out of Git and document how to retrieve it.
-6. Make package resources wheel-safe if this project will be installed outside
+8. Make package resources wheel-safe if this project will be installed outside
    a source checkout.
 
 Before reporting a result, state separately: tag coverage, calibration quality,

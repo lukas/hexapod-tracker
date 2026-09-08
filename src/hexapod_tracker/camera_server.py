@@ -180,6 +180,7 @@ def placeholder_jpeg(index: int, message: str) -> bytes:
 class CameraStatus:
     index: int
     device_name: str | None = None
+    requested_stable_id: str | None = None
     backend: str = "AVFOUNDATION"
     state: str = "starting"
     requested_fourcc: str = "MJPG"
@@ -216,8 +217,10 @@ class CameraWorker:
         jpeg_quality: int,
         rotate_180: bool = False,
         native_avfoundation: bool = False,
+        stable_id: str | None = None,
     ):
         self.index = index
+        self.stable_id = stable_id
         self.width = width
         self.height = height
         self.fps = fps
@@ -231,19 +234,25 @@ class CameraWorker:
                 from .avfoundation_capture import AVFoundationYuvCapture
 
                 descriptors = AVFoundationYuvCapture.device_descriptors()
-                device_name = next(
-                    (
+                if stable_id:
+                    matches = (
+                        str(item["name"])
+                        for item in descriptors
+                        if str(item["stable_id"]) == stable_id
+                    )
+                else:
+                    matches = (
                         str(item["name"])
                         for item in descriptors
                         if int(item["index"]) == index
-                    ),
-                    None,
-                )
+                    )
+                device_name = next(matches, None)
             except Exception:
                 device_name = None
         self.status = CameraStatus(
             index=index,
             device_name=device_name,
+            requested_stable_id=stable_id,
             backend="AVFOUNDATION_NATIVE" if native_avfoundation else "AVFOUNDATION",
             requested_fourcc="420v" if native_avfoundation else "MJPG",
             requested_width=width,
@@ -371,6 +380,7 @@ class CameraWorker:
 
             cap = AVFoundationYuvCapture(
                 self.index,
+                stable_id=self.stable_id,
                 preferred_sizes=((1920, 1440), (1920, 1080), (1280, 720)),
                 fps=self.fps,
                 processing_width=self.width,
@@ -422,7 +432,16 @@ class CameraWorker:
                 if not ok or frame is None:
                     self.status.consecutive_failures += 1
                     if self.status.consecutive_failures >= 3:
-                        self._set_waiting("capture stalled; reconnecting", "stalled")
+                        # Keep the backend's own reason. A mistyped --device-id
+                        # otherwise reads as a flaky camera rather than a
+                        # camera that was never there.
+                        reason = getattr(cap, "last_error", None)
+                        self._set_waiting(
+                            f"capture stalled; reconnecting ({reason})"
+                            if reason
+                            else "capture stalled; reconnecting",
+                            "stalled",
+                        )
                         break
                     continue
 
@@ -1100,7 +1119,41 @@ def parse_args() -> argparse.Namespace:
         metavar="INDEX",
         help="capture selected AVFoundation device indices through native 420v/NV12",
     )
+    parser.add_argument(
+        "--device-id",
+        action="append",
+        default=[],
+        metavar="INDEX:STABLE_ID",
+        help=(
+            "pin one slot to a specific camera by its AVFoundation stable id "
+            "(uniqueID), so replugging cannot silently reassign it; may be "
+            "repeated. Requires that slot to be in --native-avfoundation. "
+            "Read the ids from /status.json or camera_descriptors()"
+        ),
+    )
     return parser.parse_args()
+
+
+def parse_device_ids(values: list[str]) -> dict[int, str]:
+    """Parse ``INDEX:STABLE_ID`` pairs pinning slots to specific cameras."""
+
+    pinned: dict[int, str] = {}
+    for value in values:
+        raw_index, separator, stable_id = value.partition(":")
+        if not separator or not stable_id.strip():
+            raise SystemExit(
+                f"--device-id expects INDEX:STABLE_ID, got {value!r}"
+            )
+        try:
+            index = int(raw_index)
+        except ValueError:
+            raise SystemExit(
+                f"--device-id expects an integer slot index, got {raw_index!r}"
+            ) from None
+        if index in pinned:
+            raise SystemExit(f"--device-id repeats slot {index}")
+        pinned[index] = stable_id.strip()
+    return pinned
 
 
 def parse_camera_modes(values: list[str]) -> dict[int, tuple[int, int, float]]:
@@ -1195,6 +1248,22 @@ def main() -> None:
         json.loads(args.robot_tag_layout.read_text()),
         json.loads(args.camera_calibration.read_text()),
     )
+    pinned_device_ids = parse_device_ids(args.device_id)
+    unknown_slots = sorted(set(pinned_device_ids) - set(args.indices))
+    if unknown_slots:
+        raise SystemExit(
+            f"--device-id names slots not in --indices: {unknown_slots}"
+        )
+    # Only the native adapter can address a device by identity; OpenCV's
+    # VideoCapture takes an index and nothing else, so silently ignoring a pin
+    # there would hand back whichever camera happened to occupy the slot.
+    unpinnable = sorted(set(pinned_device_ids) - set(args.native_avfoundation))
+    if unpinnable:
+        raise SystemExit(
+            "--device-id requires --native-avfoundation for the same slots; "
+            f"missing: {unpinnable}"
+        )
+
     workers = [
         CameraWorker(
             index,
@@ -1205,6 +1274,7 @@ def main() -> None:
             args.jpeg_quality,
             rotate_180=index in args.rotate_180,
             native_avfoundation=index in args.native_avfoundation,
+            stable_id=pinned_device_ids.get(index),
         )
         for index in args.indices
     ]

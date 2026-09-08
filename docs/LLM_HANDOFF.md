@@ -135,6 +135,35 @@ with cameras off, run this standalone `CameraHTTPServer` with dormant workers
 `/status.json` reports `frames: 0` for each camera. This is still the
 multi-camera server; the dormant requirement is not a reason to use `/vision`.
 
+#### Pin cameras by identity, not by index
+
+`--indices` numbers *slots*, which is what the URLs and `--rotate-180` refer
+to. Which physical camera lands in a slot is not stable: AVFoundation
+renumbers whenever any camera joins or leaves. Use `--device-id` to pin a slot
+to one device by its AVFoundation stable id (`uniqueID`):
+
+```sh
+OPENCV_AVFOUNDATION_SKIP_AUTH=1 uv run hexapod-camera-server \
+  --indices 0 1 2 3 --native-avfoundation 0 1 2 3 \
+  --device-id 0:0x11000000c456366 \
+  --device-id 1:0x21000000c456366 \
+  --device-id 2:0x84000000c456366 \
+  --device-id 3:0x412000032e40362 \
+  --host 127.0.0.1 --port 8766
+```
+
+Read the ids from `/status.json` (`device_stable_id` per camera, and
+`requested_stable_id` showing what a slot is pinned to) or from
+`AVFoundationYuvCapture.device_descriptors()`. Pinning only works with
+`--native-avfoundation`, because OpenCV's `VideoCapture` accepts an index and
+nothing else; asking for a pin without it is refused rather than silently
+ignored, as is naming a slot outside `--indices`. A pinned camera that is not
+attached reports `camera <id> is not attached (available: ...)` in the slot's
+`error`, so a typo does not masquerade as a flaky camera.
+
+Prefer this for any saved setup. A profile keyed by index goes stale the next
+time something is unplugged; one keyed by stable id does not.
+
 Do not use `AVFoundationYuvCapture.device_descriptors()` to infer the numeric
 indices accepted by OpenCV `VideoCapture`; the two APIs can enumerate the same
 devices in different orders. Once capture is enabled, verify identity from the
@@ -240,6 +269,16 @@ at 1920x1080; 2592x1944 and 4000x3000 are available but need that list
 changed. It also autofocuses, which is worth remembering before trusting it
 for metric work: a refocus changes intrinsics, so a saved profile is only
 valid while focus is fixed.
+
+Its delivery is less even than the OV9281s'. Measured alone at 1920x1080 it
+published about 9 fps against a 10 fps target, but with occasional
+multi-second gaps (`last_frame_age_s` above 2), and it wanted two reconnects
+at startup. Autofocus is the likely cause and has not been confirmed. Do not
+read a gap here as the bus problem described above; check
+`reconnects`/`last_frame_age_s` per camera before concluding anything. A
+reconnect can also silently renegotiate a smaller capture mode -- this camera
+came back at 1280x720 once after a mid-session replug -- so check `native_*`
+in `/status.json` after touching the cabling.
 
 One OV9281 is physically mounted rotated about 90 degrees. `--rotate-180` is
 the only rotation the server offers, so a 90-degree mount cannot be corrected
@@ -527,8 +566,9 @@ Important limitations in the current checked-in configs:
   Continuity Camera appearing was enough to renumber the USB cameras — and
   `camera_server`'s in-process order has differed from a separate probe's at
   the same moment. Address a specific device by its AVFoundation `uniqueID`
-  when identity matters, and otherwise confirm device names and live images
-  after every rescan/restart. Device *names* now distinguish the mono
+  when identity matters — `--device-id` does this for the multi-camera server
+  — and otherwise confirm device names and live images after every
+  rescan/restart. Device *names* also distinguish the mono
   `Arducam OV9281 USB Camera` from the colour `12MP AF Camera`, which makes
   `/status.json` enough to spot a mis-selected slot.
 

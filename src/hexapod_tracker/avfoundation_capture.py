@@ -46,6 +46,20 @@ def _dispatch_queue(label: bytes) -> Any:
     return objc.objc_object(c_void_p=pointer)
 
 
+def device_stable_id(device: Any) -> str:
+    """Return the identity to address ``device`` by across reconnects.
+
+    AVFoundation indexes renumber whenever a camera joins or leaves, so an
+    index is a slot, not an identity. ``uniqueID`` survives that; the name is
+    only a fallback for devices that do not report one.
+    """
+
+    unique_id = str(device.uniqueID() if hasattr(device, "uniqueID") else "")
+    if unique_id:
+        return unique_id
+    return f"avfoundation:{str(device.localizedName())}"
+
+
 def _frame_duration(frame_rate_range: Any, fps: float) -> Any:
     """Pick the CMTime to pin a device to ``fps`` within one advertised range.
 
@@ -93,6 +107,7 @@ class AVFoundationYuvCapture:
         self,
         index: int,
         *,
+        stable_id: str | None = None,
         preferred_sizes: Sequence[tuple[int, int]] = (
             (1920, 1440),
             (1920, 1080),
@@ -103,6 +118,7 @@ class AVFoundationYuvCapture:
         frame_timeout_s: float = 6.0,
     ) -> None:
         self.index = int(index)
+        self.stable_id = str(stable_id) if stable_id else None
         self.preferred_sizes = tuple(
             (int(width), int(height)) for width, height in preferred_sizes
         )
@@ -163,9 +179,6 @@ class AVFoundationYuvCapture:
         descriptors: list[dict[str, Any]] = []
         for index, device in enumerate(cls._devices()):
             name = str(device.localizedName())
-            unique_id = str(
-                device.uniqueID() if hasattr(device, "uniqueID") else ""
-            )
             device_type = str(
                 device.deviceType() if hasattr(device, "deviceType") else ""
             )
@@ -189,7 +202,7 @@ class AVFoundationYuvCapture:
             descriptors.append({
                 "index": index,
                 "name": name,
-                "stable_id": unique_id or f"avfoundation:{name}",
+                "stable_id": device_stable_id(device),
                 "kind": kind,
                 "available": connected and not suspended,
             })
@@ -257,15 +270,25 @@ class AVFoundationYuvCapture:
 
     def _start_session(self) -> None:
         devices = self._devices()
-        if self.index < 0 or self.index >= len(devices):
-            raise RuntimeError(
-                f"camera index {self.index} is unavailable ({len(devices)} found)"
+        if self.stable_id:
+            device = next(
+                (item for item in devices if device_stable_id(item) == self.stable_id),
+                None,
             )
-        device = devices[self.index]
+            if device is None:
+                available = ", ".join(device_stable_id(item) for item in devices)
+                raise RuntimeError(
+                    f"camera {self.stable_id} is not attached "
+                    f"(available: {available or 'none'})"
+                )
+        else:
+            if self.index < 0 or self.index >= len(devices):
+                raise RuntimeError(
+                    f"camera index {self.index} is unavailable ({len(devices)} found)"
+                )
+            device = devices[self.index]
         self.device_name = str(device.localizedName())
-        self.device_unique_id = str(
-            device.uniqueID() if hasattr(device, "uniqueID") else ""
-        ) or f"avfoundation:{self.device_name}"
+        self.device_unique_id = device_stable_id(device)
         capture_format = self._select_format(device)
 
         # Configure the device before it belongs to a capture session.  A

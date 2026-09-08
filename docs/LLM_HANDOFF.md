@@ -270,10 +270,24 @@ changed. It also autofocuses, which is worth remembering before trusting it
 for metric work: a refocus changes intrinsics, so a saved profile is only
 valid while focus is fixed.
 
-Its delivery is less even than the OV9281s'. Measured alone at 1920x1080 it
-published about 9 fps against a 10 fps target, but with occasional
-multi-second gaps (`last_frame_age_s` above 2), and it wanted two reconnects
-at startup. Autofocus is the likely cause and has not been confirmed. Do not
+Its delivery is less even than the OV9281s', and **it must occupy the first
+slot**. `main` starts workers in `--indices` order, 0.4 s apart, and by the
+time three OV9281s are running their capture loops at 70-90 fps the machine
+is busy enough that a camera starting last is starved: pinned to the last
+slot the 12MP managed 5 frames with 3 reconnects and a 19-second frame age,
+while the identical run with it pinned to slot 0 stayed live. This is about
+start order, not about pinning -- the OV9281s tolerate either position, so
+put the 12MP first and give it the lowest slot number.
+
+Even in the good position it is marginal: about 4-9 fps against a 10 fps
+target, a reconnect every minute or so, and occasional multi-second gaps
+(`last_frame_age_s` above 2). Tag detection is unaffected when a frame does
+arrive -- it reported 19 tags throughout. The three OV9281s meanwhile hold 0
+reconnects. Its frames come from a CPU-side MJPEG decode rather than a raw
+transfer, which is the likely reason it loses to the flat-out OV9281 loops;
+the untested lever is accepting `yuvs` in the native adapter so the OV9281s
+can use their 1280x800/10 fps mode instead of 100-120 fps that nothing
+consumes. Autofocus is the likely cause and has not been confirmed. Do not
 read a gap here as the bus problem described above; check
 `reconnects`/`last_frame_age_s` per camera before concluding anything. A
 reconnect can also silently renegotiate a smaller capture mode -- this camera

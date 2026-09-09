@@ -864,6 +864,15 @@ const polling = new Map();
 // requested once the last one arrives. Locally the widest is served straight
 // from cache; over a tunnel the page settles on whatever the link sustains.
 const PREVIEW_WIDTHS = [640, 480, 360, 256, 192];
+// Thresholds have to sit either side of one round trip, not either side of
+// zero. Through the relay a trivial request already costs ~300 ms, so an
+// earlier pair of 450 ms down / 120 ms up left a dead zone: a viewer that
+// stepped down during a slow patch could never climb back, and sat on a tiny
+// frame while being limited by latency rather than bytes. Widening the frame
+// is nearly free when the link is latency-bound, so recovery matters more
+// than caution.
+const FRAME_MS_TOO_SLOW = 700;
+const FRAME_MS_HAS_HEADROOM = 350;
 function pollPreview(img, index) {
   if (polling.get(index)) return;
   polling.set(index, true);
@@ -889,17 +898,18 @@ function pollPreview(img, index) {
       const median = [...recent].sort((a, b) => a - b)[Math.floor(recent.length / 2)];
       // A frame taking most of a second means the link cannot carry this
       // size; step down until it can, and back up if there is headroom.
-      if (recent.length >= 3 && median > 450 && step < PREVIEW_WIDTHS.length - 1) {
+      if (recent.length >= 3 && median > FRAME_MS_TOO_SLOW && step < PREVIEW_WIDTHS.length - 1) {
         step += 1;
         recent = [];
-      } else if (recent.length >= 5 && median < 120 && step > 0) {
+      } else if (recent.length >= 5 && median < FRAME_MS_HAS_HEADROOM && step > 0) {
         step -= 1;
         recent = [];
       }
       img.dataset.width = String(PREVIEW_WIDTHS[step]);
       img.dataset.frameMs = String(median);
-      // Yield briefly so a hidden tab or a busy main thread cannot spin.
-      setTimeout(tick, 60);
+      // Just enough to let the event loop breathe. A longer pause was a
+      // fifth of the whole budget on a link where a frame costs ~300 ms.
+      setTimeout(tick, 15);
     };
     img.onerror = () => {
       misses = Math.min(misses + 1, 10);

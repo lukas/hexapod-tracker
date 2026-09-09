@@ -163,3 +163,12 @@ def test_combined_pose_status_exposes_read_only_motors_and_calibrated_imu():
     assert state["imu"]["rear_pose_pitch_reference_deg"] == -25.9
     assert "body_pitch_target_deg" not in state["imu"]
     assert "body pitch target" not in INDEX_HTML
+
+
+def test_adaptive_thresholds_straddle_a_round_trip():
+    # Through the relay a trivial request costs ~300 ms, so both thresholds
+    # must sit above that or a viewer can never climb back to a larger frame.
+    assert "const FRAME_MS_TOO_SLOW = 700;" in INDEX_HTML
+    assert "const FRAME_MS_HAS_HEADROOM = 350;" in INDEX_HTML
+    assert "median > FRAME_MS_TOO_SLOW" in INDEX_HTML
+    assert "median < FRAME_MS_HAS_HEADROOM" in INDEX_HTML

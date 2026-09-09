@@ -399,8 +399,13 @@ annotation. Three things follow from that, and all three were bugs before:
    only requested once the last one arrives, *bytes per frame* sets the rate,
    not any interval. `/preview/<index>.jpg?w=<width>` re-encodes narrower on
    demand, and the page steps through 640/480/360/256/192 based on its own
-   measured per-frame time -- down when a frame takes over 450 ms, back up
-   under 120 ms -- and shows the width and timing it settled on in each
+   measured per-frame time -- down above 700 ms, back up below 350 ms. Those
+   thresholds must straddle one round trip, not zero: through the relay a
+   trivial request already costs ~300 ms, and an earlier 450/120 pair left a
+   dead zone where a viewer that stepped down during a slow patch could never
+   climb back, so it sat on a tiny frame while limited by latency rather than
+   bytes. Widening a frame is nearly free once the link is latency-bound. It
+   shows the width and timing it settled on in each
    camera's metadata. Measured payloads for one camera, and for a three-camera
    round: 55 KB / 165 KB at 640, 28.8 / 86 at 480, 17.1 / 51 at 360, 9.0 / 27
    at 256, 5.5 / 16 at 192. A viewer reporting under 1 fps at 640 was moving

@@ -355,6 +355,42 @@ snapshots. Never implement orientation as an `img` CSS transform: that makes
 labels upside down and leaves displayed coordinates inconsistent with pose
 coordinates.
 
+### The grid pulls frames; it does not subscribe to a stream
+
+This page exists so an operator can see what is going on, so latency beats
+annotation. Three things follow from that, and all three were bugs before:
+
+1. **Pull, do not push.** An MJPEG stream has no backpressure: the server
+   keeps writing and whatever the link cannot carry accumulates in kernel, SSH
+   and proxy buffers, so over a slow path the picture falls seconds or worse
+   behind and stays there. The grid now requests `/preview/<index>.jpg` and
+   asks for the next frame only once the previous one has decoded, which makes
+   the browser the pacer -- a slow link gets fewer frames, each of them
+   current, and no queue can form. The `/stream/*.mjpg` routes still exist and
+   remain fine locally.
+2. **Detection is off the frame path.** It costs ~31 ms per frame, delaying
+   every frame an operator sees and capping the rate. `--detect-interval-s`
+   (default 0.5) runs it on its own cadence; pose and tag coverage update at
+   that rate. Between passes no boxes are drawn, because boxes computed from
+   an older frame sit visibly wrong once anything moves, and the label reads
+   `tags (last pass)` so an operator does not read a gap as "this camera sees
+   nothing".
+3. **`/` must not be cacheable.** It previously sent no cache headers at all,
+   so the browser and the relay in front of it could serve an old build
+   indefinitely -- and an old build pointing at streams from a since-restarted
+   server shows a frozen frame, which looks like extreme lag rather than a
+   stale page. It now sends `no-store, must-revalidate`.
+
+The handler also speaks HTTP/1.1 rather than 1.0, so a polling page reuses one
+connection instead of paying a fresh TCP and TLS handshake per frame. The
+open-ended multipart route sets `Connection: close` because it has no
+Content-Length.
+
+When lag is reported, read the capture time burned into the frame against the
+page's browser clock before changing anything. Server-side numbers cannot see
+the path that actually causes it, and a frozen frame and a lagging frame look
+identical in a screenshot.
+
 **`localhost` is not interchangeable with `127.0.0.1` here.** macOS resolves
 `localhost` to `::1` as well as `127.0.0.1`, and Safari tries the IPv6 answer.
 The default `--host 127.0.0.1` listener is IPv4-only, so `http://[::1]:8766`

@@ -162,6 +162,7 @@ def annotate_tag_corners(
     detections: dict[int, np.ndarray],
     camera_index: int,
     captured_clock: str | None = None,
+    label_tag_ids: list[int] | None = None,
 ) -> tuple[np.ndarray, list[int]]:
     """Annotate an already-detected set so pose and display use identical corners.
 
@@ -177,7 +178,17 @@ def annotate_tag_corners(
         corners = [detections[tag_id][None, :, :] for tag_id in tag_ids]
         ids = np.asarray(tag_ids, dtype=np.int32).reshape(-1, 1)
         cv2.aruco.drawDetectedMarkers(frame, corners, ids, (0, 255, 0))
-    label = f"camera {camera_index} | tags: {tag_ids if tag_ids else 'none'}"
+    # On a frame between detection passes there are no boxes to draw, but
+    # saying "tags: none" would read as "this camera sees nothing". Report the
+    # last pass's list and label it as not belonging to this frame.
+    if label_tag_ids is not None and not tag_ids:
+        shown = label_tag_ids
+        label = (
+            f"camera {camera_index} | tags (last pass): "
+            f"{shown if shown else 'none'}"
+        )
+    else:
+        label = f"camera {camera_index} | tags: {tag_ids if tag_ids else 'none'}"
     bar_height = 42 if captured_clock is None else 68
     cv2.rectangle(frame, (0, 0), (min(frame.shape[1], 760), bar_height), (0, 0, 0), -1)
     cv2.putText(
@@ -338,6 +349,7 @@ class CameraWorker:
         native_avfoundation: bool = False,
         stable_id: str | None = None,
         preview_max_width: int = 0,
+        detect_interval_s: float = 0.0,
     ):
         self.index = index
         self.stable_id = stable_id
@@ -345,6 +357,14 @@ class CameraWorker:
         # Detection runs on the full-resolution luma plane and pose uses
         # full-frame corners, so shrinking this costs no accuracy.
         self.preview_max_width = int(preview_max_width)
+        # Detection costs about 31 ms per frame -- roughly nine tenths of the
+        # per-frame work -- and running it inline delays every frame an
+        # operator sees by that much while capping the rate. This page exists
+        # for situational awareness, so detection runs on its own cadence and
+        # the picture never waits for it.
+        self.detect_interval_s = float(detect_interval_s)
+        self._last_detect_at: float | None = None
+        self._last_detect_corners: dict[int, np.ndarray] = {}
         self.width = width
         self.height = height
         self.fps = fps
@@ -597,11 +617,32 @@ class CameraWorker:
                 raw_ok, raw_encoded = cv2.imencode(
                     ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95]
                 )
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                tag_corners = detect_tag_corners(gray, detector)
-                annotated, tag_ids = annotate_tag_corners(
-                    frame, tag_corners, self.index, capture_clock_text()
+                due = (
+                    self.detect_interval_s <= 0.0
+                    or self._last_detect_at is None
+                    or now - self._last_detect_at >= self.detect_interval_s
                 )
+                if due:
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    tag_corners = detect_tag_corners(gray, detector)
+                    self._last_detect_corners = tag_corners
+                    self._last_detect_at = now
+                else:
+                    # Reuse the last detection only to keep the reported tag
+                    # list steady. It is deliberately not drawn: overlaying
+                    # boxes computed from an older frame puts them visibly
+                    # wrong as soon as anything moves, which is worse than no
+                    # boxes because it looks authoritative.
+                    tag_corners = self._last_detect_corners
+                annotated, tag_ids = annotate_tag_corners(
+                    frame,
+                    tag_corners if due else {},
+                    self.index,
+                    capture_clock_text(),
+                    label_tag_ids=sorted(tag_corners),
+                )
+                if not due:
+                    tag_ids = sorted(tag_corners)
                 # Downscale after annotating so the overlay keeps its
                 # proportions, and only for the browser copy: /snapshot and
                 # /raw-stream stay at full processing resolution.
@@ -738,9 +779,40 @@ document.querySelectorAll('nav button').forEach(button => {
   });
 });
 let serverRunId = null;
-function attachStream(img, index) {
-  // The query string only forces a new connection; the server ignores it.
-  img.src = `/stream/${index}.mjpg?run=${Date.now()}`;
+const polling = new Map();
+// Pull one frame at a time instead of subscribing to a push stream.
+//
+// An MJPEG stream has no backpressure: the server keeps writing frames and
+// any it cannot deliver immediately sit in kernel, SSH and proxy buffers, so
+// over a link slower than the stream the picture falls seconds behind and
+// stays there. Requesting the next frame only after the previous one has
+// decoded makes the browser the pacer -- a slow link simply gets fewer
+// frames, each of them current, and no queue can form. /preview also serves
+// the small already-encoded frame, so this costs the server nothing extra.
+function pollPreview(img, index) {
+  if (polling.get(index)) return;
+  polling.set(index, true);
+  let misses = 0;
+  const tick = () => {
+    if (!document.getElementById(`camera-${index}`)) {
+      polling.delete(index);
+      return;
+    }
+    const probe = new Image();
+    probe.onload = () => {
+      misses = 0;
+      // Assigning an already-decoded image swaps it without a blank frame.
+      img.src = probe.src;
+      // Yield briefly so a hidden tab or a busy main thread cannot spin.
+      setTimeout(tick, 60);
+    };
+    probe.onerror = () => {
+      misses = Math.min(misses + 1, 10);
+      setTimeout(tick, 500 * misses);
+    };
+    probe.src = `/preview/${index}.jpg?t=${Date.now()}`;
+  };
+  tick();
 }
 function ensureCameraCard(c) {
   let article = document.getElementById(`camera-${c.index}`);
@@ -750,24 +822,7 @@ function ensureCameraCard(c) {
     article.dataset.index = String(c.index);
     const img = document.createElement('img');
     img.alt = `Camera ${c.index} — AprilTag annotated`;
-    // A dropped multipart stream stays frozen on its last frame forever
-    // unless something re-requests it.
-    // Back off rather than reconnecting on a fixed timer: a browser allows
-    // only a handful of connections per host, and each camera holds one open
-    // for as long as it streams, so a tight retry loop can starve the page
-    // itself of connections.
-    img.addEventListener('error', () => {
-      if (img.dataset.retrying === '1') return;
-      img.dataset.retrying = '1';
-      const attempt = Number(img.dataset.attempts || '0') + 1;
-      img.dataset.attempts = String(attempt);
-      setTimeout(() => {
-        img.dataset.retrying = '0';
-        attachStream(img, c.index);
-      }, Math.min(1500 * attempt, 10000));
-    });
-    img.addEventListener('load', () => { img.dataset.attempts = '0'; });
-    attachStream(img, c.index);
+    pollPreview(img, c.index);
     const meta = document.createElement('div');
     meta.className = 'meta';
     meta.id = `meta-${c.index}`;
@@ -901,11 +956,15 @@ async function update() {
       // The server restarted, so every open stream belongs to a dead process.
       // Dropping the cards makes ensureCameraCard rebuild them.
       document.querySelectorAll('#cameras article').forEach(a => a.remove());
+      polling.clear();
     }
     serverRunId = status.server_run_id;
     const active = new Set(status.cameras.map(c => String(c.index)));
     document.querySelectorAll('#cameras article').forEach(article => {
-      if (!active.has(article.dataset.index)) article.remove();
+      if (!active.has(article.dataset.index)) {
+        polling.delete(Number(article.dataset.index));
+        article.remove();
+      }
     });
     let live = 0, tags = 0;
     for (const c of status.cameras) {
@@ -951,6 +1010,13 @@ update(); setInterval(update, 1000); setInterval(updatePose, 1000);
 
 
 class StreamHandler(BaseHTTPRequestHandler):
+    # HTTP/1.0 closes the socket after every response, so a page that polls
+    # frames pays a fresh connection -- and a TLS handshake through the
+    # relay -- for each one. Every response below sets Content-Length, and
+    # the open-ended multipart stream marks itself Connection: close, which
+    # is what 1.1 needs to keep sockets reusable safely.
+    protocol_version = "HTTP/1.1"
+
     server: "CameraHTTPServer"
 
     def log_message(self, format: str, *args: object) -> None:
@@ -1008,6 +1074,12 @@ class StreamHandler(BaseHTTPRequestHandler):
             body = INDEX_HTML.encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            # Without this the page is cacheable indefinitely by the browser
+            # and by the relay in front of it, so an operator can keep being
+            # served a build whose camera code has since been replaced -- and
+            # a stale page pointing at streams from a dead server shows frozen
+            # frames that look like extreme lag.
+            self.send_header("Cache-Control", "no-store, must-revalidate")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -1175,6 +1247,11 @@ class StreamHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        # Open-ended body with no length: the socket cannot be reused, so say
+        # so rather than leaving an HTTP/1.1 client waiting for a next
+        # response on it.
+        self.send_header("Connection", "close")
+        self.close_connection = True
         self.end_headers()
         previous_frames = -1
         try:
@@ -1459,6 +1536,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--detect-interval-s",
+        type=float,
+        default=0.5,
+        help=(
+            "seconds between AprilTag detection passes (0 detects on every "
+            "published frame). Detection is ~31 ms per frame and running it "
+            "inline delays what the operator sees; pose and tag coverage "
+            "update at this rate instead"
+        ),
+    )
+    parser.add_argument(
         "--preview-max-width",
         type=int,
         default=640,
@@ -1699,6 +1787,7 @@ def main() -> None:
             native_avfoundation=index in args.native_avfoundation,
             stable_id=pinned_device_ids.get(index),
             preview_max_width=args.preview_max_width,
+            detect_interval_s=args.detect_interval_s,
         )
         for index in args.indices
     ]

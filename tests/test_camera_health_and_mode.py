@@ -138,3 +138,23 @@ def test_frame_age_is_none_before_the_first_frame_and_measured_after():
     worker._last_frame_at = time.monotonic() - 0.5
     age = worker.frame_age_s()
     assert age is not None and 0.4 < age < 0.7
+
+
+def test_label_reports_the_last_pass_when_no_boxes_are_drawn():
+    import numpy as np
+
+    frame = np.zeros((200, 800, 3), dtype=np.uint8)
+    # No detections for this frame, but the camera did see tags recently.
+    annotated, tag_ids = cs.annotate_tag_corners(
+        frame, {}, 1, "12:00:00.000", label_tag_ids=[3, 9]
+    )
+    assert tag_ids == []
+    assert annotated is frame
+
+
+def test_label_without_a_last_pass_still_says_none():
+    import numpy as np
+
+    frame = np.zeros((200, 800, 3), dtype=np.uint8)
+    _annotated, tag_ids = cs.annotate_tag_corners(frame, {}, 1, None)
+    assert tag_ids == []

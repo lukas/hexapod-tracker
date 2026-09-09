@@ -35,24 +35,34 @@ def test_detector_labels_generated_tag36h11():
     assert annotated.shape == frame.shape
 
 
-def test_camera_grid_uses_annotated_stream_for_every_index():
-    # The grid shows the annotated stream, never the raw one, and treats every
-    # index alike. The URL is built in attachStream so a dead connection can be
-    # re-requested.
-    assert "img.src = `/stream/${index}.mjpg?run=${Date.now()}`;" in INDEX_HTML
-    assert "attachStream(img, c.index);" in INDEX_HTML
+def test_camera_grid_pulls_annotated_frames_for_every_index():
+    # The grid pulls one current frame at a time rather than subscribing to a
+    # push stream, which is what keeps latency bounded over a slow link. It
+    # shows the annotated preview, never the raw frame, and treats every index
+    # alike.
+    assert "probe.src = `/preview/${index}.jpg?t=${Date.now()}`;" in INDEX_HTML
+    assert "pollPreview(img, c.index);" in INDEX_HTML
+    # No push-stream URLs at all; the routes still exist for local use.
+    assert "/stream/" not in INDEX_HTML
     assert "raw-stream" not in INDEX_HTML
     assert "c.index >= 2" not in INDEX_HTML
     assert "transform:rotate(180deg)" not in INDEX_HTML
 
 
-def test_camera_grid_recovers_streams_after_a_server_restart():
-    # A multipart stream from a dead process stays frozen on its last frame
-    # while JSON polling keeps looking healthy, so the page has to notice a
-    # new server run and re-attach, and retry a stream that errors out.
+def test_camera_grid_requests_the_next_frame_only_after_the_last_one_decodes():
+    # Chaining on load is what makes the browser the pacer: a slow link gets
+    # fewer frames, each current, and no queue can form.
+    assert "probe.onload" in INDEX_HTML
+    assert "setTimeout(tick" in INDEX_HTML
+    assert "probe.onerror" in INDEX_HTML
+
+
+def test_camera_grid_drops_pollers_when_cards_go_away():
+    # A poller outliving its card would keep requesting frames forever, and a
+    # server restart invalidates every card at once.
     assert "server_run_id" in INDEX_HTML
-    assert "document.querySelectorAll('#cameras article').forEach(a => a.remove());" in INDEX_HTML
-    assert "img.addEventListener('error'" in INDEX_HTML
+    assert "polling.clear();" in INDEX_HTML
+    assert "polling.delete(Number(article.dataset.index));" in INDEX_HTML
 
 
 def test_saved_lab_capture_profile_keeps_modes_and_calibration_together():

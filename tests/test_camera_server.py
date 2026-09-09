@@ -41,7 +41,9 @@ def test_camera_grid_pulls_annotated_frames_for_every_index():
     # shows the annotated preview, never the raw frame, and treats every index
     # alike.
     assert "probe.src = `/preview/${index}.jpg?t=${Date.now()}`;" in INDEX_HTML
-    assert "pollPreview(img, c.index);" in INDEX_HTML
+    # Started after the card is in the document, and on every update so a
+    # stopped poller is revived.
+    assert "pollPreview(article.querySelector('img'), c.index);" in INDEX_HTML
     # No push-stream URLs at all; the routes still exist for local use.
     assert "/stream/" not in INDEX_HTML
     assert "raw-stream" not in INDEX_HTML

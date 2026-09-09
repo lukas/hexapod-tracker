@@ -355,6 +355,27 @@ snapshots. Never implement orientation as an `img` CSS transform: that makes
 labels upside down and leaves displayed coordinates inconsistent with pose
 coordinates.
 
+### Verify the camera page in a browser, not with curl
+
+`make check` and the Python tests can only assert that strings appear in
+`INDEX_HTML`. That cannot catch the failures that actually reach an operator,
+and several have shipped: a poller started before its card was in the
+document, so it stopped on its first tick and every feed rendered black; a
+page frozen on frames from a restarted server; images that load but stay
+blank. In each case `curl` reported healthy cameras and correct JPEGs, because
+the server was fine and the page was not.
+
+```sh
+npx playwright install chromium          # once
+node tools/check_camera_page.mjs         # against http://127.0.0.1:8766/
+```
+
+It renders the page, waits for the poller, and fails if a card is missing, an
+image never loaded, or a feed is uniformly dark -- plus any uncaught JS error
+or failed request. It is not in `make check` because it needs a ~95 MB browser
+download, but run it after touching `INDEX_HTML` or the frame routes. Verifying
+those changes with `curl` alone is how the black-feed regression escaped.
+
 ### The grid pulls frames; it does not subscribe to a stream
 
 This page exists so an operator can see what is going on, so latency beats

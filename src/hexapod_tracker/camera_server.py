@@ -822,13 +822,17 @@ function ensureCameraCard(c) {
     article.dataset.index = String(c.index);
     const img = document.createElement('img');
     img.alt = `Camera ${c.index} — AprilTag annotated`;
-    pollPreview(img, c.index);
     const meta = document.createElement('div');
     meta.className = 'meta';
     meta.id = `meta-${c.index}`;
     article.append(img, meta);
     document.getElementById('cameras').append(article);
   }
+  // Start polling only once the card is in the document: the poller stops
+  // itself when its card disappears, so starting it beforehand made it exit
+  // on its first tick and never come back. Called on every update so a
+  // stopped poller is revived; pollPreview itself ignores duplicates.
+  pollPreview(article.querySelector('img'), c.index);
   return article.querySelector('.meta');
 }
 function describe(c) {

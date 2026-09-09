@@ -40,7 +40,7 @@ def test_camera_grid_pulls_annotated_frames_for_every_index():
     # push stream, which is what keeps latency bounded over a slow link. It
     # shows the annotated preview, never the raw frame, and treats every index
     # alike.
-    assert "probe.src = `/preview/${index}.jpg?w=${PREVIEW_WIDTHS[step]}&t=${Date.now()}`;" in INDEX_HTML
+    assert "img.src = `/preview/${index}.jpg?w=${PREVIEW_WIDTHS[step]}&t=${Date.now()}`;" in INDEX_HTML
     # Started after the card is in the document, and on every update so a
     # stopped poller is revived.
     assert "pollPreview(article.querySelector('img'), c.index);" in INDEX_HTML
@@ -54,9 +54,13 @@ def test_camera_grid_pulls_annotated_frames_for_every_index():
 def test_camera_grid_requests_the_next_frame_only_after_the_last_one_decodes():
     # Chaining on load is what makes the browser the pacer: a slow link gets
     # fewer frames, each current, and no queue can form.
-    assert "probe.onload" in INDEX_HTML
+    assert "img.onload" in INDEX_HTML
     assert "setTimeout(tick" in INDEX_HTML
-    assert "probe.onerror" in INDEX_HTML
+    assert "img.onerror" in INDEX_HTML
+    # Loaded straight into the visible element: fetching into a second Image
+    # and assigning its src depends on cache reuse a no-store response may
+    # refuse, and a refusal re-fetches and blanks the picture every frame.
+    assert "new Image()" not in INDEX_HTML
 
 
 def test_camera_grid_drops_pollers_when_cards_go_away():

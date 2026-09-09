@@ -875,12 +875,15 @@ function pollPreview(img, index) {
       polling.delete(index);
       return;
     }
-    const probe = new Image();
+    // Load straight into the visible element. Fetching into a second Image
+    // and then assigning its src relies on the browser reusing that response
+    // from cache, which a no-store response is entitled to refuse -- and a
+    // browser that refuses re-fetches, blanking the picture on every frame.
+    // A plain src change keeps the previous frame on screen until the new one
+    // decodes, and is one request per frame everywhere.
     const started = Date.now();
-    probe.onload = () => {
+    img.onload = () => {
       misses = 0;
-      // Assigning an already-decoded image swaps it without a blank frame.
-      img.src = probe.src;
       recent.push(Date.now() - started);
       if (recent.length > 5) recent.shift();
       const median = [...recent].sort((a, b) => a - b)[Math.floor(recent.length / 2)];
@@ -898,11 +901,11 @@ function pollPreview(img, index) {
       // Yield briefly so a hidden tab or a busy main thread cannot spin.
       setTimeout(tick, 60);
     };
-    probe.onerror = () => {
+    img.onerror = () => {
       misses = Math.min(misses + 1, 10);
       setTimeout(tick, 500 * misses);
     };
-    probe.src = `/preview/${index}.jpg?w=${PREVIEW_WIDTHS[step]}&t=${Date.now()}`;
+    img.src = `/preview/${index}.jpg?w=${PREVIEW_WIDTHS[step]}&t=${Date.now()}`;
   };
   tick();
 }
@@ -1261,7 +1264,11 @@ class StreamHandler(BaseHTTPRequestHandler):
             age = worker.frame_age_s()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "image/jpeg")
-            self.send_header("Cache-Control", "no-store")
+            # Every URL carries a unique timestamp, so a short cache lifetime
+            # cannot serve a stale frame -- and it means a browser that
+            # re-requests the same frame gets it for free rather than paying
+            # another round trip on a slow link.
+            self.send_header("Cache-Control", "private, max-age=5")
             # Freshness travels with the image, so a caller can tell a live
             # frame from a stalled camera without a second request.
             self.send_header("X-Frame-Age-Seconds", "unknown" if age is None else f"{age:.3f}")

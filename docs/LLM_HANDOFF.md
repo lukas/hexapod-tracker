@@ -381,6 +381,20 @@ those changes with `curl` alone is how the black-feed regression escaped.
 This page exists so an operator can see what is going on, so latency beats
 annotation. Three things follow from that, and all three were bugs before:
 
+0. **Load frames straight into the visible `<img>`.** Fetching into a second
+   `Image` and then assigning its `src` looks like it avoids a blank frame,
+   but it only works if the browser reuses that response from cache -- which
+   a `no-store` response is entitled to refuse. A browser that refuses
+   re-fetches every frame, blanking the picture each time, which reads as the
+   page reloading every couple of seconds and doubles the traffic on the link
+   that was already the bottleneck. Chromium happened to reuse it and showed
+   no duplicate requests, so this is not reproducible locally. A plain `src`
+   change keeps the previous frame on screen until the new one decodes and is
+   one request per frame in every browser. `/preview` is now
+   `private, max-age=5` rather than `no-store`; every URL carries a unique
+   timestamp so a short lifetime cannot serve a stale frame, and a repeat
+   request costs nothing instead of another round trip.
+
 0. **The viewer negotiates its own frame size.** Because the next frame is
    only requested once the last one arrives, *bytes per frame* sets the rate,
    not any interval. `/preview/<index>.jpg?w=<width>` re-encodes narrower on

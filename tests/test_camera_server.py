@@ -36,9 +36,23 @@ def test_detector_labels_generated_tag36h11():
 
 
 def test_camera_grid_uses_annotated_stream_for_every_index():
-    assert "img.src = `/stream/${c.index}.mjpg`;" in INDEX_HTML
+    # The grid shows the annotated stream, never the raw one, and treats every
+    # index alike. The URL is built in attachStream so a dead connection can be
+    # re-requested.
+    assert "img.src = `/stream/${index}.mjpg?run=${Date.now()}`;" in INDEX_HTML
+    assert "attachStream(img, c.index);" in INDEX_HTML
+    assert "raw-stream" not in INDEX_HTML
     assert "c.index >= 2" not in INDEX_HTML
     assert "transform:rotate(180deg)" not in INDEX_HTML
+
+
+def test_camera_grid_recovers_streams_after_a_server_restart():
+    # A multipart stream from a dead process stays frozen on its last frame
+    # while JSON polling keeps looking healthy, so the page has to notice a
+    # new server run and re-attach, and retry a stream that errors out.
+    assert "server_run_id" in INDEX_HTML
+    assert "document.querySelectorAll('#cameras article').forEach(a => a.remove());" in INDEX_HTML
+    assert "img.addEventListener('error'" in INDEX_HTML
 
 
 def test_saved_lab_capture_profile_keeps_modes_and_calibration_together():

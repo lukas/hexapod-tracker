@@ -21,6 +21,7 @@ import json
 import signal
 import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,6 +46,13 @@ from .planar_pose import PlanarPoseEstimator
 # of blindness on that view.
 # SURVEY permits coverage-driven arbitration, which is only safe while the
 # scene is static.
+# Identifies this process run. A browser holds one long-lived
+# multipart/x-mixed-replace connection per camera, and those never recover on
+# their own once the server they came from is gone: the page keeps showing the
+# last frame it received while the JSON polling continues to look healthy.
+# Publishing an id lets the page notice a restart and re-attach.
+SERVER_RUN_ID = uuid.uuid4().hex
+
 OBSERVATION_MODE_TRACK = "track"
 OBSERVATION_MODE_SURVEY = "survey"
 OBSERVATION_MODES = (OBSERVATION_MODE_TRACK, OBSERVATION_MODE_SURVEY)
@@ -610,6 +618,11 @@ document.querySelectorAll('nav button').forEach(button => {
     if (activeTab === 'pose') updatePose();
   });
 });
+let serverRunId = null;
+function attachStream(img, index) {
+  // The query string only forces a new connection; the server ignores it.
+  img.src = `/stream/${index}.mjpg?run=${Date.now()}`;
+}
 function ensureCameraCard(c) {
   let article = document.getElementById(`camera-${c.index}`);
   if (!article) {
@@ -617,8 +630,18 @@ function ensureCameraCard(c) {
     article.id = `camera-${c.index}`;
     article.dataset.index = String(c.index);
     const img = document.createElement('img');
-    img.src = `/stream/${c.index}.mjpg`;
     img.alt = `Camera ${c.index} — AprilTag annotated`;
+    // A dropped multipart stream stays frozen on its last frame forever
+    // unless something re-requests it.
+    img.addEventListener('error', () => {
+      if (img.dataset.retrying === '1') return;
+      img.dataset.retrying = '1';
+      setTimeout(() => {
+        img.dataset.retrying = '0';
+        attachStream(img, c.index);
+      }, 1500);
+    });
+    attachStream(img, c.index);
     const meta = document.createElement('div');
     meta.className = 'meta';
     meta.id = `meta-${c.index}`;
@@ -748,6 +771,12 @@ async function update() {
       fetch('/status.json', {cache:'no-store'}).then(r => r.json()),
       fetch('/calibration-status.json', {cache:'no-store'}).then(r => r.json()),
     ]);
+    if (serverRunId !== null && status.server_run_id !== serverRunId) {
+      // The server restarted, so every open stream belongs to a dead process.
+      // Dropping the cards makes ensureCameraCard rebuild them.
+      document.querySelectorAll('#cameras article').forEach(a => a.remove());
+    }
+    serverRunId = status.server_run_id;
     const active = new Set(status.cameras.map(c => String(c.index)));
     document.querySelectorAll('#cameras article').forEach(article => {
       if (!active.has(article.dataset.index)) article.remove();
@@ -847,6 +876,7 @@ class StreamHandler(BaseHTTPRequestHandler):
             return
         if path == "/status.json":
             self._send_json({
+                "server_run_id": SERVER_RUN_ID,
                 "observation_mode": self.server.observation_mode,
                 "cameras": [worker.snapshot()[1] for worker in self.server.workers],
             })

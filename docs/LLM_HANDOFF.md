@@ -355,6 +355,29 @@ snapshots. Never implement orientation as an `img` CSS transform: that makes
 labels upside down and leaves displayed coordinates inconsistent with pose
 coordinates.
 
+### Run the camera server as a launchd job
+
+```sh
+tools/camera_service.sh start      # installs the plist and starts it
+tools/camera_service.sh status     # launchctl state plus per-camera health
+tools/camera_service.sh cameras    # what a start would pin, without starting
+tools/camera_service.sh restart|stop|logs|foreground
+```
+
+**Cameras are discovered and pinned at every start, not stored in the plist.**
+A `uniqueID` embeds the USB location, so it changes whenever a camera moves
+ports; a recorded list goes stale the moment the rig is re-cabled, which is
+exactly how Robot Lab ended up configured for four cameras that no longer
+existed. Discovery keeps external USB cameras and drops the Studio Display
+and any Continuity iPhone, which are not part of the rig.
+
+`CAMERA_SERVICE_EXCLUDE=<uniqueID,...>` skips a camera. That matters when two
+share a USB controller: only one can stream, and the loser retries forever and
+takes bandwidth from the cameras that work. Measured with a doomed fourth
+camera included, the two 12MP modules fell to 13.6 and 13.9 fps; excluding it
+returned them to 28.1 and 29.3. Other knobs: `CAMERA_SERVICE_PORT`, `_HOST`,
+`_ROBOT_URL`, `_EXTRA_ARGS`, `_LABEL`.
+
 ### Verify the camera page in a browser, not with curl
 
 `make check` and the Python tests can only assert that strings appear in
@@ -691,11 +714,24 @@ package and captures in-process, subclassing it as `BoundCapture` to pin the
 `AVCaptureDevice` object rather than an index. Three consequences that are easy
 to miss:
 
-1. **Only one process can hold a camera.** Robot Lab checks
-   `isInUseByAnotherApplication()` and raises `_CaptureInUse`, so it refuses
-   cleanly instead of corrupting a stream -- but with `camera_server` holding
-   every camera, Robot Lab gets none of them. Any arbitration has to release
-   devices, not merely stop drawing them.
+1. **They contend, though not for exclusivity.** macOS does allow a second
+   process to open the same camera -- verified directly against a camera this
+   server was holding. What cannot be shared is the device's *active format*,
+   which is global: two processes wanting different sizes or rates fight over
+   it and the last `setActiveFormat_` wins. Together with the one-camera-per-
+   controller USB ceiling and the CPU each stream costs, a consumer that
+   needs its own capture settings needs this server to let go. Robot Lab also
+   checks `isInUseByAnotherApplication()` and raises `_CaptureInUse`, so it
+   may refuse rather than fight.
+
+   `POST /api/cameras/<stable-id>/lease` with `{"holder", "ttl_s"}` does the
+   letting go: the worker releases the device, the response reports whether
+   the capture loop confirmed it, and the camera reads `state: released` with
+   `leased_to` set while staying *healthy*, because a leased camera is doing
+   what was asked of it. `DELETE` the same path returns it. Leases expire on
+   their own and a sweeper reclaims them, because a consumer that dies
+   mid-run would otherwise leave its camera released and unwatched
+   indefinitely. `GET /api/cameras/leases` lists them.
 2. **It bundles its own copy of this package**, installed into its venv
    (`hexapod_tracker` 0.1.0). That copy predates `_frame_duration`,
    `device_stable_id` and the re-apply of the active format after

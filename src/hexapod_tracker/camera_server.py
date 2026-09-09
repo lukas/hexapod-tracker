@@ -454,6 +454,8 @@ class CameraWorker:
         self._last_frame_at: float | None = None
         self._condition = threading.Condition()
         self._stop = threading.Event()
+        self._paused = threading.Event()
+        self._released_device = threading.Event()
         self._thread = threading.Thread(target=self._run, name=f"camera-{index}", daemon=True)
 
     def start(self) -> None:
@@ -461,6 +463,39 @@ class CameraWorker:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def pause_capture(self) -> None:
+        """Release the device so another process can open it.
+
+        macOS does let a second process open the same camera -- verified, so
+        this is not about exclusivity. What it cannot share is the device's
+        *active format*: that is global, so two processes wanting different
+        sizes or rates fight over it and the last setActiveFormat_ wins.
+        Add the USB bandwidth ceiling of one camera per controller and the
+        CPU each stream costs, and a consumer that wants its own capture
+        settings needs this server to actually let go.
+
+        Merely stopping publication is not enough -- the :8898 runtime's
+        camera/stop reported a camera off while still owning the device. This
+        waits for the capture loop to call release() before reporting
+        success, and says so if it does not.
+        """
+
+        self._paused.set()
+        with self._condition:
+            self._condition.notify_all()
+
+    def resume_capture(self) -> None:
+        self._paused.clear()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
+
+    def wait_until_released(self, timeout: float = 5.0) -> bool:
+        """Block until the capture loop has let the device go."""
+
+        return self._released_device.wait(timeout)
         self._thread.join(timeout=3.0)
 
     def preview_jpeg(self, width: int | None = None) -> bytes:
@@ -653,6 +688,15 @@ class CameraWorker:
     def _run(self) -> None:
         detector = make_tag_detector()
         while not self._stop.is_set():
+            if self._paused.is_set():
+                # No device is held here, so say so and idle. Reported as a
+                # state rather than an error: a leased camera is working as
+                # intended, not broken.
+                self._released_device.set()
+                self._set_waiting("released to another process", "released")
+                self._stop.wait(0.25)
+                continue
+            self._released_device.clear()
             cap = self._open()
             if cap is None:
                 self._stop.wait(1.0)
@@ -663,6 +707,8 @@ class CameraWorker:
             sample_frames = 0
             next_output_at = 0.0
             while not self._stop.is_set():
+                if self._paused.is_set():
+                    break
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     self.status.consecutive_failures += 1
@@ -1157,28 +1203,80 @@ class StreamHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
-        path = urlparse(self.path).path
-        if path != "/api/mode":
-            self.send_error(HTTPStatus.NOT_FOUND, "unknown endpoint")
-            return
-        # Deliberately the only writable route on this server. It selects how
-        # to observe and can never move a robot, which matters because :8766
-        # is reverse-tunnelled off this machine.
+    def _read_json_body(self) -> dict[str, Any] | None:
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
         raw = self.rfile.read(length) if length > 0 else b""
         try:
-            requested = json.loads(raw or b"{}")
+            parsed = json.loads(raw or b"{}")
         except json.JSONDecodeError as error:
             self._send_json(
                 {"ok": False, "error": f"invalid JSON: {error}"},
                 HTTPStatus.BAD_REQUEST,
             )
+            return None
+        if not isinstance(parsed, dict):
+            self._send_json(
+                {"ok": False, "error": "expected a JSON object"},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return None
+        return parsed
+
+    def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
+        path = urlparse(self.path).path
+        if not (path.startswith("/api/cameras/") and path.endswith("/lease")):
+            self.send_error(HTTPStatus.NOT_FOUND, "unknown endpoint")
             return
-        if not isinstance(requested, dict) or "mode" not in requested:
+        stable_id = path[len("/api/cameras/"):-len("/lease")]
+        try:
+            existed = self.server.revoke_lease(stable_id)
+        except KeyError:
+            self._send_json(
+                {"ok": False, "error": f"no camera {stable_id!r}"},
+                HTTPStatus.NOT_FOUND,
+            )
+            return
+        self._send_json({"ok": True, "was_leased": existed})
+
+    def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+        path = urlparse(self.path).path
+        if path.startswith("/api/cameras/") and path.endswith("/lease"):
+            stable_id = path[len("/api/cameras/"):-len("/lease")]
+            requested = self._read_json_body()
+            if requested is None:
+                return
+            holder = str(requested.get("holder") or "unnamed").strip() or "unnamed"
+            try:
+                ttl = float(requested.get("ttl_s", 120))
+            except (TypeError, ValueError):
+                self._send_json(
+                    {"ok": False, "error": "ttl_s must be a number"},
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                lease = self.server.grant_lease(stable_id, holder, ttl)
+            except KeyError:
+                self._send_json(
+                    {"ok": False, "error": f"no camera {stable_id!r}"},
+                    HTTPStatus.NOT_FOUND,
+                )
+                return
+            self._send_json({"ok": True, "lease": lease})
+            return
+        if path != "/api/mode":
+            self.send_error(HTTPStatus.NOT_FOUND, "unknown endpoint")
+            return
+        # Deliberately the only writable route on this server. It selects how
+        # to observe and can never move a robot, which matters because :8766
+        # is reverse-tunnelled off this machine.
+        requested = self._read_json_body()
+        if requested is None:
+            return
+        if "mode" not in requested:
             self._send_json(
                 {"ok": False, "error": 'expected a JSON object with a "mode" key'},
                 HTTPStatus.BAD_REQUEST,
@@ -1228,6 +1326,10 @@ class StreamHandler(BaseHTTPRequestHandler):
             return
         if path in ("/api/cameras/health", "/api/cameras/health.json"):
             self._send_json(self.server.camera_health())
+            return
+        if path == "/api/cameras/leases":
+            self.server.expire_leases()
+            self._send_json({"leases": self.server.leases()})
             return
         if path == "/api/mode":
             self._send_json({
@@ -1455,6 +1557,8 @@ class CameraHTTPServer(ThreadingHTTPServer):
         # camera off.
         self._observation_mode = OBSERVATION_MODE_TRACK
         self._observation_mode_lock = threading.Lock()
+        self._leases: dict[str, dict[str, Any]] = {}
+        self._lease_lock = threading.Lock()
         super().__init__(address, StreamHandler)
 
     def server_bind(self) -> None:
@@ -1480,6 +1584,73 @@ class CameraHTTPServer(ThreadingHTTPServer):
         with self._observation_mode_lock:
             self._observation_mode = candidate
         return candidate
+
+    def _worker_for_stable_id(self, stable_id: str) -> CameraWorker | None:
+        for worker in self.workers:
+            if worker.stable_id == stable_id or str(worker.index) == stable_id:
+                return worker
+        return None
+
+    def grant_lease(
+        self, stable_id: str, holder: str, ttl_s: float
+    ) -> dict[str, Any]:
+        """Hand a camera to another process for a bounded time.
+
+        Bounded because a consumer that crashes mid-run would otherwise strand
+        the camera released forever, with nothing watching and no error
+        anywhere. The lease expires on its own and the sweeper takes the
+        device back.
+        """
+
+        worker = self._worker_for_stable_id(stable_id)
+        if worker is None:
+            raise KeyError(stable_id)
+        ttl = max(1.0, min(3600.0, float(ttl_s)))
+        worker.pause_capture()
+        released = worker.wait_until_released(timeout=6.0)
+        with self._lease_lock:
+            self._leases[stable_id] = {
+                "stable_id": stable_id,
+                "slot": worker.index,
+                "holder": str(holder),
+                "granted_unix": round(time.time(), 3),
+                "expires_unix": round(time.time() + ttl, 3),
+                "ttl_s": ttl,
+            }
+            lease = dict(self._leases[stable_id])
+        if not released:
+            # Report it rather than pretend: the caller must not assume the
+            # device is free just because the request returned.
+            lease["warning"] = "capture loop did not confirm release within 6s"
+        lease["released"] = released
+        return lease
+
+    def revoke_lease(self, stable_id: str) -> bool:
+        worker = self._worker_for_stable_id(stable_id)
+        if worker is None:
+            raise KeyError(stable_id)
+        with self._lease_lock:
+            existed = self._leases.pop(stable_id, None) is not None
+        worker.resume_capture()
+        return existed
+
+    def leases(self) -> list[dict[str, Any]]:
+        with self._lease_lock:
+            return [dict(value) for value in self._leases.values()]
+
+    def expire_leases(self) -> list[str]:
+        now = time.time()
+        expired: list[str] = []
+        with self._lease_lock:
+            for stable_id, lease in list(self._leases.items()):
+                if lease["expires_unix"] <= now:
+                    self._leases.pop(stable_id, None)
+                    expired.append(stable_id)
+        for stable_id in expired:
+            worker = self._worker_for_stable_id(stable_id)
+            if worker is not None:
+                worker.resume_capture()
+        return expired
 
     def camera_health(self) -> dict[str, Any]:
         """Report which cameras are working and what each one adds.
@@ -1516,10 +1687,24 @@ class CameraHTTPServer(ThreadingHTTPServer):
                 reasons.append(f"last frame {age:.1f}s old")
             if item.get("error"):
                 reasons.append(str(item["error"]))
+            leased = next(
+                (
+                    lease
+                    for lease in self.leases()
+                    if lease["slot"] == slot
+                ),
+                None,
+            )
+            if leased is not None:
+                # A leased camera is doing what was asked of it, so it is not
+                # unhealthy and its reasons are not faults.
+                reasons = []
             cameras.append({
                 "slot": slot,
                 "device_name": item.get("device_name"),
                 "stable_id": item.get("requested_stable_id"),
+                "leased_to": None if leased is None else leased["holder"],
+                "lease_expires_unix": None if leased is None else leased["expires_unix"],
                 "healthy": not reasons,
                 "reasons": reasons,
                 "state": item.get("state"),
@@ -1997,6 +2182,18 @@ def main() -> None:
         floor_anchor_ids=floor_map.get("active_anchor_ids") or (),
     )
     stop_requested = threading.Event()
+
+    def sweep_leases() -> None:
+        # A lease has to expire without anyone asking, or a consumer that dies
+        # mid-run leaves its camera released and unwatched indefinitely.
+        while not stop_requested.wait(2.0):
+            try:
+                for stable_id in server.expire_leases():
+                    print(f"lease expired, reclaiming camera {stable_id}", flush=True)
+            except Exception as error:  # a sweeper must never kill the server
+                print(f"lease sweep failed: {error}", flush=True)
+
+    threading.Thread(target=sweep_leases, name="lease-sweeper", daemon=True).start()
 
     def request_stop(_signum: int, _frame: object) -> None:
         if not stop_requested.is_set():

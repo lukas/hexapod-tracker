@@ -17,6 +17,8 @@ def _server(snapshots, anchors=(100, 101, 102)):
     import threading
 
     server._observation_mode_lock = threading.Lock()
+    server._leases = {}
+    server._lease_lock = threading.Lock()
     return server
 
 
@@ -268,3 +270,41 @@ def test_captured_unix_is_none_before_the_first_frame():
 
     worker._last_frame_unix = 1788985741.5
     assert worker.captured_unix() == 1788985741.5
+
+
+def test_leased_camera_is_reported_as_healthy_not_broken():
+    # A released camera has no frames and a "released" state, which would
+    # otherwise read as a fault; the lease is what makes it intentional.
+    server = _server([_snapshot(0, state='released', frames=0,
+                                last_frame_age_s=None, tag_ids=[])])
+    server._leases = {
+        '0x1': {'stable_id': '0x1', 'slot': 0, 'holder': 'robotlab',
+                'granted_unix': 1.0, 'expires_unix': 9e18, 'ttl_s': 60.0}
+    }
+    health = server.camera_health()
+    camera = health['cameras'][0]
+    assert camera['leased_to'] == 'robotlab'
+    assert camera['healthy'] is True
+    assert camera['reasons'] == []
+    assert health['cameras_healthy'] == 1
+
+
+def test_expire_leases_returns_the_camera():
+    import threading
+
+    resumed = []
+    server = _server([_snapshot(0)])
+    server.workers = [SimpleNamespace(
+        index=0, stable_id='0x1',
+        snapshot=lambda: (None, _snapshot(0)),
+        resume_capture=lambda: resumed.append('0x1'),
+    )]
+    server._leases = {
+        '0x1': {'stable_id': '0x1', 'slot': 0, 'holder': 'gone',
+                'granted_unix': 1.0, 'expires_unix': 2.0, 'ttl_s': 1.0}
+    }
+    assert server.expire_leases() == ['0x1']
+    assert resumed == ['0x1']
+    assert server.leases() == []
+    # Idempotent: nothing left to expire.
+    assert server.expire_leases() == []

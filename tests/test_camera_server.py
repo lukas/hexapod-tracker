@@ -172,3 +172,16 @@ def test_adaptive_thresholds_straddle_a_round_trip():
     assert "const FRAME_MS_HAS_HEADROOM = 350;" in INDEX_HTML
     assert "median > FRAME_MS_TOO_SLOW" in INDEX_HTML
     assert "median < FRAME_MS_HAS_HEADROOM" in INDEX_HTML
+
+
+def test_status_payload_carries_the_server_run_id():
+    # Removing an unrelated constant once took SERVER_RUN_ID with it, and every
+    # unit test still passed because none of them requests /status.json. The
+    # page polls it every second, so the server 500ed on a live browser only.
+    from hexapod_tracker.camera_server import SERVER_RUN_ID
+
+    assert isinstance(SERVER_RUN_ID, str) and len(SERVER_RUN_ID) == 32
+    assert '"server_run_id": SERVER_RUN_ID,' in \
+        __import__("pathlib").Path(
+            __import__("hexapod_tracker.camera_server", fromlist=["__file__"]).__file__
+        ).read_text()

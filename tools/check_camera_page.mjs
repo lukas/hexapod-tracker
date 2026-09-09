@@ -20,7 +20,9 @@ page.on('console', m => m.type() === 'error' && problems.push(`console: ${m.text
 page.on('requestfailed', r => problems.push(`request failed: ${r.url()}`));
 
 await page.goto(url, { waitUntil: 'domcontentloaded' });
-await page.waitForTimeout(6000);
+// A camera can take several seconds to deliver its first frame after a
+// restart, and a short window reports that as a dead feed.
+await page.waitForTimeout(12000);
 
 const feeds = await page.evaluate(() => {
   const drawn = [...document.querySelectorAll('#cameras article img')].map(img => {

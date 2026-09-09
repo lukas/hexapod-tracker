@@ -40,6 +40,14 @@ from .paths import CONFIG_DIR
 from .planar_pose import PlanarPoseEstimator
 
 
+# Identifies this process run. A browser holds one long-lived connection per
+# camera, and those never recover on their own once the server they came from
+# is gone: the page keeps showing the last frame it received while the JSON
+# polling continues to look healthy. Publishing an id lets the page notice a
+# restart and re-attach.
+SERVER_RUN_ID = uuid.uuid4().hex
+
+
 # A feed older than this is reported unhealthy. Well above the ~0.1 s seen on
 # a healthy 10 fps camera, and well below the multi-second gaps that marked
 # the starved ones.

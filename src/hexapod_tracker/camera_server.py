@@ -29,7 +29,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Sequence
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import cv2
 import numpy as np
@@ -444,6 +444,9 @@ class CameraWorker:
             rotation_degrees=180 if rotate_180 else 0,
         )
         self._jpeg = placeholder_jpeg(index, "waiting for frames")
+        # Kept un-encoded so a client on a slow link can ask for a narrower
+        # frame without the server guessing a single size for everyone.
+        self._preview_frame: np.ndarray | None = None
         self._raw_jpeg = self._jpeg
         self._native_planes: tuple[np.ndarray, np.ndarray] | None = None
         self._tag_corners: dict[int, np.ndarray] = {}
@@ -458,6 +461,26 @@ class CameraWorker:
     def stop(self) -> None:
         self._stop.set()
         self._thread.join(timeout=3.0)
+
+    def preview_jpeg(self, width: int | None = None) -> bytes:
+        """Return the current preview, optionally re-encoded narrower.
+
+        Bytes per frame, not frame rate, is what limits a viewer on a
+        constrained link: the page requests the next frame only once the last
+        one arrives, so halving the width roughly doubles the achievable rate.
+        Serving the cached encode unchanged keeps the common case free.
+        """
+
+        with self._condition:
+            cached = self._jpeg
+            frame = None if self._preview_frame is None else self._preview_frame
+        if width is None or frame is None or width >= frame.shape[1]:
+            return cached
+        smaller = downscale_preview(frame, width)
+        ok, encoded = cv2.imencode(
+            ".jpg", smaller, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
+        )
+        return encoded.tobytes() if ok else cached
 
     def frame_age_s(self) -> float | None:
         """Seconds since the last delivered frame, or None before the first.
@@ -709,6 +732,8 @@ class CameraWorker:
                         tag_corners,
                         native_planes,
                     )
+                    with self._condition:
+                        self._preview_frame = preview
 
                 elapsed = time.monotonic() - sample_started
                 if elapsed >= 2.0:
@@ -834,20 +859,42 @@ const polling = new Map();
 // decoded makes the browser the pacer -- a slow link simply gets fewer
 // frames, each of them current, and no queue can form. /preview also serves
 // the small already-encoded frame, so this costs the server nothing extra.
+// Widths to fall back through. Bytes per frame, not the poll interval, is
+// what limits a viewer on a constrained link, because the next frame is only
+// requested once the last one arrives. Locally the widest is served straight
+// from cache; over a tunnel the page settles on whatever the link sustains.
+const PREVIEW_WIDTHS = [640, 480, 360, 256, 192];
 function pollPreview(img, index) {
   if (polling.get(index)) return;
   polling.set(index, true);
   let misses = 0;
+  let step = 0;
+  let recent = [];
   const tick = () => {
     if (!document.getElementById(`camera-${index}`)) {
       polling.delete(index);
       return;
     }
     const probe = new Image();
+    const started = Date.now();
     probe.onload = () => {
       misses = 0;
       // Assigning an already-decoded image swaps it without a blank frame.
       img.src = probe.src;
+      recent.push(Date.now() - started);
+      if (recent.length > 5) recent.shift();
+      const median = [...recent].sort((a, b) => a - b)[Math.floor(recent.length / 2)];
+      // A frame taking most of a second means the link cannot carry this
+      // size; step down until it can, and back up if there is headroom.
+      if (recent.length >= 3 && median > 450 && step < PREVIEW_WIDTHS.length - 1) {
+        step += 1;
+        recent = [];
+      } else if (recent.length >= 5 && median < 120 && step > 0) {
+        step -= 1;
+        recent = [];
+      }
+      img.dataset.width = String(PREVIEW_WIDTHS[step]);
+      img.dataset.frameMs = String(median);
       // Yield briefly so a hidden tab or a busy main thread cannot spin.
       setTimeout(tick, 60);
     };
@@ -855,7 +902,7 @@ function pollPreview(img, index) {
       misses = Math.min(misses + 1, 10);
       setTimeout(tick, 500 * misses);
     };
-    probe.src = `/preview/${index}.jpg?t=${Date.now()}`;
+    probe.src = `/preview/${index}.jpg?w=${PREVIEW_WIDTHS[step]}&t=${Date.now()}`;
   };
   tick();
 }
@@ -896,6 +943,11 @@ function describe(c) {
     `${input}${nativeCapture}\n` +
     `mode: ${c.reported_width}x${c.reported_height}; rotation: ${c.rotation_degrees || 0}°; camera measured ${c.measured_fps} fps; browser ${c.output_fps} fps\n` +
     `frames: ${c.frames}; age: ${c.last_frame_age_s ?? 'n/a'} s; reconnects: ${c.reconnects}\n` +
+    (() => {
+      const img = document.querySelector(`#camera-${c.index} img`);
+      if (!img || !img.dataset.width) return '';
+      return `viewer: ${img.dataset.width}px wide, ${img.dataset.frameMs} ms per frame\n`;
+    })() +
     `tag36h11 IDs: ${c.tag_ids.length ? c.tag_ids.join(', ') : 'none'}${nativeExport}${c.error ? `\n${c.error}` : ''}`;
 }
 function degrees(value) {
@@ -1199,7 +1251,13 @@ class StreamHandler(BaseHTTPRequestHandler):
             except (ValueError, StopIteration):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            body, frames = worker.wait_for_frame(-1)
+            requested = parse_qs(urlparse(self.path).query).get("w", [None])[0]
+            try:
+                width = max(120, min(4096, int(requested))) if requested else None
+            except ValueError:
+                width = None
+            body = worker.preview_jpeg(width)
+            frames = worker.status.frames
             age = worker.frame_age_s()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "image/jpeg")

@@ -381,6 +381,19 @@ those changes with `curl` alone is how the black-feed regression escaped.
 This page exists so an operator can see what is going on, so latency beats
 annotation. Three things follow from that, and all three were bugs before:
 
+0. **The viewer negotiates its own frame size.** Because the next frame is
+   only requested once the last one arrives, *bytes per frame* sets the rate,
+   not any interval. `/preview/<index>.jpg?w=<width>` re-encodes narrower on
+   demand, and the page steps through 640/480/360/256/192 based on its own
+   measured per-frame time -- down when a frame takes over 450 ms, back up
+   under 120 ms -- and shows the width and timing it settled on in each
+   camera's metadata. Measured payloads for one camera, and for a three-camera
+   round: 55 KB / 165 KB at 640, 28.8 / 86 at 480, 17.1 / 51 at 360, 9.0 / 27
+   at 256, 5.5 / 16 at 192. A viewer reporting under 1 fps at 640 was moving
+   about 165 KB per round through a tunnel; at 256 that is 27 KB. Locally the
+   widest is served from cache and a real browser sustains 16 fps on all three
+   feeds, so an adaptive step-down only engages where it is needed.
+
 1. **Pull, do not push.** An MJPEG stream has no backpressure: the server
    keeps writing and whatever the link cannot carry accumulates in kernel, SSH
    and proxy buffers, so over a slow path the picture falls seconds or worse

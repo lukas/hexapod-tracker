@@ -40,7 +40,7 @@ def test_camera_grid_pulls_annotated_frames_for_every_index():
     # push stream, which is what keeps latency bounded over a slow link. It
     # shows the annotated preview, never the raw frame, and treats every index
     # alike.
-    assert "probe.src = `/preview/${index}.jpg?t=${Date.now()}`;" in INDEX_HTML
+    assert "probe.src = `/preview/${index}.jpg?w=${PREVIEW_WIDTHS[step]}&t=${Date.now()}`;" in INDEX_HTML
     # Started after the card is in the document, and on every update so a
     # stopped poller is revived.
     assert "pollPreview(article.querySelector('img'), c.index);" in INDEX_HTML

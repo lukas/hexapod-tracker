@@ -221,3 +221,38 @@ def test_parse_capture_sizes_rejects_malformed_values(value):
 def test_parse_capture_sizes_rejects_a_repeated_slot():
     with pytest.raises(SystemExit):
         cs.parse_capture_sizes(['1:640x480', '1:800x600'])
+
+
+def test_preview_jpeg_serves_the_cache_unless_a_smaller_width_is_asked_for():
+    import threading
+    import cv2
+    import numpy as np
+
+    worker = cs.CameraWorker.__new__(cs.CameraWorker)
+    worker._condition = threading.Condition()
+    worker.jpeg_quality = 70
+    frame = np.full((360, 640, 3), 128, dtype=np.uint8)
+    worker._preview_frame = frame
+    worker._jpeg = b'cached-bytes'
+
+    # No width, or one no smaller than the frame: the cached encode is reused.
+    assert worker.preview_jpeg(None) == b'cached-bytes'
+    assert worker.preview_jpeg(640) == b'cached-bytes'
+    assert worker.preview_jpeg(900) == b'cached-bytes'
+
+    # Narrower: re-encoded at that width.
+    smaller = worker.preview_jpeg(256)
+    assert smaller != b'cached-bytes'
+    decoded = cv2.imdecode(np.frombuffer(smaller, np.uint8), cv2.IMREAD_COLOR)
+    assert decoded.shape[1] == 256
+
+
+def test_preview_jpeg_falls_back_when_no_frame_has_arrived():
+    import threading
+
+    worker = cs.CameraWorker.__new__(cs.CameraWorker)
+    worker._condition = threading.Condition()
+    worker.jpeg_quality = 70
+    worker._preview_frame = None
+    worker._jpeg = b'placeholder'
+    assert worker.preview_jpeg(256) == b'placeholder'

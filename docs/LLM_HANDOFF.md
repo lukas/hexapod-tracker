@@ -654,6 +654,46 @@ Robot Lab using only its first-class versioned calibration endpoint.
 Do not add robot-control HTTP calls here to make the standalone UI's survey
 buttons work. That would break the intentional safety and ownership boundary.
 
+### Robot Lab opens cameras itself, and that competes with this server
+
+Checked 2026-09-09. Robot Lab does **not** consume `:8766` over HTTP. Its
+`hexapod_lab/observation_cameras.py` imports `AVFoundationYuvCapture` from this
+package and captures in-process, subclassing it as `BoundCapture` to pin the
+`AVCaptureDevice` object rather than an index. Three consequences that are easy
+to miss:
+
+1. **Only one process can hold a camera.** Robot Lab checks
+   `isInUseByAnotherApplication()` and raises `_CaptureInUse`, so it refuses
+   cleanly instead of corrupting a stream -- but with `camera_server` holding
+   every camera, Robot Lab gets none of them. Any arbitration has to release
+   devices, not merely stop drawing them.
+2. **It bundles its own copy of this package**, installed into its venv
+   (`hexapod_tracker` 0.1.0). That copy predates `_frame_duration`,
+   `device_stable_id` and the re-apply of the active format after
+   `startRunning()`. So on the 12MP modules it will hit the
+   `NSInvalidArgumentException` on `setActiveVideoMinFrameDuration_` and
+   deliver no frames at all, and on the OV9281s it will run at ~92 fps rather
+   than 10. Updating this package's source does nothing for Robot Lab until
+   that venv is reinstalled.
+3. **Its `_select_format` is written for the OV9281**, hardcoding a `yuvs`
+   1280x800 10 fps mode and prepending `(1280, 800)` to the preferred sizes.
+   The 12MP module has no 1280x800 mode at all, so it falls through to
+   1920x1080 -- which is workable, but nothing about that path has been
+   exercised.
+
+**`uniqueID` embeds the USB location, so it changes when a camera moves
+ports.** Robot Lab's stored configuration still names
+`0x41100000c456366`, `0x41200000c456366`, `0x41300000c456366` and
+`0x41400000c456366` -- the original four Arducams on the retired
+`USB2.0 Hub@04100000`. None of those devices exists now; the same modules
+report `0x11000000c456366` and `0x84000000c456366` after being moved. Robot
+Lab would fail every one with "Configured camera is unavailable or
+ambiguous". This applies equally to `--device-id` here: pinning survives a
+restart and a reboot, but **not** a physical move, and after re-cabling every
+pinned id has to be re-read from `/status.json`. Selecting by
+`localizedName` is not a workaround either, now that two cameras both report
+`12MP AF Camera` and the lookup requires exactly one match.
+
 ### Robot Lab asks; this server decides how to observe
 
 `robot_lab.py` is outbound only — it publishes finished calibrations to the

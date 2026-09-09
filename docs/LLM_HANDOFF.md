@@ -218,6 +218,22 @@ USB XHCI controllers (`@00000000`–`@05000000`) plus the ASMedia one, so there
 is room to keep them separate. Confirm a split worked by checking that the
 `ioreg` `locationID` prefixes differ.
 
+**Cutting the frame rate does not buy a second camera on a controller.** After
+the capture-rate fix below took each OV9281 from ~92 fps to 10, a fifth camera
+was added on the ASMedia controller `@08000000` alongside an existing one. It
+still failed with `produced no native 420v frame` while working perfectly
+alone at 11 fps, and the pair failed the same way with nothing else running.
+The USB host reserves isochronous bandwidth from the chosen alt setting's
+worst-case payload, not from the frame duration pinned afterwards, so a 10 fps
+OV9281 reserves as much as a 120 fps one. Rate reduction buys CPU, not slots:
+one camera per controller remains the rule.
+
+Switching between two cameras on one controller is, however, reliable and
+takes about **2.0 s** to first frame (measured over six consecutive
+alternations, all successful). That is cheap enough to time-share a contended
+controller during a stationary survey, and far too slow to do it while
+tracking a moving robot.
+
 Do not trade resolution for camera count. Dropping to 320x240 does let more
 cameras stream at once, but the operator has ruled that out: full-resolution
 feeds are the requirement, because low-resolution AprilTag pose is not useful

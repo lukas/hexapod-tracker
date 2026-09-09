@@ -302,8 +302,27 @@ zero reconnects, in any slot. An earlier revision of this document claimed the
 12MP had to occupy the first `--indices` slot; that was a symptom. Start order
 only decided which camera lost the contention, and the note no longer applies.
 
-Autofocus remains a real caveat for metric work: a refocus changes intrinsics,
-so a saved profile is only valid while focus is fixed. Autofocus is the likely cause and has not been confirmed. Do not
+Its autofocus is less of a hazard than the name suggests. Queried directly it
+reports `focusMode` 0 (`Locked`) with `lensPosition` 0.0, and while
+`ContinuousAutoFocus` is supported, `AutoFocus` is not; the OV9281s support no
+focus mode at all, being fixed-focus. So intrinsics are stable as long as
+nothing switches the mode — check `focusMode` before a calibration run rather
+than assuming either way, and re-check it after a reconnect.
+
+Resolution is where its real headroom is. `camera_server` hardcodes the
+native `preferred_sizes`, so it runs at 1920x1080 — 2.1 of its 12 MP, cropped
+to 16:9. Every larger mode works: 2592x1944 and 3840x2160 at ~29 fps and the
+full 4000x3000 at ~14 fps. The 4:3 modes are not just bigger, they are taller:
+at 4000x3000 the same fixed camera pooled 13 tags against 10 at 1920x1080,
+including two that no other camera in the rig saw. 2592x1944 is the exception
+— a centre crop that repeatably found only 3 tags — so treat mode geometry as
+something to measure per camera, not infer from pixel count.
+
+Detection cost scales with those pixels, measured on this machine with
+`make_tag_detector`: 6.6 ms/frame for an OV9281 at 1280x720 (0.9 MP), 16.2 ms
+for the 12MP at 1920x1080 (2.1 MP), and 47.5 ms at 4000x3000 (12 MP). Budget
+about 0.7 of a core for tag detection alone on one full-resolution 12MP feed
+at 14 fps. Autofocus is the likely cause and has not been confirmed. Do not
 read a gap here as the bus problem described above; check
 `reconnects`/`last_frame_age_s` per camera before concluding anything. A
 reconnect can also silently renegotiate a smaller capture mode -- this camera

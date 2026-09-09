@@ -124,3 +124,17 @@ def test_preview_downscale_only_shrinks_when_wider_than_the_limit():
     assert cs.downscale_preview(narrow, 960) is narrow
     # 0 disables downscaling entirely.
     assert cs.downscale_preview(wide, 0) is wide
+
+
+def test_frame_age_is_none_before_the_first_frame_and_measured_after():
+    import threading
+    import time
+
+    worker = cs.CameraWorker.__new__(cs.CameraWorker)
+    worker._condition = threading.Condition()
+    worker._last_frame_at = None
+    assert worker.frame_age_s() is None
+
+    worker._last_frame_at = time.monotonic() - 0.5
+    age = worker.frame_age_s()
+    assert age is not None and 0.4 < age < 0.7

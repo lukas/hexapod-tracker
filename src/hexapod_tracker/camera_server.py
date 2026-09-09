@@ -150,19 +150,36 @@ def annotate_tags(
     return frame, tag_ids
 
 
+def capture_clock_text(when: float | None = None) -> str:
+    """Wall-clock capture time, to milliseconds, for burning into a frame."""
+
+    moment = time.time() if when is None else when
+    return f"{time.strftime('%H:%M:%S', time.localtime(moment))}.{int(moment % 1 * 1000):03d}"
+
+
 def annotate_tag_corners(
     frame: np.ndarray,
     detections: dict[int, np.ndarray],
     camera_index: int,
+    captured_clock: str | None = None,
 ) -> tuple[np.ndarray, list[int]]:
-    """Annotate an already-detected set so pose and display use identical corners."""
+    """Annotate an already-detected set so pose and display use identical corners.
+
+    ``captured_clock`` is drawn into the pixels on purpose. Server-side frame
+    age cannot describe what a viewer sees: the encode, socket, tunnel, proxy
+    and browser decode all add delay that no header measures, and an MJPEG
+    frame carries no per-frame metadata to a page anyway. Burning the capture
+    time in lets a viewer read true end-to-end latency off the screen by
+    comparing it with a clock.
+    """
     tag_ids = sorted(detections)
     if tag_ids:
         corners = [detections[tag_id][None, :, :] for tag_id in tag_ids]
         ids = np.asarray(tag_ids, dtype=np.int32).reshape(-1, 1)
         cv2.aruco.drawDetectedMarkers(frame, corners, ids, (0, 255, 0))
     label = f"camera {camera_index} | tags: {tag_ids if tag_ids else 'none'}"
-    cv2.rectangle(frame, (0, 0), (min(frame.shape[1], 760), 42), (0, 0, 0), -1)
+    bar_height = 42 if captured_clock is None else 68
+    cv2.rectangle(frame, (0, 0), (min(frame.shape[1], 760), bar_height), (0, 0, 0), -1)
     cv2.putText(
         frame,
         label,
@@ -173,6 +190,17 @@ def annotate_tag_corners(
         2,
         cv2.LINE_AA,
     )
+    if captured_clock is not None:
+        cv2.putText(
+            frame,
+            f"captured {captured_clock}",
+            (12, 57),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
     return frame, tag_ids
 
 
@@ -373,11 +401,24 @@ class CameraWorker:
         self._stop.set()
         self._thread.join(timeout=3.0)
 
+    def frame_age_s(self) -> float | None:
+        """Seconds since the last delivered frame, or None before the first.
+
+        The matching CameraStatus field is only ever populated by snapshot(),
+        so read this rather than status.last_frame_age_s, which stays None.
+        """
+
+        with self._condition:
+            if self._last_frame_at is None:
+                return None
+            return round(time.monotonic() - self._last_frame_at, 3)
+
     def snapshot(self) -> tuple[bytes, dict[str, Any]]:
         with self._condition:
             status = asdict(self.status)
-            if self._last_frame_at is not None:
-                status["last_frame_age_s"] = round(time.monotonic() - self._last_frame_at, 3)
+            age = self.frame_age_s()
+            if age is not None:
+                status["last_frame_age_s"] = age
             return self._jpeg, status
 
     def raw_snapshot(self) -> bytes:
@@ -558,7 +599,9 @@ class CameraWorker:
                 )
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 tag_corners = detect_tag_corners(gray, detector)
-                annotated, tag_ids = annotate_tag_corners(frame, tag_corners, self.index)
+                annotated, tag_ids = annotate_tag_corners(
+                    frame, tag_corners, self.index, capture_clock_text()
+                )
                 # Downscale after annotating so the overlay keeps its
                 # proportions, and only for the browser copy: /snapshot and
                 # /raw-stream stay at full processing resolution.
@@ -637,7 +680,8 @@ INDEX_HTML = """<!doctype html>
   [hidden] { display:none !important; }
   @media (max-width:850px) { #cameras, #pose-grid { grid-template-columns:1fr; } #pose-grid .wide { grid-column:auto; } }
 </style>
-<header><h1>Hexapod tracker</h1><span id="summary">starting…</span></header>
+<header><h1>Hexapod tracker</h1>
+<p id="latency-clock" class="pose-copy">browser clock —</p><span id="summary">starting…</span></header>
 <nav aria-label="Tracker views">
   <button type="button" data-tab="cameras" aria-selected="true">Cameras</button>
   <button type="button" data-tab="pose" aria-selected="false">Pose</button>
@@ -888,6 +932,18 @@ async function update() {
     document.getElementById('summary').textContent = `status error: ${e}`;
   }
 }
+// Each frame carries its capture time in the pixels. Comparing that with
+// this clock is the only honest measure of what a viewer actually sees: it
+// includes the encode, the socket, the tunnel, the proxy and the browser's
+// own decode, none of which any server-side age field can observe.
+function updateLatencyClock() {
+  const now = new Date();
+  const stamp = now.toTimeString().slice(0, 8) + '.' +
+    String(now.getMilliseconds()).padStart(3, '0');
+  document.getElementById('latency-clock').textContent =
+    `browser clock ${stamp} — subtract the "captured" time burned into each frame to read true end-to-end lag`;
+}
+updateLatencyClock(); setInterval(updateLatencyClock, 100);
 update(); setInterval(update, 1000); setInterval(updatePose, 1000);
 </script>
 </html>
@@ -1004,6 +1060,33 @@ class StreamHandler(BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path.startswith("/preview/") and path.endswith(".jpg"):
+            # One current frame per request, already encoded at preview size.
+            # Polling this is the right way to watch a camera over a slow or
+            # proxied link: an MJPEG stream pushed faster than the link drains
+            # accumulates frames in kernel, SSH and proxy buffers, so the
+            # picture falls arbitrarily far behind with no way to tell how
+            # stale it is. A request always returns the newest frame, so the
+            # delay is one round trip and cannot grow.
+            try:
+                index = int(path.removeprefix("/preview/").removesuffix(".jpg"))
+                worker = next(item for item in self.server.workers if item.index == index)
+            except (ValueError, StopIteration):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            body, frames = worker.wait_for_frame(-1)
+            age = worker.frame_age_s()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "no-store")
+            # Freshness travels with the image, so a caller can tell a live
+            # frame from a stalled camera without a second request.
+            self.send_header("X-Frame-Age-Seconds", "unknown" if age is None else f"{age:.3f}")
+            self.send_header("X-Frame-Sequence", str(frames))
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

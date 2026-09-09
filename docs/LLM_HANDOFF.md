@@ -384,9 +384,23 @@ lower these rather than assuming the cameras are slow -- check
 `measured_fps` and `last_frame_age_s`, which describe capture and are
 unaffected by the preview size.
 
-Note that every published frame also encodes a second JPEG at quality 95 for
-`/snapshot` and `/raw-stream`, whether or not anything is reading them. That
-is CPU the preview settings do not reduce.
+Where the per-frame CPU actually goes, measured at 1280x720 on this machine:
+`detect_tag_corners` **31.4 ms**, the quality-95 raw JPEG for `/snapshot` 2.5
+ms, the preview JPEG 0.7 ms -- about 35 ms total, or 35% of a core per camera
+at 10 published fps. Detection is 91% of it, because it runs two passes: the
+native image plus a 2x upscaled and sharpened copy. An earlier revision of
+this document implied the duplicate raw encode was a significant cost; it is
+not, at 7%. If CPU needs to come down, reduce how often detection runs rather
+than trimming encodes.
+
+**Server-side frame age is not display latency.** `last_frame_age_s` and the
+`X-Frame-Age-Seconds` header on `/preview` measure only the time since the
+capture thread published a frame. They cannot see the socket, the SSH tunnel,
+the proxy or the browser's decode, so a frame that is 30 ms old at the server
+can be many seconds old on screen. Every annotated frame therefore carries its
+capture wall-clock time drawn into the pixels, and the page shows a live
+browser clock beside it: the difference between the two is the only honest
+end-to-end measure. Do not quote frame age as evidence about lag.
 
 The embedded HTML at `/` shows every requested camera. Relevant routes are:
 
@@ -394,6 +408,14 @@ The embedded HTML at `/` shows every requested camera. Relevant routes are:
 - `/stream/<index>.mjpg`: annotated stream.
 - `/raw-stream/<index>.mjpg`: raw stream.
 - `/snapshot/<index>.jpg`: raw current frame.
+- `/preview/<index>.jpg`: the current preview-size annotated frame, one per
+  request, with `X-Frame-Age-Seconds` and `X-Frame-Sequence` headers. Poll
+  this instead of streaming over a slow or proxied link: an MJPEG stream
+  pushed faster than the link drains piles up in kernel, SSH and proxy
+  buffers, so the picture falls arbitrarily behind, whereas a request always
+  returns the newest frame and the delay stays one round trip. Measured at
+  38-62 KB per frame, so three cameras at 2 fps is about 2.6 Mbps against 10
+  Mbps for the equivalent streams.
 - `/native-luma/<index>.png`: lossless unscaled native luminance, when the
   worker uses native AVFoundation.
 - `/native-frame/<index>.nv12`: exact unscaled NV12 video frame, with size and

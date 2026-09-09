@@ -174,6 +174,22 @@ def annotate_tag_corners(
     return frame, tag_ids
 
 
+def downscale_preview(frame: np.ndarray, max_width: int) -> np.ndarray:
+    """Shrink a frame for the browser preview, never enlarging it.
+
+    Only the MJPEG preview needs to be small. Tag detection runs on the
+    full-resolution luma plane and pose uses full-frame corners, so this costs
+    no accuracy -- and at full size three 1280x720 feeds pushed about 46 Mbps,
+    which Safari cannot decode smoothly.
+    """
+
+    if max_width <= 0 or frame.shape[1] <= max_width:
+        return frame
+    scale = max_width / frame.shape[1]
+    height = max(1, round(frame.shape[0] * scale))
+    return cv2.resize(frame, (max_width, height), interpolation=cv2.INTER_AREA)
+
+
 def placeholder_jpeg(index: int, message: str) -> bytes:
     frame = np.zeros((400, 640, 3), dtype=np.uint8)
     cv2.putText(
@@ -244,9 +260,14 @@ class CameraWorker:
         rotate_180: bool = False,
         native_avfoundation: bool = False,
         stable_id: str | None = None,
+        preview_max_width: int = 0,
     ):
         self.index = index
         self.stable_id = stable_id
+        # The browser preview is the only consumer that needs to be small.
+        # Detection runs on the full-resolution luma plane and pose uses
+        # full-frame corners, so shrinking this costs no accuracy.
+        self.preview_max_width = int(preview_max_width)
         self.width = width
         self.height = height
         self.fps = fps
@@ -489,8 +510,12 @@ class CameraWorker:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 tag_corners = detect_tag_corners(gray, detector)
                 annotated, tag_ids = annotate_tag_corners(frame, tag_corners, self.index)
+                # Downscale after annotating so the overlay keeps its
+                # proportions, and only for the browser copy: /snapshot and
+                # /raw-stream stay at full processing resolution.
+                preview = downscale_preview(annotated, self.preview_max_width)
                 ok, encoded = cv2.imencode(
-                    ".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
+                    ".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
                 )
                 if raw_ok and ok:
                     native_planes = (
@@ -1242,7 +1267,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=800)
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--output-fps", type=float, default=10.0)
-    parser.add_argument("--jpeg-quality", type=int, default=82)
+    parser.add_argument(
+        "--jpeg-quality",
+        type=int,
+        default=70,
+        help=(
+            "quality of the browser MJPEG preview only; /snapshot and "
+            "/raw-stream stay at 95"
+        ),
+    )
+    parser.add_argument(
+        "--preview-max-width",
+        type=int,
+        default=640,
+        help=(
+            "downscale only the browser MJPEG preview to this width (0 keeps "
+            "full size). Detection, pose and /snapshot are unaffected. At full "
+            "size three feeds pushed ~46 Mbps, which Safari cannot decode "
+            "smoothly; the default is ~10 Mbps"
+        ),
+    )
     parser.add_argument(
         "--capture-profile",
         help="named camera setup from --capture-profiles-file",
@@ -1472,6 +1516,7 @@ def main() -> None:
             rotate_180=index in args.rotate_180,
             native_avfoundation=index in args.native_avfoundation,
             stable_id=pinned_device_ids.get(index),
+            preview_max_width=args.preview_max_width,
         )
         for index in args.indices
     ]

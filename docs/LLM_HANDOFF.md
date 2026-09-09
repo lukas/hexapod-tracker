@@ -355,6 +355,23 @@ snapshots. Never implement orientation as an `img` CSS transform: that makes
 labels upside down and leaves displayed coordinates inconsistent with pose
 coordinates.
 
+The browser preview is deliberately small and is not the analysis path.
+`--preview-max-width` (default 640) and `--jpeg-quality` (default 70) affect
+only the annotated MJPEG the grid displays; detection runs on the
+full-resolution luma plane, pose uses full-frame corners, and `/snapshot` and
+`/raw-stream` stay at full processing resolution and quality 95. Measured on
+three feeds: full size at quality 82 pushed about **46 Mbps** (145-289 KB per
+frame), which Safari cannot decode smoothly and shows as seconds of lag while
+the JSON metadata stays instant; 960 wide dropped it to 27 Mbps and the 640
+default to about **10 Mbps** with identical tag counts. If the grid lags,
+lower these rather than assuming the cameras are slow -- check
+`measured_fps` and `last_frame_age_s`, which describe capture and are
+unaffected by the preview size.
+
+Note that every published frame also encodes a second JPEG at quality 95 for
+`/snapshot` and `/raw-stream`, whether or not anything is reading them. That
+is CPU the preview settings do not reduce.
+
 The embedded HTML at `/` shows every requested camera. Relevant routes are:
 
 - `/status.json`: capture backend/mode, frame counters, errors, and tag IDs.

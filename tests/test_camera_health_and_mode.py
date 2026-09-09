@@ -111,3 +111,16 @@ def test_rollup_reports_missing_floor_anchors():
     assert health["union_tags_seen"] == 3
     assert health["floor_anchors_seen"] == [100, 101]
     assert health["floor_anchors_missing"] == [102]
+
+
+def test_preview_downscale_only_shrinks_when_wider_than_the_limit():
+    import numpy as np
+
+    wide = np.zeros((720, 1280, 3), dtype=np.uint8)
+    narrow = np.zeros((360, 640, 3), dtype=np.uint8)
+
+    assert cs.downscale_preview(wide, 960).shape == (540, 960, 3)
+    # Already under the limit: returned untouched rather than upscaled.
+    assert cs.downscale_preview(narrow, 960) is narrow
+    # 0 disables downscaling entirely.
+    assert cs.downscale_preview(wide, 0) is wide

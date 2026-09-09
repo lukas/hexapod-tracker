@@ -256,3 +256,15 @@ def test_preview_jpeg_falls_back_when_no_frame_has_arrived():
     worker._preview_frame = None
     worker._jpeg = b'placeholder'
     assert worker.preview_jpeg(256) == b'placeholder'
+
+
+def test_captured_unix_is_none_before_the_first_frame():
+    import threading
+
+    worker = cs.CameraWorker.__new__(cs.CameraWorker)
+    worker._condition = threading.Condition()
+    worker._last_frame_unix = None
+    assert worker.captured_unix() is None
+
+    worker._last_frame_unix = 1788985741.5
+    assert worker.captured_unix() == 1788985741.5

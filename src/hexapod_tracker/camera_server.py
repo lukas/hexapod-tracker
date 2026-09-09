@@ -447,6 +447,7 @@ class CameraWorker:
         # Kept un-encoded so a client on a slow link can ask for a narrower
         # frame without the server guessing a single size for everyone.
         self._preview_frame: np.ndarray | None = None
+        self._last_frame_unix: float | None = None
         self._raw_jpeg = self._jpeg
         self._native_planes: tuple[np.ndarray, np.ndarray] | None = None
         self._tag_corners: dict[int, np.ndarray] = {}
@@ -481,6 +482,12 @@ class CameraWorker:
             ".jpg", smaller, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
         )
         return encoded.tobytes() if ok else cached
+
+    def captured_unix(self) -> float | None:
+        """Wall-clock time the last published frame was captured."""
+
+        with self._condition:
+            return self._last_frame_unix
 
     def frame_age_s(self) -> float | None:
         """Seconds since the last delivered frame, or None before the first.
@@ -583,6 +590,11 @@ class CameraWorker:
             self.status.state = "streaming"
             self.status.error = None
             self._last_frame_at = time.monotonic()
+            # Wall clock alongside the monotonic stamp: a consumer reading
+            # frames over HTTP needs the capture moment on a shared clock to
+            # line vision up against robot telemetry, and deriving it from an
+            # age plus its own clock adds that client's skew.
+            self._last_frame_unix = time.time()
             self._condition.notify_all()
 
     def _set_waiting(self, message: str, state: str = "waiting") -> None:
@@ -1283,6 +1295,9 @@ class StreamHandler(BaseHTTPRequestHandler):
             # frame from a stalled camera without a second request.
             self.send_header("X-Frame-Age-Seconds", "unknown" if age is None else f"{age:.3f}")
             self.send_header("X-Frame-Sequence", str(frames))
+            captured = worker.captured_unix()
+            if captured is not None:
+                self.send_header("X-Frame-Captured-Unix", f"{captured:.6f}")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

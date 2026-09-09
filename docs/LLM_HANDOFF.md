@@ -654,7 +654,36 @@ Robot Lab using only its first-class versioned calibration endpoint.
 Do not add robot-control HTTP calls here to make the standalone UI's survey
 buttons work. That would break the intentional safety and ownership boundary.
 
-### Robot Lab opens cameras itself, and that competes with this server
+### Robot Lab should read this server, not open the cameras
+
+The contention above is not a tuning problem, it is structural: one process
+owns a camera, so as long as both sides open devices directly they cannot both
+work. Reading frames over HTTP is the resolution, and the objections to it do
+not survive measurement:
+
+- **Latency.** A local `/preview/<index>.jpg?w=640` request costs 0.75 ms and
+  sustains 116 fps from a single sequential client. The seconds of lag that
+  drove this session's work were entirely the relay path; a consumer on the
+  same machine never touches it.
+- **Frame timing.** Robot Lab stamps frames when its own process receives
+  them, which is exactly what an HTTP client gets. `/preview` now returns
+  `X-Frame-Captured-Unix` alongside `X-Frame-Age-Seconds` and
+  `X-Frame-Sequence`, so a consumer reads the capture moment on a shared
+  clock rather than deriving it from an age plus its own skew -- better
+  correlation against robot telemetry than in-process capture was giving.
+- **Resolution.** Detection and viewing are already independent here.
+  `/native-luma/<index>.png` is the full captured luma plane losslessly and
+  `/native-frame/<index>.nv12` the raw frame with size headers, while
+  `--capture-size` raises capture without raising what a viewer receives.
+- **Fixes reach one place.** Robot Lab's bundled copy of this package cannot
+  see any change here until its venv is reinstalled, which is why the 12MP
+  modules fail for it today.
+
+What that would need on this side: the server running as a managed service
+rather than by hand, and device release when Robot Lab needs exclusive
+access -- `/api/mode` carries the intent but nothing releases a camera yet.
+
+### How Robot Lab opens cameras today, and why that competes
 
 Checked 2026-09-09. Robot Lab does **not** consume `:8766` over HTTP. Its
 `hexapod_lab/observation_cameras.py` imports `AVFoundationYuvCapture` from this

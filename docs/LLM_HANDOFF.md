@@ -389,14 +389,44 @@ annotation. Three things follow from that, and all three were bugs before:
    the browser the pacer -- a slow link gets fewer frames, each of them
    current, and no queue can form. The `/stream/*.mjpg` routes still exist and
    remain fine locally.
-2. **Detection is off the frame path.** It costs ~31 ms per frame, delaying
+2. **Three resolutions, three jobs.** Capture as large as is useful, detect
+   on that full frame, and show the operator something small. Detection used
+   to run on the downscaled display frame, throwing away the untouched
+   full-resolution luma plane the native adapter already keeps; an earlier
+   revision of this document wrongly claimed otherwise. It now detects on that
+   plane and scales the corners back into display coordinates, which is the
+   space annotation and `pose_snapshot` already agree on, so the added
+   precision arrives as fractional pixels without changing that contract.
+   `/status.json` reports `detect_width`/`detect_height` beside the display
+   size so the three are visible at once.
+
+   `--capture-size INDEX:WIDTHxHEIGHT` raises native capture per slot. The
+   trade-off measured on two 12MP modules plus one OV9281:
+
+   | capture | fps | CPU | union tags | best camera |
+   |---|---|---|---|---|
+   | 1920x1080 (default) | ~29 | ~280-320% | 27 | 17 |
+   | 4000x3000 | ~8.7 | ~575% | 28 | 21 |
+
+   Full sensor finds more tags per camera, but the sensor caps at ~15 fps
+   there and the extra pixels cost real CPU, so it suits a stationary scan
+   rather than watching a moving robot. The union barely moves because other
+   cameras already cover most of what it gains.
+
+   Full-resolution frames are retrievable regardless of the preview size:
+   `/native-luma/<index>.png` is the whole captured luma plane, lossless
+   (6.5 MB at 4000x3000), and `/native-frame/<index>.nv12` is the raw frame
+   with `X-Frame-Width`/`X-Frame-Height` headers (18 MB). Note `/snapshot`
+   is *display* size at quality 95, not full sensor.
+
+3. **Detection is off the frame path.** It costs ~31 ms per frame, delaying
    every frame an operator sees and capping the rate. `--detect-interval-s`
    (default 0.5) runs it on its own cadence; pose and tag coverage update at
    that rate. Between passes no boxes are drawn, because boxes computed from
    an older frame sit visibly wrong once anything moves, and the label reads
    `tags (last pass)` so an operator does not read a gap as "this camera sees
    nothing".
-3. **`/` must not be cacheable.** It previously sent no cache headers at all,
+4. **`/` must not be cacheable.** It previously sent no cache headers at all,
    so the browser and the relay in front of it could serve an old build
    indefinitely -- and an old build pointing at streams from a since-restarted
    server shows a frozen frame, which looks like extreme lag rather than a

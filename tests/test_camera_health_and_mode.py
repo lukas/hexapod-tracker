@@ -158,3 +158,66 @@ def test_label_without_a_last_pass_still_says_none():
     frame = np.zeros((200, 800, 3), dtype=np.uint8)
     _annotated, tag_ids = cs.annotate_tag_corners(frame, {}, 1, None)
     assert tag_ids == []
+
+
+class _FakeCapture:
+    def __init__(self, gray=None):
+        self.detection_gray = gray
+
+
+def test_detection_uses_the_full_resolution_luma_and_rescales_corners(monkeypatch):
+    import numpy as np
+
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    gray = np.zeros((1080, 1920), dtype=np.uint8)  # 3x the frame width
+    seen = {}
+
+    def fake_detect(image, _detector):
+        seen['shape'] = image.shape
+        return {7: np.array([[300.0, 600.0]], dtype=np.float32)}
+
+    monkeypatch.setattr(cs, 'detect_tag_corners', fake_detect)
+    corners, size = cs.detect_tags_at_best_resolution(_FakeCapture(gray), frame, None)
+
+    assert seen['shape'] == (1080, 1920)   # detected on the big image
+    assert size == (1920, 1080)
+    # 3x down into frame coordinates, so annotation and pose stay consistent.
+    assert corners[7].tolist() == [[100.0, 200.0]]
+
+
+def test_detection_falls_back_when_no_larger_image_exists(monkeypatch):
+    import numpy as np
+
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    seen = {}
+
+    def fake_detect(image, _detector):
+        seen['shape'] = image.shape
+        return {}
+
+    monkeypatch.setattr(cs, 'detect_tag_corners', fake_detect)
+    # No native plane at all, and a plane no bigger than the frame, both fall back.
+    for capture in (_FakeCapture(None), _FakeCapture(np.zeros((360, 640), dtype=np.uint8))):
+        _corners, size = cs.detect_tags_at_best_resolution(capture, frame, None)
+        assert seen['shape'] == (360, 640)
+        assert size == (640, 360)
+
+
+def test_parse_capture_sizes_reads_per_slot_overrides():
+    assert cs.parse_capture_sizes(['0:4000x3000', '2:1280X720']) == {
+        0: (4000, 3000),
+        2: (1280, 720),
+    }
+
+
+@pytest.mark.parametrize(
+    'value', ['4000x3000', '0:4000', '0:axb', '0:0x100', '0:-4x3']
+)
+def test_parse_capture_sizes_rejects_malformed_values(value):
+    with pytest.raises(SystemExit):
+        cs.parse_capture_sizes([value])
+
+
+def test_parse_capture_sizes_rejects_a_repeated_slot():
+    with pytest.raises(SystemExit):
+        cs.parse_capture_sizes(['1:640x480', '1:800x600'])

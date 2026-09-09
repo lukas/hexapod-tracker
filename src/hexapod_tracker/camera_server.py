@@ -262,6 +262,37 @@ def favicon_bytes() -> bytes:
     return _FAVICON_CACHE
 
 
+def detect_tags_at_best_resolution(
+    capture: Any,
+    frame: np.ndarray,
+    detector: cv2.aruco.ArucoDetector,
+) -> tuple[dict[int, np.ndarray], tuple[int, int]]:
+    """Detect on the largest image available, in ``frame`` coordinates.
+
+    The BGR frame is downscaled to ``processing_width`` for display, but the
+    native adapter also keeps the untouched full-resolution luma plane. Tag
+    detection should use that: more pixels across a tag both finds tags that
+    the smaller image misses and localises their corners on more samples. On
+    the 12MP module a full-sensor pass found 13 tags where a 1920x1080 pass
+    found 10.
+
+    Corners come back scaled into the display frame's coordinates, which is
+    the space annotation and ``pose_snapshot`` already agree on, so the extra
+    precision is preserved as fractional pixels without changing that
+    contract. Returns the corners and the size actually detected on.
+    """
+
+    gray = getattr(capture, "detection_gray", None)
+    if gray is None or gray.ndim != 2 or gray.shape[1] <= frame.shape[1]:
+        fallback = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return detect_tag_corners(fallback, detector), (frame.shape[1], frame.shape[0])
+    corners = detect_tag_corners(gray, detector)
+    scale = frame.shape[1] / gray.shape[1]
+    if scale != 1.0:
+        corners = {tag: value * scale for tag, value in corners.items()}
+    return corners, (gray.shape[1], gray.shape[0])
+
+
 def downscale_preview(frame: np.ndarray, max_width: int) -> np.ndarray:
     """Shrink a frame for the browser preview, never enlarging it.
 
@@ -327,6 +358,8 @@ class CameraStatus:
     native_capture_width: int | None = None
     native_capture_height: int | None = None
     native_luma_available: bool = False
+    detect_width: int | None = None
+    detect_height: int | None = None
     measured_fps: float = 0.0
     frames: int = 0
     consecutive_failures: int = 0
@@ -350,6 +383,7 @@ class CameraWorker:
         stable_id: str | None = None,
         preview_max_width: int = 0,
         detect_interval_s: float = 0.0,
+        capture_size: tuple[int, int] | None = None,
     ):
         self.index = index
         self.stable_id = stable_id
@@ -362,6 +396,10 @@ class CameraWorker:
         # operator sees by that much while capping the rate. This page exists
         # for situational awareness, so detection runs on its own cadence and
         # the picture never waits for it.
+        # Capture, detection and display are three different resolutions on
+        # purpose: capture as large as the sensor usefully allows, detect on
+        # that full frame, and show the operator something small.
+        self.capture_size = capture_size
         self.detect_interval_s = float(detect_interval_s)
         self._last_detect_at: float | None = None
         self._last_detect_corners: dict[int, np.ndarray] = {}
@@ -535,10 +573,15 @@ class CameraWorker:
         if self.native_avfoundation:
             from .avfoundation_capture import AVFoundationYuvCapture
 
+            preferred = (
+                (self.capture_size,)
+                if self.capture_size
+                else ((1920, 1440), (1920, 1080), (1280, 720))
+            )
             cap = AVFoundationYuvCapture(
                 self.index,
                 stable_id=self.stable_id,
-                preferred_sizes=((1920, 1440), (1920, 1080), (1280, 720)),
+                preferred_sizes=preferred,
                 fps=self.fps,
                 processing_width=self.width,
             )
@@ -623,8 +666,10 @@ class CameraWorker:
                     or now - self._last_detect_at >= self.detect_interval_s
                 )
                 if due:
-                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    tag_corners = detect_tag_corners(gray, detector)
+                    tag_corners, detect_size = detect_tags_at_best_resolution(
+                        cap, frame, detector
+                    )
+                    self.status.detect_width, self.status.detect_height = detect_size
                     self._last_detect_corners = tag_corners
                     self._last_detect_at = now
                 else:
@@ -1540,6 +1585,19 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--capture-size",
+        action="append",
+        default=[],
+        metavar="INDEX:WIDTHxHEIGHT",
+        help=(
+            "native capture size for one slot, e.g. 0:4000x3000; may be "
+            "repeated. Detection uses the full captured frame while the "
+            "browser still gets --preview-max-width, so this raises tag "
+            "resolution without raising what is sent to a viewer. The 12MP "
+            "module offers up to 4000x3000 at ~14 fps"
+        ),
+    )
+    parser.add_argument(
         "--detect-interval-s",
         type=float,
         default=0.5,
@@ -1646,6 +1704,34 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
+
+
+def parse_capture_sizes(values: list[str]) -> dict[int, tuple[int, int]]:
+    """Parse ``INDEX:WIDTHxHEIGHT`` native capture overrides."""
+
+    sizes: dict[int, tuple[int, int]] = {}
+    for value in values:
+        raw_index, separator, raw_size = value.partition(":")
+        if not separator:
+            raise SystemExit(
+                f"--capture-size expects INDEX:WIDTHxHEIGHT, got {value!r}"
+            )
+        width, cross, height = raw_size.lower().partition("x")
+        if not cross:
+            raise SystemExit(
+                f"--capture-size expects INDEX:WIDTHxHEIGHT, got {value!r}"
+            )
+        try:
+            index = int(raw_index)
+            parsed = (int(width), int(height))
+        except ValueError:
+            raise SystemExit(f"--capture-size could not parse {value!r}") from None
+        if parsed[0] <= 0 or parsed[1] <= 0:
+            raise SystemExit(f"--capture-size needs positive dimensions: {value!r}")
+        if index in sizes:
+            raise SystemExit(f"--capture-size repeats slot {index}")
+        sizes[index] = parsed
+    return sizes
 
 
 def parse_device_ids(values: list[str]) -> dict[int, str]:
@@ -1763,6 +1849,12 @@ def main() -> None:
         json.loads(args.robot_tag_layout.read_text()),
         json.loads(args.camera_calibration.read_text()),
     )
+    capture_sizes = parse_capture_sizes(args.capture_size)
+    unknown_capture = sorted(set(capture_sizes) - set(args.indices))
+    if unknown_capture:
+        raise SystemExit(
+            f"--capture-size names slots not in --indices: {unknown_capture}"
+        )
     pinned_device_ids = parse_device_ids(args.device_id)
     unknown_slots = sorted(set(pinned_device_ids) - set(args.indices))
     if unknown_slots:
@@ -1792,6 +1884,7 @@ def main() -> None:
             stable_id=pinned_device_ids.get(index),
             preview_max_width=args.preview_max_width,
             detect_interval_s=args.detect_interval_s,
+            capture_size=capture_sizes.get(index),
         )
         for index in args.indices
     ]

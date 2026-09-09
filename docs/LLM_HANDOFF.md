@@ -702,9 +702,20 @@ not survive measurement:
   see any change here until its venv is reinstalled, which is why the 12MP
   modules fail for it today.
 
-What that would need on this side: the server running as a managed service
-rather than by hand, and device release when Robot Lab needs exclusive
-access -- `/api/mode` carries the intent but nothing releases a camera yet.
+Both prerequisites now exist: `tools/camera_service.sh` runs this as a
+launchd job, and `POST /api/cameras/<stable-id>/lease` releases a device.
+Robot Lab reads frames when
+`HEXAPOD_OBSERVATION_VISION_SERVICE_URL=http://127.0.0.1:8766` is set (or
+`vision_service_url` on one camera's spec), via
+`hexapod_lab/vision_service_capture.py`, which is a drop-in for the
+`read()`/`release()`/`last_error` surface its capture loop uses. It resolves
+its slot from `/status.json` by stable id rather than storing one, and forgets
+it after any failure, because a server restart renumbers slots and a cached
+number would quietly return another camera's frames.
+
+One thing to watch: `--preview-max-width` caps what *any* consumer can get,
+so a Robot Lab asking for 1280 receives 640 under the default. Raise it for
+that server, or use `/native-luma/<index>.png` when full detail matters.
 
 ### How Robot Lab opens cameras today, and why that competes
 

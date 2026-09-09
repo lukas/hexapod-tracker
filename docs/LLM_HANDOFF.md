@@ -677,45 +677,37 @@ Robot Lab using only its first-class versioned calibration endpoint.
 Do not add robot-control HTTP calls here to make the standalone UI's survey
 buttons work. That would break the intentional safety and ownership boundary.
 
-### Robot Lab should read this server, not open the cameras
+### Robot Lab reads this server; it does not open the cameras
 
-The contention above is not a tuning problem, it is structural: one process
-owns a camera, so as long as both sides open devices directly they cannot both
-work. Reading frames over HTTP is the resolution, and the objections to it do
-not survive measurement:
+This server owning the hardware and everyone else reading frames over HTTP is
+the whole design, and it is what makes the rest simple. A local
+`/preview/<index>.jpg?w=640` request costs 0.75 ms and sustains 116 fps, so
+there is nothing to gain by capturing separately -- and three real costs to
+doing so. A camera's *active format* is global to the device, so two openers
+fight over size and rate and the last `setActiveFormat_` wins. Two cameras on
+one USB controller cannot both stream, so a second opener can starve one that
+was working. And a separate opener needs its own copy of this package, which
+is how Robot Lab spent weeks on a build that predated the frame-duration fix
+the 12MP modules require, delivering no frames from them at all.
 
-- **Latency.** A local `/preview/<index>.jpg?w=640` request costs 0.75 ms and
-  sustains 116 fps from a single sequential client. The seconds of lag that
-  drove this session's work were entirely the relay path; a consumer on the
-  same machine never touches it.
-- **Frame timing.** Robot Lab stamps frames when its own process receives
-  them, which is exactly what an HTTP client gets. `/preview` now returns
-  `X-Frame-Captured-Unix` alongside `X-Frame-Age-Seconds` and
-  `X-Frame-Sequence`, so a consumer reads the capture moment on a shared
-  clock rather than deriving it from an age plus its own skew -- better
-  correlation against robot telemetry than in-process capture was giving.
-- **Resolution.** Detection and viewing are already independent here.
-  `/native-luma/<index>.png` is the full captured luma plane losslessly and
-  `/native-frame/<index>.nv12` the raw frame with size headers, while
-  `--capture-size` raises capture without raising what a viewer receives.
-- **Fixes reach one place.** Robot Lab's bundled copy of this package cannot
-  see any change here until its venv is reinstalled, which is why the 12MP
-  modules fail for it today.
+Robot Lab opts in with
+`HEXAPOD_OBSERVATION_VISION_SERVICE_URL=http://127.0.0.1:8766` (or
+`vision_service_url` on one camera's spec, to move a single camera and leave
+the rest). `hexapod_lab/vision_service_capture.py` is a drop-in for the
+`read()`/`release()`/`last_error` surface its capture loop uses, so the
+direct-capture path stays intact as the fallback. It resolves its slot from
+`/status.json` by device stable id rather than storing one, and forgets it
+after any failure, because a server restart renumbers slots and a cached
+number would quietly return another camera's frames into an experiment.
 
-Both prerequisites now exist: `tools/camera_service.sh` runs this as a
-launchd job, and `POST /api/cameras/<stable-id>/lease` releases a device.
-Robot Lab reads frames when
-`HEXAPOD_OBSERVATION_VISION_SERVICE_URL=http://127.0.0.1:8766` is set (or
-`vision_service_url` on one camera's spec), via
-`hexapod_lab/vision_service_capture.py`, which is a drop-in for the
-`read()`/`release()`/`last_error` surface its capture loop uses. It resolves
-its slot from `/status.json` by stable id rather than storing one, and forgets
-it after any failure, because a server restart renumbers slots and a cached
-number would quietly return another camera's frames.
-
-One thing to watch: `--preview-max-width` caps what *any* consumer can get,
-so a Robot Lab asking for 1280 receives 640 under the default. Raise it for
-that server, or use `/native-luma/<index>.png` when full detail matters.
+**Reading the server deletes work rather than adding it.** Robot Lab's direct
+paths arbitrate USB with a single global `Semaphore(1)`: open a device, take
+one frame, close it, hand the slot to the next camera, plus a permission gate
+and a quarantine path for a capture that would not shut down. None of that is
+needed for an HTTP read, so `_run_service` is a plain poll with no semaphore,
+no gate and no deferred release, and every camera streams at once instead of
+taking turns. `--preview-max-width` caps what any consumer receives, so a
+consumer asking for 1280 gets 640 under a 640 cap.
 
 ### How Robot Lab opens cameras today, and why that competes
 
@@ -769,34 +761,6 @@ restart and a reboot, but **not** a physical move, and after re-cabling every
 pinned id has to be re-read from `/status.json`. Selecting by
 `localizedName` is not a workaround either, now that two cameras both report
 `12MP AF Camera` and the lookup requires exactly one match.
-
-### Robot Lab asks; this server decides how to observe
-
-`robot_lab.py` is outbound only — it publishes finished calibrations to the
-authenticated Robot Lab. The multi-camera server also accepts an *inbound*
-intent so the Lab can say what it is doing without gaining any say over the
-cameras themselves, and without this package ever asking the robot or the Lab
-what task is running. That direction matters: the intent is an input, never a
-query, which is what keeps the observation-only boundary from leaking.
-
-```sh
-curl -s http://127.0.0.1:8766/api/mode
-curl -s -X POST -H 'Content-Type: application/json' \
-  -d '{"mode":"survey"}' http://127.0.0.1:8766/api/mode
-```
-
-- `track` (**the default, and what a restart returns to**): every camera stays
-  on and none is ever switched. Re-opening a camera costs about 2 s of
-  blindness on that view, and a camera contributing nothing while the robot
-  stands still may be the only one holding it as it walks out of another
-  view. Coverage-now is not coverage-next.
-- `survey`: coverage-driven arbitration is permitted, which is only safe while
-  the scene is static.
-
-`POST /api/mode` is deliberately the only writable route on this server. It
-selects how to observe and cannot move a robot — worth keeping that way,
-because `:8766` is reverse-tunnelled off the machine by the
-`com.lbiewald.hexapod-camera-tunnel` job.
 
 `GET /api/cameras/health` answers the two different questions a caller has.
 *Is this camera working* is per-camera and local: `healthy` plus a `reasons`

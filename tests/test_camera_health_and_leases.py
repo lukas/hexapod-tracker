@@ -13,10 +13,8 @@ def _server(snapshots, anchors=(100, 101, 102)):
         SimpleNamespace(snapshot=lambda item=item: (None, item)) for item in snapshots
     ]
     server.floor_anchor_ids = {int(value) for value in anchors}
-    server._observation_mode = cs.OBSERVATION_MODE_TRACK
     import threading
 
-    server._observation_mode_lock = threading.Lock()
     server._leases = {}
     server._lease_lock = threading.Lock()
     return server
@@ -39,24 +37,6 @@ def _snapshot(index, **overrides):
     }
     item.update(overrides)
     return item
-
-
-def test_default_mode_is_track_so_nothing_is_ever_turned_off():
-    assert _server([]).observation_mode == cs.OBSERVATION_MODE_TRACK
-
-
-@pytest.mark.parametrize("mode", ["survey", "TRACK", " Survey "])
-def test_set_observation_mode_normalises_known_modes(mode):
-    server = _server([])
-    assert server.set_observation_mode(mode) == mode.strip().lower()
-
-
-@pytest.mark.parametrize("mode", ["", "calibrate", "off", None])
-def test_set_observation_mode_rejects_unknown_modes(mode):
-    server = _server([])
-    with pytest.raises(ValueError):
-        server.set_observation_mode(mode)
-    assert server.observation_mode == cs.OBSERVATION_MODE_TRACK
 
 
 def test_healthy_camera_reports_no_reasons():

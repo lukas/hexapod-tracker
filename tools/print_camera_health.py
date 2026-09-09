@@ -8,7 +8,7 @@ with open(sys.argv[1]) as handle:
 
 print(
     f"healthy={health['cameras_healthy']}/{health['cameras_total']} "
-    f"mode={health['observation_mode']} tags={health['union_tags_seen']} "
+    f"tags={health['union_tags_seen']} 
     f"anchors={len(health['floor_anchors_seen'])}"
 )
 for camera in health["cameras"]:

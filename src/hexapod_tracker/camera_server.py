@@ -40,25 +40,6 @@ from .paths import CONFIG_DIR
 from .planar_pose import PlanarPoseEstimator
 
 
-# Robot Lab sets an intent; this server decides how to observe under it.
-#
-# TRACK keeps every camera on and never switches, because a camera that adds
-# nothing while the robot stands still may be the only one holding it as it
-# walks out of another view, and re-opening a camera costs about two seconds
-# of blindness on that view.
-# SURVEY permits coverage-driven arbitration, which is only safe while the
-# scene is static.
-# Identifies this process run. A browser holds one long-lived
-# multipart/x-mixed-replace connection per camera, and those never recover on
-# their own once the server they came from is gone: the page keeps showing the
-# last frame it received while the JSON polling continues to look healthy.
-# Publishing an id lets the page notice a restart and re-attach.
-SERVER_RUN_ID = uuid.uuid4().hex
-
-OBSERVATION_MODE_TRACK = "track"
-OBSERVATION_MODE_SURVEY = "survey"
-OBSERVATION_MODES = (OBSERVATION_MODE_TRACK, OBSERVATION_MODE_SURVEY)
-
 # A feed older than this is reported unhealthy. Well above the ~0.1 s seen on
 # a healthy 10 fps camera, and well below the multi-second gaps that marked
 # the starved ones.
@@ -1267,30 +1248,7 @@ class StreamHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"ok": True, "lease": lease})
             return
-        if path != "/api/mode":
-            self.send_error(HTTPStatus.NOT_FOUND, "unknown endpoint")
-            return
-        # Deliberately the only writable route on this server. It selects how
-        # to observe and can never move a robot, which matters because :8766
-        # is reverse-tunnelled off this machine.
-        requested = self._read_json_body()
-        if requested is None:
-            return
-        if "mode" not in requested:
-            self._send_json(
-                {"ok": False, "error": 'expected a JSON object with a "mode" key'},
-                HTTPStatus.BAD_REQUEST,
-            )
-            return
-        try:
-            mode = self.server.set_observation_mode(requested["mode"])
-        except ValueError as error:
-            self._send_json(
-                {"ok": False, "error": str(error)},
-                HTTPStatus.BAD_REQUEST,
-            )
-            return
-        self._send_json({"ok": True, "observation_mode": mode})
+        self.send_error(HTTPStatus.NOT_FOUND, "unknown endpoint")
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         path = urlparse(self.path).path
@@ -1320,7 +1278,6 @@ class StreamHandler(BaseHTTPRequestHandler):
         if path == "/status.json":
             self._send_json({
                 "server_run_id": SERVER_RUN_ID,
-                "observation_mode": self.server.observation_mode,
                 "cameras": [worker.snapshot()[1] for worker in self.server.workers],
             })
             return
@@ -1330,12 +1287,6 @@ class StreamHandler(BaseHTTPRequestHandler):
         if path == "/api/cameras/leases":
             self.server.expire_leases()
             self._send_json({"leases": self.server.leases()})
-            return
-        if path == "/api/mode":
-            self._send_json({
-                "observation_mode": self.server.observation_mode,
-                "available_modes": list(OBSERVATION_MODES),
-            })
             return
         if path in ("/api/poses", "/api/poses.json"):
             body = json.dumps(self.server.pose_status()).encode()
@@ -1555,8 +1506,6 @@ class CameraHTTPServer(ThreadingHTTPServer):
         # for task state, which keeps the observation-only boundary intact.
         # A restart deliberately returns to TRACK, the mode that never turns a
         # camera off.
-        self._observation_mode = OBSERVATION_MODE_TRACK
-        self._observation_mode_lock = threading.Lock()
         self._leases: dict[str, dict[str, Any]] = {}
         self._lease_lock = threading.Lock()
         super().__init__(address, StreamHandler)
@@ -1568,22 +1517,6 @@ class CameraHTTPServer(ThreadingHTTPServer):
             except OSError:
                 pass
         super().server_bind()
-
-    @property
-    def observation_mode(self) -> str:
-        with self._observation_mode_lock:
-            return self._observation_mode
-
-    def set_observation_mode(self, mode: str) -> str:
-        candidate = str(mode).strip().lower()
-        if candidate not in OBSERVATION_MODES:
-            raise ValueError(
-                f"unknown mode {mode!r}; expected one of "
-                f"{', '.join(sorted(OBSERVATION_MODES))}"
-            )
-        with self._observation_mode_lock:
-            self._observation_mode = candidate
-        return candidate
 
     def _worker_for_stable_id(self, stable_id: str) -> CameraWorker | None:
         for worker in self.workers:
@@ -1728,7 +1661,6 @@ class CameraHTTPServer(ThreadingHTTPServer):
         return {
             "schema_version": 1,
             "generated_at_unix_s": round(time.time(), 6),
-            "observation_mode": self.observation_mode,
             "cameras_total": len(cameras),
             "cameras_healthy": len(healthy),
             "union_tags_seen": len(union),

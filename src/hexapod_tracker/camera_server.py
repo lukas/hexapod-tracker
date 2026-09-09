@@ -25,7 +25,7 @@ from dataclasses import asdict, dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 from urllib.parse import urlparse
 
 import cv2
@@ -35,6 +35,24 @@ from .housing_pose import JOINT_NAMES
 from .joint_contract import FRAME_ROBOT_ABS, JOINT_CONTRACT
 from .paths import CONFIG_DIR
 from .planar_pose import PlanarPoseEstimator
+
+
+# Robot Lab sets an intent; this server decides how to observe under it.
+#
+# TRACK keeps every camera on and never switches, because a camera that adds
+# nothing while the robot stands still may be the only one holding it as it
+# walks out of another view, and re-opening a camera costs about two seconds
+# of blindness on that view.
+# SURVEY permits coverage-driven arbitration, which is only safe while the
+# scene is static.
+OBSERVATION_MODE_TRACK = "track"
+OBSERVATION_MODE_SURVEY = "survey"
+OBSERVATION_MODES = (OBSERVATION_MODE_TRACK, OBSERVATION_MODE_SURVEY)
+
+# A feed older than this is reported unhealthy. Well above the ~0.1 s seen on
+# a healthy 10 fps camera, and well below the multi-second gaps that marked
+# the starved ones.
+STALE_FRAME_AGE_S = 2.0
 
 
 def decode_fourcc(value: float) -> str | None:
@@ -771,6 +789,52 @@ class StreamHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return
 
+    def _send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+        path = urlparse(self.path).path
+        if path != "/api/mode":
+            self.send_error(HTTPStatus.NOT_FOUND, "unknown endpoint")
+            return
+        # Deliberately the only writable route on this server. It selects how
+        # to observe and can never move a robot, which matters because :8766
+        # is reverse-tunnelled off this machine.
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            requested = json.loads(raw or b"{}")
+        except json.JSONDecodeError as error:
+            self._send_json(
+                {"ok": False, "error": f"invalid JSON: {error}"},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        if not isinstance(requested, dict) or "mode" not in requested:
+            self._send_json(
+                {"ok": False, "error": 'expected a JSON object with a "mode" key'},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            mode = self.server.set_observation_mode(requested["mode"])
+        except ValueError as error:
+            self._send_json(
+                {"ok": False, "error": str(error)},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        self._send_json({"ok": True, "observation_mode": mode})
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         path = urlparse(self.path).path
         if path == "/":
@@ -782,13 +846,19 @@ class StreamHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if path == "/status.json":
-            body = json.dumps({"cameras": [worker.snapshot()[1] for worker in self.server.workers]}).encode()
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json({
+                "observation_mode": self.server.observation_mode,
+                "cameras": [worker.snapshot()[1] for worker in self.server.workers],
+            })
+            return
+        if path in ("/api/cameras/health", "/api/cameras/health.json"):
+            self._send_json(self.server.camera_health())
+            return
+        if path == "/api/mode":
+            self._send_json({
+                "observation_mode": self.server.observation_mode,
+                "available_modes": list(OBSERVATION_MODES),
+            })
             return
         if path in ("/api/poses", "/api/poses.json"):
             body = json.dumps(self.server.pose_status()).encode()
@@ -925,13 +995,109 @@ class CameraHTTPServer(ThreadingHTTPServer):
         calibration_target: int = 12,
         pose_estimator: PlanarPoseEstimator | None = None,
         feedback_client: Any | None = None,
+        floor_anchor_ids: Sequence[int] = (),
     ):
         self.workers = workers
         self.calibration_directory = calibration_directory
         self.calibration_target = calibration_target
         self.pose_estimator = pose_estimator
         self.feedback_client = feedback_client
+        self.floor_anchor_ids = {int(value) for value in floor_anchor_ids}
+        # Robot Lab asks for an intent; this server decides how to observe.
+        # It is only ever an input: nothing here queries the robot or the Lab
+        # for task state, which keeps the observation-only boundary intact.
+        # A restart deliberately returns to TRACK, the mode that never turns a
+        # camera off.
+        self._observation_mode = OBSERVATION_MODE_TRACK
+        self._observation_mode_lock = threading.Lock()
         super().__init__(address, StreamHandler)
+
+    @property
+    def observation_mode(self) -> str:
+        with self._observation_mode_lock:
+            return self._observation_mode
+
+    def set_observation_mode(self, mode: str) -> str:
+        candidate = str(mode).strip().lower()
+        if candidate not in OBSERVATION_MODES:
+            raise ValueError(
+                f"unknown mode {mode!r}; expected one of "
+                f"{', '.join(sorted(OBSERVATION_MODES))}"
+            )
+        with self._observation_mode_lock:
+            self._observation_mode = candidate
+        return candidate
+
+    def camera_health(self) -> dict[str, Any]:
+        """Report which cameras are working and what each one adds.
+
+        The Lab needs two different things here.  "Is this camera working"
+        is per-camera and local.  "Is this camera worth keeping on" is a
+        comparison: a feed can be perfectly healthy and still contribute
+        nothing that another camera does not already see.  Both are reported
+        so a caller can distinguish a broken camera from a redundant one.
+        """
+
+        snapshots = [worker.snapshot()[1] for worker in self.workers]
+        tag_sets = {
+            int(item["index"]): {int(tag) for tag in item.get("tag_ids") or ()}
+            for item in snapshots
+        }
+        cameras: list[dict[str, Any]] = []
+        for item in snapshots:
+            slot = int(item["index"])
+            tags = tag_sets[slot]
+            others: set[int] = set()
+            for other_slot, other_tags in tag_sets.items():
+                if other_slot != slot:
+                    others |= other_tags
+            age = item.get("last_frame_age_s")
+            reasons: list[str] = []
+            if item.get("state") != "streaming":
+                reasons.append(f"state is {item.get('state')}")
+            if not item.get("frames"):
+                reasons.append("no frames delivered yet")
+            if age is None:
+                reasons.append("no frame timestamp")
+            elif age > STALE_FRAME_AGE_S:
+                reasons.append(f"last frame {age:.1f}s old")
+            if item.get("error"):
+                reasons.append(str(item["error"]))
+            cameras.append({
+                "slot": slot,
+                "device_name": item.get("device_name"),
+                "stable_id": item.get("requested_stable_id"),
+                "healthy": not reasons,
+                "reasons": reasons,
+                "state": item.get("state"),
+                "measured_fps": item.get("measured_fps"),
+                "frames": item.get("frames"),
+                "reconnects": item.get("reconnects"),
+                "last_frame_age_s": age,
+                "capture_size_px": [
+                    item.get("native_capture_width"),
+                    item.get("native_capture_height"),
+                ],
+                "tags_seen": len(tags),
+                "unique_tags": sorted(tags - others),
+                "floor_anchors_seen": sorted(tags & self.floor_anchor_ids),
+                # A healthy feed adding no unique tag is a candidate to drop or
+                # re-aim, never evidence that it is broken.
+                "redundant": bool(tags) and not (tags - others),
+            })
+        union = set().union(*tag_sets.values()) if tag_sets else set()
+        healthy = [item for item in cameras if item["healthy"]]
+        return {
+            "schema_version": 1,
+            "generated_at_unix_s": round(time.time(), 6),
+            "observation_mode": self.observation_mode,
+            "cameras_total": len(cameras),
+            "cameras_healthy": len(healthy),
+            "union_tags_seen": len(union),
+            "floor_anchors_seen": sorted(union & self.floor_anchor_ids),
+            "floor_anchors_missing": sorted(self.floor_anchor_ids - union),
+            "cameras": cameras,
+        }
 
     def pose_status(self) -> dict[str, Any]:
         if self.pose_estimator is None:
@@ -1242,8 +1408,9 @@ def main() -> None:
             args.camera_calibration = calibration_path
     else:
         camera_modes = parse_camera_modes(args.camera_mode)
+    floor_map = json.loads(args.floor_map.read_text())
     pose_estimator = PlanarPoseEstimator(
-        json.loads(args.floor_map.read_text()),
+        floor_map,
         json.loads(args.part_map.read_text()),
         json.loads(args.robot_tag_layout.read_text()),
         json.loads(args.camera_calibration.read_text()),
@@ -1294,6 +1461,7 @@ def main() -> None:
         calibration_target=args.calibration_target,
         pose_estimator=pose_estimator,
         feedback_client=feedback_client,
+        floor_anchor_ids=floor_map.get("active_anchor_ids") or (),
     )
     stop_requested = threading.Event()
 

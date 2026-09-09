@@ -480,6 +480,53 @@ Robot Lab using only its first-class versioned calibration endpoint.
 Do not add robot-control HTTP calls here to make the standalone UI's survey
 buttons work. That would break the intentional safety and ownership boundary.
 
+### Robot Lab asks; this server decides how to observe
+
+`robot_lab.py` is outbound only — it publishes finished calibrations to the
+authenticated Robot Lab. The multi-camera server also accepts an *inbound*
+intent so the Lab can say what it is doing without gaining any say over the
+cameras themselves, and without this package ever asking the robot or the Lab
+what task is running. That direction matters: the intent is an input, never a
+query, which is what keeps the observation-only boundary from leaking.
+
+```sh
+curl -s http://127.0.0.1:8766/api/mode
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"mode":"survey"}' http://127.0.0.1:8766/api/mode
+```
+
+- `track` (**the default, and what a restart returns to**): every camera stays
+  on and none is ever switched. Re-opening a camera costs about 2 s of
+  blindness on that view, and a camera contributing nothing while the robot
+  stands still may be the only one holding it as it walks out of another
+  view. Coverage-now is not coverage-next.
+- `survey`: coverage-driven arbitration is permitted, which is only safe while
+  the scene is static.
+
+`POST /api/mode` is deliberately the only writable route on this server. It
+selects how to observe and cannot move a robot — worth keeping that way,
+because `:8766` is reverse-tunnelled off the machine by the
+`com.lbiewald.hexapod-camera-tunnel` job.
+
+`GET /api/cameras/health` answers the two different questions a caller has.
+*Is this camera working* is per-camera and local: `healthy` plus a `reasons`
+list naming what failed (state, no frames, stale timestamp, or the worker's
+own error). *Is this camera worth keeping on* is comparative: `unique_tags`
+is what only that camera sees, and `redundant` marks a feed that is perfectly
+healthy while adding nothing another camera does not already cover. Keep those
+distinct — a redundant camera is a candidate to re-aim, never evidence of a
+fault. A camera seeing no tags at all is not marked redundant. The rollup adds
+`union_tags_seen` and the floor anchors seen and missing, taken from the floor
+map's `active_anchor_ids` rather than hardcoded.
+
+Arbitration itself is not implemented. The measured ingredients are here — a
+~2 s switch cost, one camera per USB controller, and a unique-tag signal that
+discriminated 7 against 0 in the same rig — but two hazards have to be
+designed for first: dropping an overlapping camera silently widens the yaw
+uncertainty that `PlanarPoseEstimator` derives partly from simultaneous
+cross-camera disagreement, and any selector needs hysteresis well beyond the
+switch cost or it will flap.
+
 `POST /api/vision/camera/stop` reports the camera as off without releasing the
 capture device. After a stop, `/api/vision/state` shows `enabled: false`,
 `status: "off"`, and `error: null`, yet the serving process can still hold the

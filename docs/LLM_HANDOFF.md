@@ -355,6 +355,22 @@ snapshots. Never implement orientation as an `img` CSS transform: that makes
 labels upside down and leaves displayed coordinates inconsistent with pose
 coordinates.
 
+**`localhost` is not interchangeable with `127.0.0.1` here.** macOS resolves
+`localhost` to `::1` as well as `127.0.0.1`, and Safari tries the IPv6 answer.
+The default `--host 127.0.0.1` listener is IPv4-only, so `http://[::1]:8766`
+is refused and Safari can show a page that never loads while `curl` and
+Chrome fall back to IPv4 and look fine. Either browse `http://127.0.0.1:8766`
+or start with `--host ::`, which binds dual-stack and answers `127.0.0.1`,
+`[::1]` and `localhost` alike -- at the cost of listening on every interface
+rather than loopback only, which matters because this port is already
+reverse-tunnelled. The server now picks its socket family from `--host`, so
+an IPv6 address actually binds instead of failing.
+
+Each camera also holds one long-lived connection for as long as it streams,
+against a browser limit of roughly six per host, so a stream that errors
+retries with a capped backoff rather than on a fixed timer -- a tight retry
+loop starves the page of the connections it needs for its own polling.
+
 The browser preview is deliberately small and is not the analysis path.
 `--preview-max-width` (default 640) and `--jpeg-quality` (default 70) affect
 only the annotated MJPEG the grid displays; detection runs on the

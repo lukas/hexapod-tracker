@@ -19,6 +19,8 @@ from __future__ import annotations
 import argparse
 import json
 import signal
+import socket
+import struct
 import threading
 import time
 import uuid
@@ -172,6 +174,53 @@ def annotate_tag_corners(
         cv2.LINE_AA,
     )
     return frame, tag_ids
+
+
+def favicon_ico(size: int = 32) -> bytes:
+    """Build a tag-like favicon as a PNG wrapped in an ICO container.
+
+    Drawn rather than shipped as a binary asset so it survives the
+    source-checkout layout this package assumes. ICO with a PNG payload is
+    what browsers, including Safari, expect at /favicon.ico.
+    """
+
+    cells = 8
+    glyph = np.zeros((cells, cells), dtype=np.uint8)
+    glyph[1:-1, 1:-1] = 255
+    # An off-centre interior keeps it recognisable as a tag rather than a
+    # checkerboard once scaled down to 16 px.
+    for row, column in ((2, 2), (2, 4), (3, 5), (4, 2), (5, 4), (5, 5)):
+        glyph[row, column] = 0
+    image = cv2.resize(glyph, (size, size), interpolation=cv2.INTER_NEAREST)
+    rgba = cv2.cvtColor(image, cv2.COLOR_GRAY2BGRA)
+    rgba[:, :, 3] = 255
+    ok, encoded = cv2.imencode(".png", rgba)
+    if not ok:
+        raise RuntimeError("OpenCV could not encode the favicon PNG")
+    payload = encoded.tobytes()
+    header = struct.pack("<HHH", 0, 1, 1)
+    entry = struct.pack(
+        "<BBBBHHII",
+        size if size < 256 else 0,
+        size if size < 256 else 0,
+        0,
+        0,
+        1,
+        32,
+        len(payload),
+        6 + 16,
+    )
+    return header + entry + payload
+
+
+_FAVICON_CACHE: bytes | None = None
+
+
+def favicon_bytes() -> bytes:
+    global _FAVICON_CACHE
+    if _FAVICON_CACHE is None:
+        _FAVICON_CACHE = favicon_ico()
+    return _FAVICON_CACHE
 
 
 def downscale_preview(frame: np.ndarray, max_width: int) -> np.ndarray:
@@ -549,6 +598,7 @@ INDEX_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Hexapod AprilTag cameras</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
 <style>
   :root { color-scheme: dark; font-family: system-ui, sans-serif; }
   body { margin: 20px; background: #101214; color: #eef1f3; }
@@ -658,14 +708,21 @@ function ensureCameraCard(c) {
     img.alt = `Camera ${c.index} — AprilTag annotated`;
     // A dropped multipart stream stays frozen on its last frame forever
     // unless something re-requests it.
+    // Back off rather than reconnecting on a fixed timer: a browser allows
+    // only a handful of connections per host, and each camera holds one open
+    // for as long as it streams, so a tight retry loop can starve the page
+    // itself of connections.
     img.addEventListener('error', () => {
       if (img.dataset.retrying === '1') return;
       img.dataset.retrying = '1';
+      const attempt = Number(img.dataset.attempts || '0') + 1;
+      img.dataset.attempts = String(attempt);
       setTimeout(() => {
         img.dataset.retrying = '0';
         attachStream(img, c.index);
-      }, 1500);
+      }, Math.min(1500 * attempt, 10000));
     });
+    img.addEventListener('load', () => { img.dataset.attempts = '0'; });
     attachStream(img, c.index);
     const meta = document.createElement('div');
     meta.className = 'meta';
@@ -899,6 +956,15 @@ class StreamHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if path in ("/favicon.ico", "/favicon.png"):
+            body = favicon_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/x-icon")
+            self.send_header("Cache-Control", "max-age=86400")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/status.json":
             self._send_json({
                 "server_run_id": SERVER_RUN_ID,
@@ -1042,6 +1108,27 @@ class StreamHandler(BaseHTTPRequestHandler):
 class CameraHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
+    @staticmethod
+    def _address_family(host: str) -> int:
+        """Pick the socket family from the requested host.
+
+        macOS resolves ``localhost`` to ``::1`` as well as ``127.0.0.1``, and
+        Safari tries the IPv6 answer. An IPv4-only listener refuses that
+        connection, which shows up as a browser that loads nothing at all
+        while curl and Chrome quietly fall back to IPv4.
+        """
+
+        try:
+            infos = socket.getaddrinfo(
+                host or None, None, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE
+            )
+        except socket.gaierror:
+            return socket.AF_INET
+        families = {info[0] for info in infos}
+        if socket.AF_INET in families:
+            return socket.AF_INET
+        return socket.AF_INET6 if socket.AF_INET6 in families else socket.AF_INET
+
     def __init__(
         self,
         address: tuple[str, int],
@@ -1058,6 +1145,10 @@ class CameraHTTPServer(ThreadingHTTPServer):
         self.pose_estimator = pose_estimator
         self.feedback_client = feedback_client
         self.floor_anchor_ids = {int(value) for value in floor_anchor_ids}
+        self.address_family = self._address_family(address[0])
+        if self.address_family == socket.AF_INET6:
+            # Dual-stack so an IPv6 bind still answers IPv4 clients.
+            self.allow_reuse_address = True
         # Robot Lab asks for an intent; this server decides how to observe.
         # It is only ever an input: nothing here queries the robot or the Lab
         # for task state, which keeps the observation-only boundary intact.
@@ -1066,6 +1157,14 @@ class CameraHTTPServer(ThreadingHTTPServer):
         self._observation_mode = OBSERVATION_MODE_TRACK
         self._observation_mode_lock = threading.Lock()
         super().__init__(address, StreamHandler)
+
+    def server_bind(self) -> None:
+        if self.address_family == socket.AF_INET6:
+            try:
+                self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            except OSError:
+                pass
+        super().server_bind()
 
     @property
     def observation_mode(self) -> str:

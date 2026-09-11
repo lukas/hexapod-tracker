@@ -131,6 +131,12 @@ class PlanarPoseEstimator:
         self.part_map = part_map
         self.robot_layout = robot_layout
         self.camera_calibration = camera_calibration
+        # The lab cameras are fixed. Once a view has been calibrated from the
+        # floor tags, keep that homography while the tags are hidden (the robot
+        # walks over them, a cable lands on one) instead of dropping every
+        # marker in the view. Held for at most hold_calibration_s.
+        self.hold_calibration_s = 3600.0
+        self._held: dict[int, tuple[CameraCalibration, float, tuple[int, int]]] = {}
         self.tag_size_mm = float(floor_map["tag_black_square_size"])
         active_ids = floor_map.get("active_anchor_ids")
         if active_ids is None:
@@ -963,9 +969,18 @@ class PlanarPoseEstimator:
     def estimate(self, snapshots: list[dict[str, Any]]) -> dict[str, Any]:
         calibration_json: dict[str, Any] = {}
         observations_by_tag: dict[int, list[dict[str, Any]]] = {}
+        now = time.monotonic()
         for snapshot in snapshots:
             calibration = self._calibrate_camera(snapshot)
             camera_key = str(snapshot["index"])
+            size = (int(snapshot["width"]), int(snapshot["height"]))
+            held = None
+            if calibration is not None:
+                self._held[int(snapshot["index"])] = (calibration, now, size)
+            else:
+                kept = self._held.get(int(snapshot["index"]))
+                if kept and kept[2] == size and now - kept[1] <= self.hold_calibration_s:
+                    calibration, held = kept[0], now - kept[1]
             if calibration is None:
                 calibration_json[camera_key] = {
                     "status": "uncalibrated",
@@ -977,9 +992,14 @@ class PlanarPoseEstimator:
                     "frame_age_s": _rounded(snapshot.get("frame_age_s")),
                 }
                 continue
-            calibration_json[camera_key] = calibration.as_json(
-                (int(snapshot["width"]), int(snapshot["height"])), snapshot.get("frame_age_s")
-            )
+            calibration_json[camera_key] = calibration.as_json(size, snapshot.get("frame_age_s"))
+            if held is not None:
+                calibration_json[camera_key].update({
+                    "status": "held",
+                    "held_for_s": _rounded(held),
+                    "reason": ("no floor anchor visible right now; reusing the calibration fitted "
+                               f"{held:.0f} s ago from anchors {calibration.anchor_ids} (fixed camera)"),
+                })
             for observation in self._camera_marker_estimates(snapshot, calibration):
                 observations_by_tag.setdefault(observation["tag_id"], []).append(observation)
 

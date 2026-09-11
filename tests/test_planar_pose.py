@@ -360,3 +360,35 @@ def test_intrinsic_calibration_recovers_hip_from_body_and_femur_tags():
     assert intrinsic["quality"] == "test"
     assert intrinsic["image_size"] == {"width": 1280, "height": 800}
     assert intrinsic["floor_reprojection_rms_px"] == 0.0
+
+
+def test_fixed_camera_keeps_its_floor_calibration_while_anchors_are_hidden():
+    floor_map = {
+        "tag_black_square_size": 27.0,
+        "active_anchor_ids": [100, 101, 102],
+        "tags": [
+            {"id": 100, "center": [0, 0, 0], "yaw_degrees": 0},
+            {"id": 101, "center": [0, 600, 0], "yaw_degrees": 0},
+            {"id": 102, "center": [600, 0, 0], "yaw_degrees": 0},
+        ],
+    }
+    homography = np.asarray([[1.2, 0.1, 200], [-0.08, 1.05, 80], [0.00015, 0.0002, 1]], dtype=np.float32)
+    def image(world):
+        return {t: cv2.perspectiveTransform(c[None], homography)[0] for t, c in world.items()}
+    estimator = PlanarPoseEstimator(floor_map, {"parts": []})
+    first = estimator.estimate([{"index": 2, "width": 1280, "height": 800,
+                                 "tags": image({100: corners((0, 0), 0), 101: corners((0, 600), 0),
+                                                102: corners((600, 0), 0), 7: corners((250, 250), 20)})}])
+    assert first["calibration"]["2"]["status"] == "calibrated"
+    assert abs(first["markers"]["7"]["position_mm"]["x"] - 250) < 2
+    # the robot walks over the floor tags: only the chassis tag is left in view
+    second = estimator.estimate([{"index": 2, "width": 1280, "height": 800,
+                                  "tags": image({7: corners((310, 250), 20)})}])
+    cal = second["calibration"]["2"]
+    assert cal["status"] == "held" and cal["anchor_ids"] == [100, 101, 102] and cal["held_for_s"] is not None
+    assert second["markers"]["7"]["status"] == "tracked"
+    assert abs(second["markers"]["7"]["position_mm"]["x"] - 310) < 2
+    # a different image size or an expired hold is not reused
+    estimator.hold_calibration_s = -1.0
+    third = estimator.estimate([{"index": 2, "width": 1280, "height": 800, "tags": image({7: corners((310, 250), 20)})}])
+    assert third["calibration"]["2"]["status"] == "uncalibrated" and "7" not in third["markers"]

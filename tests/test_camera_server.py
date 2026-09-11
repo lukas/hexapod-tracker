@@ -203,3 +203,19 @@ def test_detections_snapshot_serves_corners_in_snapshot_coordinates():
     assert snap["detect_seq"] == 3
     assert snap["tags"] == {"7": corners.tolist()}
     assert snap["frame_age_s"] is not None and snap["captured_unix"] is not None
+
+
+def test_duplicate_tag_ids_in_one_frame_are_dropped_and_reported():
+    from hexapod_tracker.camera_server import detect_tag_corners_with_duplicates, make_tag_detector
+
+    dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
+    image = np.full((300, 520, 3), 255, dtype=np.uint8)
+    for tag_id, x in ((7, 40), (7, 200), (9, 360)):       # two copies of 7, one of 9
+        marker = cv2.aruco.generateImageMarker(dictionary, tag_id, 120)
+        image[90:210, x:x + 120] = marker[:, :, None]
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    corners, duplicates = detect_tag_corners_with_duplicates(gray, make_tag_detector())
+
+    assert duplicates == [7]
+    assert sorted(corners) == [9]

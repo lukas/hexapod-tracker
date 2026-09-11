@@ -79,22 +79,41 @@ def enhance_for_tag_detection(gray: np.ndarray) -> np.ndarray:
     return cv2.addWeighted(enlarged, 1.8, blurred, -0.8, 0)
 
 
-def detect_tag_corners(
+def detect_tag_corners_with_duplicates(
     gray: np.ndarray,
     detector: cv2.aruco.ArucoDetector,
-) -> dict[int, np.ndarray]:
-    """Fuse native-resolution and 2x detections, preferring native corners."""
+) -> tuple[dict[int, np.ndarray], list[int]]:
+    """Fuse native-resolution and 2x detections, preferring native corners.
+
+    An id decoded at two places in the same image (a spare tag lying in view,
+    a printed sheet in a parts bag) is ambiguous: neither copy is returned and
+    the id is listed so the operator can move the spare out of the frame.
+    """
     detections: dict[int, np.ndarray] = {}
+    ambiguous: set[int] = set()
     for image, scale in ((gray, 1.0), (enhance_for_tag_detection(gray), 2.0)):
         corners, ids, _rejected = detector.detectMarkers(image)
         if ids is None:
             continue
+        seen_here: dict[int, int] = {}
+        for raw_id in ids.flatten():
+            seen_here[int(raw_id)] = seen_here.get(int(raw_id), 0) + 1
+        ambiguous.update(tag_id for tag_id, count in seen_here.items() if count > 1)
         for corner, raw_id in zip(corners, ids.flatten(), strict=True):
             tag_id = int(raw_id)
-            if tag_id not in detections:
+            if tag_id not in detections and seen_here[tag_id] == 1:
                 detections[tag_id] = corner[0].astype(np.float32) / scale
+    for tag_id in ambiguous:
+        detections.pop(tag_id, None)
+    return detections, sorted(ambiguous)
 
-    return detections
+
+def detect_tag_corners(
+    gray: np.ndarray,
+    detector: cv2.aruco.ArucoDetector,
+) -> dict[int, np.ndarray]:
+    """Fuse native-resolution and 2x detections, preferring native corners; drops ambiguous ids."""
+    return detect_tag_corners_with_duplicates(gray, detector)[0]
 
 
 def detect_tags(
@@ -251,6 +270,11 @@ def favicon_bytes() -> bytes:
     return _FAVICON_CACHE
 
 
+# Ambiguous ids from the most recent detection per capture object, read by
+# the worker right after detect_tags_at_best_resolution (same thread).
+LAST_DUPLICATE_IDS: dict[int, list[int]] = {}
+
+
 def detect_tags_at_best_resolution(
     capture: Any,
     frame: np.ndarray,
@@ -274,8 +298,11 @@ def detect_tags_at_best_resolution(
     gray = getattr(capture, "detection_gray", None)
     if gray is None or gray.ndim != 2 or gray.shape[1] <= frame.shape[1]:
         fallback = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        return detect_tag_corners(fallback, detector), (frame.shape[1], frame.shape[0])
-    corners = detect_tag_corners(gray, detector)
+        corners, duplicates = detect_tag_corners_with_duplicates(fallback, detector)
+        LAST_DUPLICATE_IDS[id(capture)] = duplicates
+        return corners, (frame.shape[1], frame.shape[0])
+    corners, duplicates = detect_tag_corners_with_duplicates(gray, detector)
+    LAST_DUPLICATE_IDS[id(capture)] = duplicates
     scale = frame.shape[1] / gray.shape[1]
     if scale != 1.0:
         corners = {tag: value * scale for tag, value in corners.items()}
@@ -395,6 +422,7 @@ class CameraWorker:
         # Counts detector passes so a client polling /api/detections.json can
         # tell a fresh set of corners from the previous one served again.
         self._detect_seq = 0
+        self._last_duplicate_ids: list[int] = []
         self.width = width
         self.height = height
         self.fps = fps
@@ -601,6 +629,7 @@ class CameraWorker:
                 "detect_width": self.status.detect_width,
                 "detect_height": self.status.detect_height,
                 "detect_seq": self._detect_seq,
+                "duplicate_ids": list(self._last_duplicate_ids),
                 "frame_age_s": age,
                 "captured_unix": self._last_frame_unix,
                 "tags": {
@@ -773,6 +802,7 @@ class CameraWorker:
                     )
                     self.status.detect_width, self.status.detect_height = detect_size
                     self._last_detect_corners = tag_corners
+                    self._last_duplicate_ids = LAST_DUPLICATE_IDS.pop(id(cap), [])
                     self._last_detect_at = now
                     self._detect_seq += 1
                 else:

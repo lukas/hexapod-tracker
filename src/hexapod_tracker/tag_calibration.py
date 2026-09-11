@@ -66,7 +66,7 @@ import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from .camera_server import detect_tag_corners, make_tag_detector
+from .camera_server import detect_tag_corners_with_duplicates, make_tag_detector
 from .layout_audit import AXIS_VECTORS, declared_gap_notes, validate_layout
 from .paths import CONFIG_DIR
 
@@ -135,6 +135,7 @@ class Cameras:
         self.detector = make_tag_detector()
         self.size: dict[int, tuple[int, int]] = {}
         self.server_detections: Optional[bool] = None   # unknown until first tried
+        self.duplicate_ids: dict[int, set[int]] = {}    # camera -> ids decoded twice in one frame
 
     def snapshot(self, i: int) -> np.ndarray:
         with urllib.request.urlopen(f"{self.base}/snapshot/{i}.jpg", timeout=6) as r:
@@ -161,6 +162,13 @@ class Cameras:
         self.server_detections = True
         return {int(c["index"]): c for c in doc.get("cameras", [])}
 
+    def _note_duplicates(self, cam: int, ids: list) -> None:
+        new = set(int(t) for t in ids) - self.duplicate_ids.setdefault(cam, set())
+        if new:
+            self.duplicate_ids[cam] |= new
+            print(f"camera {cam}: ids {sorted(new)} decoded at two places in one frame (a spare tag in view?); "
+                  f"those ids are ignored while it lasts. Move spare tags out of the frame.", flush=True)
+
     def observe(self, frames: int = FRAMES_PER_STATE) -> dict[int, dict[str, Any]]:
         """Per camera: ``{"tags": {id: 4x2 corners}, "image": last frame, "size": (w, h)}``."""
         out: dict[int, dict[str, Any]] = {}
@@ -181,6 +189,7 @@ class Cameras:
                     fresh = c.get("detect_seq") != last_seq.get(i) and (c.get("frame_age_s") or 0.0) < 2.0
                     if fresh:
                         last_seq[i] = c.get("detect_seq")
+                        self._note_duplicates(i, c.get("duplicate_ids") or [])
                         w = float(c.get("width") or images[i].shape[1])
                         scale = images[i].shape[1] / w
                         for tid, corners in c["tags"].items():
@@ -193,7 +202,9 @@ class Cameras:
                         except (urllib.error.URLError, RuntimeError, OSError):
                             continue
                     gray = cv2.cvtColor(images[i], cv2.COLOR_BGR2GRAY)
-                    for tid, corners in detect_tag_corners(gray, self.detector).items():
+                    corners_by_id, duplicates = detect_tag_corners_with_duplicates(gray, self.detector)
+                    self._note_duplicates(i, duplicates)
+                    for tid, corners in corners_by_id.items():
                         seen[i].setdefault(tid, []).append(np.asarray(corners, dtype=np.float64))
             time.sleep(0.15)
         need = max(1, (frames + 1) // 2)
@@ -1466,6 +1477,10 @@ def run(args) -> int:
         log(f"WARNING {derived['warning']}")
     assembled = assemble_layout(old_layout, old_map, floor, derived, yaw_sense=yaw_sense, yaw_sense_source=yaw_source,
                                 moved=moving, cameras=cameras, out_dir=str(out))
+    if not args.replay and any(cams.duplicate_ids.values()):
+        report["duplicate_ids_seen"] = {str(c): sorted(v) for c, v in cams.duplicate_ids.items() if v}
+        log(f"WARNING duplicate tag ids were in view: {report['duplicate_ids_seen']}; spare tags near the robot "
+            f"make the detector's choice arbitrary; move them away and rerun")
     report.update(diff=assembled["diff"], notes={str(k): v for k, v in derived["notes"].items()},
                   azimuth_deg={str(k): v for k, v in derived["azimuth_deg"].items()},
                   azimuth_residual_deg={str(k): v for k, v in derived["azimuth_residual_deg"].items()},

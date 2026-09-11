@@ -197,17 +197,19 @@
     "euler_xyz_deg": [
      0.0,
      0.0,
-     7.2
+     12.2
     ]
    },
    "measured_from_legs": [
-    0,
-    1,
-    4
+    2,
+    3,
+    4,
+    5
    ],
    "observed_in": [
     2
    ],
+   "note": "rotation kept from the pass that saw 4 legs with both lids; this pass saw 5",
    "verified": true
   },
   {

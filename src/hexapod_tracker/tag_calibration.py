@@ -1013,9 +1013,11 @@ def assemble_layout(old_layout: dict, old_map: dict, floor: dict, derived: dict[
                  "about x, not a reflection. Azimuths below were measured at the commanded zero pose, so each yaw "
                  "servo's zero offset is absorbed into its leg's azimuth."),
     }
-    azimuths = {str(leg): derived["azimuth_deg"].get(leg, nominal_azimuth_deg(leg)) for leg in LEGS}
+    # A leg this pass could not see keeps the azimuth an earlier pass measured.
+    prior = {int(k): float(v) for k, v in (old_layout.get("leg_zero_azimuth_body_deg") or {}).items()}
+    azimuths = {str(leg): derived["azimuth_deg"].get(leg, prior.get(leg, nominal_azimuth_deg(leg))) for leg in LEGS}
     layout["leg_zero_azimuth_body_deg"] = azimuths
-    layout["leg_zero_azimuth_measured"] = sorted(derived["azimuth_deg"])
+    layout["leg_zero_azimuth_measured"] = sorted(set(derived["azimuth_deg"]) | set(prior) & set(old_layout.get("leg_zero_azimuth_measured") or []))
     yaw_sign = None
     if yaw_sense == "clockwise":
         yaw_sign = -1

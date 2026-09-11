@@ -20,9 +20,51 @@ def test_hexapod_1_layout_matches_consumer_configs():
     )
 
     assert problems == []
-    assert len(layout["robot_tags"]) == 37
-    assert len({tag["id"] for tag in layout["robot_tags"]}) == 37
+    ids = [tag["id"] for tag in layout["robot_tags"]]
+    assert len(ids) == len(set(ids))
+    assert sum(tag["kind"] == "chassis_tag" for tag in layout["robot_tags"]) == 1
+    # Every mount is either carried by a tag or declared as a gap; 37 is the
+    # full complement (1 chassis + 12 lids + 24 yoke faces).
+    assert len(ids) + len(layout.get("unresolved_mounts", [])) == 37
     assert len(layout["floor"]["tags"]) == 7
+
+
+def _minimal_layout(**overrides):
+    tags = [{"id": 0, "kind": "chassis_tag", "frame": "body", "surface": "horizontal",
+             "frame_from_tag": {"euler_xyz_deg": [0, 0, 0]}}]
+    next_id = 1
+    for leg in range(6):
+        for joint in ("hip", "knee"):
+            tags.append({"id": next_id, "kind": "servo_lid", "leg": leg, "joint": joint,
+                         "frame": f"L{leg}_{'coxa' if joint == 'hip' else 'femur'}",
+                         "surface": "horizontal", "frame_from_tag": {"euler_xyz_deg": [0, 0, 90]}})
+            next_id += 1
+            for side in ("+y", "-y"):
+                tags.append({"id": next_id, "kind": "yoke_face", "leg": leg, "joint": joint,
+                             "frame": f"L{leg}_{'femur' if joint == 'hip' else 'tibia'}",
+                             "mount_side": side,
+                             "frame_from_tag": {"quaternion_xyzw": [0.5, 0.5, 0.5, -0.5],
+                                                "tag_axes_in_frame": {"x": "+z", "y": "+x", "z": "+y"}}})
+                next_id += 1
+    layout = {"robot_tags": tags, "floor": {"tags": []}, "unresolved_mounts": []}
+    layout.update(overrides)
+    return layout
+
+
+def test_declared_gap_is_a_note_and_undeclared_gap_is_a_problem():
+    layout = _minimal_layout()
+    assert validate_layout(layout) == []
+    layout["robot_tags"] = [t for t in layout["robot_tags"]
+                            if not (t.get("leg") == 4 and t.get("joint") == "hip" and t.get("mount_side") == "+y")]
+    assert validate_layout(layout) == ["L4 hip yoke sides are ['-y']"]
+    layout["unresolved_mounts"] = [{"leg": 4, "joint": "hip", "kind": "yoke_face", "mount_side": "+y",
+                                    "reason": "no camera saw this face on 2026-09-11", "since": "2026-09-11"}]
+    assert validate_layout(layout) == []
+    # A declared gap does not excuse a different one, and needs a side for a face.
+    layout["unresolved_mounts"] = [{"leg": 4, "joint": "knee", "kind": "yoke_face", "mount_side": "+y", "reason": "x"}]
+    assert "L4 hip yoke sides are ['-y']" in validate_layout(layout)
+    layout["unresolved_mounts"] = [{"leg": 4, "joint": "hip", "kind": "yoke_face", "reason": "x"}]
+    assert any("needs a mount_side" in p for p in validate_layout(layout))
 
 
 def test_audit_preserves_duplicate_detections_and_writes_annotation(tmp_path):

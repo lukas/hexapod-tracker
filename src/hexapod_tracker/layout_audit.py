@@ -54,6 +54,48 @@ def _expected_yoke_pairs(layout: dict[str, Any]) -> dict[tuple[int, str], list[i
     }
 
 
+def _declared_gaps(
+    layout: dict[str, Any], issues: list[str]
+) -> set[tuple[int, str, str, str | None]]:
+    """Mounts the layout admits it has no tag for.
+
+    ``unresolved_mounts`` entries look like ``{"leg": 4, "joint": "hip", "kind":
+    "yoke_face", "mount_side": "+y", "reason": "...", "since": "2026-09-11"}``.
+    A declared gap is a note for the operator, not a validation failure; an
+    undeclared missing lid or face still is one.
+    """
+    gaps: set[tuple[int, str, str, str | None]] = set()
+    for entry in layout.get("unresolved_mounts") or []:
+        try:
+            leg = int(entry["leg"])
+            joint = str(entry["joint"])
+            kind = str(entry["kind"])
+            side = entry.get("mount_side")
+        except (KeyError, TypeError, ValueError):
+            issues.append(f"malformed unresolved mount {entry!r}")
+            continue
+        if joint not in ("hip", "knee") or kind not in ("servo_lid", "yoke_face"):
+            issues.append(f"malformed unresolved mount {entry!r}")
+            continue
+        if kind == "yoke_face" and side not in ("+y", "-y"):
+            issues.append(f"unresolved yoke face needs a mount_side: {entry!r}")
+            continue
+        if not entry.get("reason"):
+            issues.append(f"unresolved mount without a reason: {entry!r}")
+        gaps.add((leg, joint, kind, str(side) if kind == "yoke_face" else None))
+    return gaps
+
+
+def declared_gap_notes(layout: dict[str, Any]) -> list[str]:
+    """Human-readable list of the gaps a layout declares."""
+    return [
+        f"L{entry.get('leg')} {entry.get('joint')} {entry.get('kind')}"
+        + (f" {entry.get('mount_side')}" if entry.get("mount_side") else "")
+        + f": {entry.get('reason', 'no reason given')}"
+        for entry in layout.get("unresolved_mounts") or []
+    ]
+
+
 def validate_layout(
     layout: dict[str, Any],
     floor_map: dict[str, Any] | None = None,
@@ -73,8 +115,7 @@ def validate_layout(
     overlap = sorted(set(robot_ids) & set(floor_ids))
     if overlap:
         issues.append(f"robot/floor ID overlap: {overlap}")
-    if layout.get("unresolved_mounts"):
-        issues.append("layout has unresolved mounts")
+    declared_gaps = _declared_gaps(layout, issues)
     if layout.get("id_collisions"):
         issues.append("layout declares ID collisions")
 
@@ -90,7 +131,7 @@ def validate_layout(
                 and tag.get("leg") == leg
                 and tag.get("joint") == joint
             ]
-            if len(lids) != 1:
+            if len(lids) > 1 or (not lids and (leg, joint, "servo_lid", None) not in declared_gaps):
                 issues.append(f"L{leg} {joint} has {len(lids)} servo-lid tags")
             faces = [
                 tag
@@ -100,7 +141,11 @@ def validate_layout(
                 and tag.get("joint") == joint
             ]
             sides = [str(tag.get("mount_side")) for tag in faces]
-            if sorted(sides) != ["+y", "-y"]:
+            missing = {"+y", "-y"} - set(sides)
+            undeclared = {
+                side for side in missing if (leg, joint, "yoke_face", side) not in declared_gaps
+            }
+            if len(sides) != len(set(sides)) or (set(sides) - {"+y", "-y"}) or undeclared:
                 issues.append(f"L{leg} {joint} yoke sides are {sorted(sides)}")
 
     for tag in robot_tags:

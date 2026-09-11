@@ -197,13 +197,12 @@
     "euler_xyz_deg": [
      0.0,
      0.0,
-     10.6
+     -35.6
     ]
    },
    "observed_in": [
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 1,
@@ -222,8 +221,7 @@
    },
    "observed_in": [
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 3,
@@ -243,8 +241,7 @@
    "observed_in": [
     1,
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 4,
@@ -263,8 +260,7 @@
    },
    "observed_in": [
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 5,
@@ -283,8 +279,7 @@
    },
    "observed_in": [
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 7,
@@ -303,8 +298,7 @@
    },
    "observed_in": [
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 9,
@@ -323,8 +317,7 @@
    },
    "observed_in": [
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 10,
@@ -343,8 +336,7 @@
    },
    "observed_in": [
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 11,
@@ -363,8 +355,7 @@
    },
    "observed_in": [
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 14,
@@ -383,8 +374,7 @@
    },
    "observed_in": [
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 39,
@@ -410,8 +400,7 @@
    "observed_in": [
     1,
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 44,
@@ -437,8 +426,7 @@
    "observed_in": [
     1,
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 48,
@@ -463,8 +451,7 @@
    },
    "observed_in": [
     1
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 52,
@@ -490,8 +477,7 @@
    "observed_in": [
     1,
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 53,
@@ -516,8 +502,7 @@
    },
    "observed_in": [
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 59,
@@ -542,8 +527,7 @@
    },
    "observed_in": [
     1
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 64,
@@ -569,8 +553,7 @@
    "observed_in": [
     1,
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 109,
@@ -589,8 +572,7 @@
    },
    "observed_in": [
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 113,
@@ -609,8 +591,7 @@
    },
    "observed_in": [
     2
-   ],
-   "verified": true
+   ]
   },
   {
    "id": 42,
@@ -999,42 +980,10 @@
    "verified": false
   }
  ],
- "unresolved_mounts": [
-  {
-   "leg": 0,
-   "joint": "hip",
-   "kind": "yoke_face",
-   "mount_side": "-y",
-   "reason": "no camera saw a tag on this face during the 2026-09-11 pass and the previous layout had none",
-   "since": "2026-09-11"
-  },
-  {
-   "leg": 4,
-   "joint": "hip",
-   "kind": "servo_lid",
-   "reason": "no camera saw a lid tag on this servo during the 2026-09-11 pass",
-   "since": "2026-09-11"
-  },
-  {
-   "leg": 4,
-   "joint": "hip",
-   "kind": "yoke_face",
-   "mount_side": "+y",
-   "reason": "no camera saw a tag on this face during the 2026-09-11 pass and the previous layout had none",
-   "since": "2026-09-11"
-  },
-  {
-   "leg": 5,
-   "joint": "knee",
-   "kind": "yoke_face",
-   "mount_side": "-y",
-   "reason": "no camera saw a tag on this face during the 2026-09-11 pass and the previous layout had none",
-   "since": "2026-09-11"
-  }
- ],
+ "unresolved_mounts": [],
  "id_collisions": [],
  "evidence": {
-  "method": "hexapod-calibrate-tags: motion partition + lid-plane geometry + Claude census",
+  "method": "hexapod-relayout: motion partition + IPPE geometry + Claude cross-check",
   "cameras": [
    1,
    2
@@ -1069,59 +1018,11 @@
    112,
    113
   ],
-  "focal_fit_px": {
-   "1": {
-    "f_px": 992.0,
-    "normal_spread_deg": 0.85,
-    "tags": 6
-   },
-   "2": {
-    "f_px": 1056.0,
-    "normal_spread_deg": 2.07,
-    "tags": 14
-   }
-  },
-  "output_dir": "/Users/lukas/Library/Application Support/Hexapod Lab/v2/tag-calibration-20260911-replay"
+  "output_dir": "/Users/lukas/Library/Application Support/Hexapod Lab/v2/relayout-20260911d-write"
  },
  "limitations": [
   "Robot-tag translations are null; the tracker never reads them.",
-  "Tags with verified=false were carried from the previous layout unseen; turn the robot and rerun to confirm them.",
-  "Lid rotations are snapped to 90 deg; residuals are in the report.",
-  "Leg azimuths include each yaw servo's zero offset at the commanded zero pose."
- ],
- "body_frame": {
-  "axes": "+z up, +x forward between legs 0 and 5, +y = z cross x",
-  "leg_numbering_from_above": "clockwise",
-  "nominal_leg_azimuth_deg": {
-   "0": -30.0,
-   "1": -90.0,
-   "2": -150.0,
-   "3": 150.0,
-   "4": 90.0,
-   "5": 30.0
-  },
-  "note": "The gait code's own frame puts leg i at +(i+0.5)*60 deg and counts a clockwise yaw as positive; it is this frame mirrored (y and z flipped). Azimuths below were measured at the commanded zero pose, so a joint's yaw servo zero offset is absorbed into its azimuth."
- },
- "leg_zero_azimuth_body_deg": {
-  "0": -18.5,
-  "1": -95.7,
-  "2": -158.9,
-  "3": 141.1,
-  "4": 94.4,
-  "5": 37.6
- },
- "leg_zero_azimuth_measured": [
-  0,
-  1,
-  2,
-  3,
-  4,
-  5
- ],
- "joint_conventions": {
-  "yaw_positive_seen_from_above": "clockwise",
-  "yaw_sign_in_body_frame": -1,
-  "source": "given on the command line (--yaw-sense)",
-  "note": "robot yaw = yaw_sign_in_body_frame * (coxa heading - body heading - leg zero azimuth)"
- }
+  "Yoke faces carried from the old layout with verified=false were not seen by any camera; rotate the robot and rerun to confirm them.",
+  "Lid rotations are snapped to 90 deg; residuals are in the report."
+ ]
 }

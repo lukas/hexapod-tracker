@@ -151,6 +151,12 @@ class PlanarPoseEstimator:
             tag for tag in horizontal_tags.values() if tag.get("kind") == "chassis_tag"
         ]
         self.chassis_tag = chassis_tags[0] if len(chassis_tags) == 1 else None
+        self.leg_zero_azimuth_deg = {
+            int(leg): float(value)
+            for leg, value in (robot_layout or {}).get("leg_zero_azimuth_body_deg", {}).items()
+        }
+        conventions = (robot_layout or {}).get("joint_conventions") or {}
+        self.yaw_sign = float(conventions.get("yaw_sign_in_body_frame") or 1.0)
         self.yaw_lid_by_leg = {
             int(tag["leg"]): tag
             for tag in horizontal_tags.values()
@@ -558,6 +564,15 @@ class PlanarPoseEstimator:
         residual = float((fitted.inv() * rotation).magnitude())
         return math.degrees(yaw), math.degrees(pitch), math.degrees(residual)
 
+    def leg_zero_azimuth(self, leg: int) -> float:
+        """Where leg ``leg`` points at the zero pose, degrees from body +x.
+
+        Measured per leg by hexapod-calibrate-tags when the layout carries
+        ``leg_zero_azimuth_body_deg``; otherwise the historical counter-clockwise
+        assumption of (leg + 0.5) * 60.
+        """
+        return self.leg_zero_azimuth_deg.get(int(leg), (int(leg) + 0.5) * 60.0)
+
     def _camera_segment_joints(
         self,
         snapshots: list[dict[str, Any]],
@@ -616,7 +631,7 @@ class PlanarPoseEstimator:
                     camera_from_segment = tag_rotation * frame_from_tag.inv()
                     body_from_segment = camera_from_body.inv() * camera_from_segment
                     leg_from_segment = Rotation.from_rotvec(
-                        [0.0, 0.0, -(leg + 0.5) * math.pi / 3.0]
+                        [0.0, 0.0, -math.radians(self.leg_zero_azimuth(leg))]
                     ) * body_from_segment
                     yaw, plane_angle, residual = self._decompose_leg_rotation(
                         leg_from_segment
@@ -826,7 +841,7 @@ class PlanarPoseEstimator:
                 }
                 continue
 
-            zero_azimuth = (leg + 0.5) * 60.0
+            zero_azimuth = self.leg_zero_azimuth(leg)
             observations = []
             for camera_index in common_cameras:
                 body_observation = body_by_camera[camera_index]
@@ -835,10 +850,15 @@ class PlanarPoseEstimator:
                     body_observation, self.chassis_tag
                 )
                 observation_coxa_heading = self._frame_heading(lid_observation, lid)
+                # The layout says which way the servo's positive yaw turns in the
+                # body frame; the tracker reports yaw in the robot's own sense.
                 observation_value = _signed_angle_degrees(
-                    observation_coxa_heading
-                    - observation_body_heading
-                    - zero_azimuth
+                    self.yaw_sign
+                    * (
+                        observation_coxa_heading
+                        - observation_body_heading
+                        - zero_azimuth
+                    )
                 )
                 corner_error = math.hypot(
                     float(body_observation.get("heading_error_95_degrees", 1.0)),
@@ -886,6 +906,7 @@ class PlanarPoseEstimator:
                 "body_heading_world_deg": _rounded(body_heading),
                 "coxa_heading_world_deg": _rounded(coxa_heading),
                 "leg_zero_azimuth_body_deg": _rounded(zero_azimuth),
+                "yaw_sign_in_body_frame": self.yaw_sign,
                 "camera_indices": common_cameras,
                 "uncertainty_method": (
                     "paired same-camera relative heading; conservative corner "

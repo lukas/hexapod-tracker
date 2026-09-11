@@ -1,0 +1,81 @@
+{
+ "legs": {
+  "0": {
+   "coxa": [
+    1
+   ],
+   "femur": [
+    7
+   ],
+   "tibia": [
+    52
+   ],
+   "conflicts": [],
+   "contradictions": []
+  },
+  "1": {
+   "coxa": [
+    109
+   ],
+   "femur": [
+    48,
+    113
+   ],
+   "tibia": [
+    59
+   ],
+   "conflicts": [],
+   "contradictions": []
+  },
+  "2": {
+   "coxa": [
+    3
+   ],
+   "femur": [
+    10,
+    39
+   ],
+   "tibia": [
+    64
+   ],
+   "conflicts": [],
+   "contradictions": []
+  },
+  "3": {
+   "coxa": [
+    5
+   ],
+   "femur": [
+    9
+   ],
+   "tibia": [
+    44
+   ],
+   "conflicts": [],
+   "contradictions": []
+  },
+  "4": {
+   "coxa": [],
+   "femur": [
+    11
+   ],
+   "tibia": [],
+   "conflicts": [],
+   "contradictions": []
+  },
+  "5": {
+   "coxa": [
+    4
+   ],
+   "femur": [
+    14,
+    53
+   ],
+   "tibia": [],
+   "conflicts": [],
+   "contradictions": []
+  }
+ },
+ "yaw_sense": "clockwise",
+ "note": "link assignment from the 2026-09-11 motion pass (relayout-20260911c); Claude answers and images dropped"
+}

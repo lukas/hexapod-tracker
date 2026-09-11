@@ -192,6 +192,58 @@ def test_floor_rectification_recovers_robot_relative_yaw_from_horizontal_tags():
     assert camera_pose["joints"]["L1_yaw"]["status"] == "layout_unavailable"
 
 
+def test_yaw_uses_measured_azimuth_and_sign_from_the_layout():
+    floor_map = {
+        "tag_black_square_size": 27.0,
+        "active_anchor_ids": [100, 101, 102],
+        "tags": [
+            {"id": 100, "center": [0, 0, 0], "yaw_degrees": 0},
+            {"id": 101, "center": [0, 600, 0], "yaw_degrees": 0},
+            {"id": 102, "center": [600, 0, 0], "yaw_degrees": 0},
+        ],
+    }
+    layout = {
+        "robot_tags": [
+            {"id": 0, "kind": "chassis_tag", "frame": "body", "surface": "horizontal",
+             "frame_from_tag": {"euler_xyz_deg": [0, 0, 10.6]}},
+            {"id": 1, "kind": "servo_lid", "leg": 0, "joint": "hip", "frame": "L0_coxa",
+             "surface": "horizontal", "frame_from_tag": {"euler_xyz_deg": [0, 0, 90]}},
+        ],
+        # As measured on 2026-09-11: legs numbered clockwise from above, leg 0 at
+        # -18.5 deg (its yaw servo zero is 11.5 deg off nominal), and a positive
+        # yaw command turns the leg clockwise, i.e. negative in the z-up frame.
+        "leg_zero_azimuth_body_deg": {"0": -18.5, "1": -95.7},
+        "joint_conventions": {"yaw_positive_seen_from_above": "clockwise", "yaw_sign_in_body_frame": -1},
+    }
+    # Body at +15. A commanded yaw of +12 turns leg 0 clockwise: coxa heading
+    # is 15 + (-18.5) - 12 = -15.5.
+    world_tags = {
+        100: corners((0, 0), 0),
+        101: corners((0, 600), 0),
+        102: corners((600, 0), 0),
+        0: corners((250, 250), 15 + 10.6),
+        1: corners((330, 330), -15.5 + 90),
+    }
+    homography = np.asarray(
+        [[1.2, 0.1, 200], [-0.08, 1.05, 80], [0.00015, 0.0002, 1]], dtype=np.float32
+    )
+    image_tags = {
+        tag_id: cv2.perspectiveTransform(points[None], homography)[0]
+        for tag_id, points in world_tags.items()
+    }
+    estimator = PlanarPoseEstimator(floor_map, {"parts": []}, layout)
+    assert estimator.leg_zero_azimuth(0) == -18.5
+    assert estimator.leg_zero_azimuth(3) == 210.0  # no measurement: historical fallback
+
+    yaw = estimator.estimate(
+        [{"index": 2, "width": 1280, "height": 800, "tags": image_tags}]
+    )["camera_joint_pose"]["joints"]["L0_yaw"]
+    assert yaw["status"] == "tracked"
+    assert abs(yaw["value_deg"] - 12.0) < 0.02
+    assert yaw["leg_zero_azimuth_body_deg"] == -18.5
+    assert yaw["yaw_sign_in_body_frame"] == -1
+
+
 def test_intrinsic_calibration_recovers_hip_from_body_and_femur_tags():
     camera_matrix = np.asarray(
         [[800.0, 0.0, 640.0], [0.0, 800.0, 400.0], [0.0, 0.0, 1.0]],

@@ -158,7 +158,7 @@ def test_detection_uses_the_full_resolution_luma_and_rescales_corners(monkeypatc
         seen['shape'] = image.shape
         return {7: np.array([[300.0, 600.0]], dtype=np.float32)}
 
-    monkeypatch.setattr(cs, 'detect_tag_corners', fake_detect)
+    monkeypatch.setattr(cs, 'detect_tag_corners_with_duplicates', lambda image, det: (fake_detect(image, det), []))
     corners, size = cs.detect_tags_at_best_resolution(_FakeCapture(gray), frame, None)
 
     assert seen['shape'] == (1080, 1920)   # detected on the big image
@@ -177,7 +177,7 @@ def test_detection_falls_back_when_no_larger_image_exists(monkeypatch):
         seen['shape'] = image.shape
         return {}
 
-    monkeypatch.setattr(cs, 'detect_tag_corners', fake_detect)
+    monkeypatch.setattr(cs, 'detect_tag_corners_with_duplicates', lambda image, det: (fake_detect(image, det), []))
     # No native plane at all, and a plane no bigger than the frame, both fall back.
     for capture in (_FakeCapture(None), _FakeCapture(np.zeros((360, 640), dtype=np.uint8))):
         _corners, size = cs.detect_tags_at_best_resolution(capture, frame, None)

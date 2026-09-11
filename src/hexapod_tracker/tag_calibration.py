@@ -955,6 +955,7 @@ def derive_layout(zero: dict[int, dict[int, np.ndarray]], sizes: dict[int, tuple
         if 0 in tops and body_x is not None:
             raw = plane.angle(body_x, plane.tag_x(tops[0]))
             entry["frame_from_tag"] = {"translation_m": None, "euler_xyz_deg": [0.0, 0.0, round(raw, 1)]}
+            entry["measured_from_legs"] = sorted(leg for leg in axis_of if result["axis_quality"].get(leg) == "two_lids")
             notes[0] = {"measured_z_deg": round(raw, 1), "legs_used": sorted(axis_of),
                         "old_z_deg": old_by_id[0]["frame_from_tag"]["euler_xyz_deg"][2] if 0 in old_by_id else None}
             log(f"chassis tag 0: euler z {raw:+.1f} from {len(axis_of)} legs"
@@ -982,6 +983,16 @@ def assemble_layout(old_layout: dict, old_map: dict, floor: dict, derived: dict[
     today = today or dt.date.today().isoformat()
     old_by_id = {int(t["id"]): t for t in old_layout.get("robot_tags", [])}
     new_tags = [dict(t) for t in derived["tags"]]
+    # Body +x is a mean over the legs in view, so the chassis rotation from a pass
+    # that saw more legs with both lids is the better one; keep it.
+    for e in new_tags:
+        if e.get("kind") == "chassis_tag" and e["id"] in old_by_id:
+            prior = old_by_id[e["id"]]
+            if len(prior.get("measured_from_legs") or []) > len(e.get("measured_from_legs") or []):
+                e["frame_from_tag"] = prior["frame_from_tag"]
+                e["measured_from_legs"] = prior["measured_from_legs"]
+                e["note"] = (f"rotation kept from the pass that saw {len(prior['measured_from_legs'])} legs with both "
+                             f"lids; this pass saw {len(derived.get('axis_quality', {}))}")
     unresolved_tags = [e["id"] for e in new_tags
                        if "frame_from_tag" not in e or (e.get("kind") == "yoke_face" and "mount_side" not in e)]
     new_tags = [e for e in new_tags if e["id"] not in unresolved_tags]

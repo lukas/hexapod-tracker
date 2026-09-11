@@ -200,6 +200,11 @@
      7.2
     ]
    },
+   "measured_from_legs": [
+    0,
+    1,
+    4
+   ],
    "observed_in": [
     2
    ],

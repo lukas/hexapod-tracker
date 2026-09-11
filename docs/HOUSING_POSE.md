@@ -33,7 +33,8 @@ world frame, including full orientation and floor-tag distances, then writes a
 separate reviewed config:
 
 ```sh
-uv run hexapod-zero-survey \
+# deprecated 2026-09-11: prefer `uv run hexapod-calibrate-tags` (see DEPRECATED.md)
+uv run python -m hexapod_tracker.zero_pose_survey \
   configs/apriltag_pose_config_20260831.json \
   --board configs/rgbd_calibration_board.json \
   --body-anchor-tag-id 0 \

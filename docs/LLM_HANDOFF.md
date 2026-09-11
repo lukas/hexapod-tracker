@@ -667,8 +667,13 @@ grid. The UI contains gait-survey controls because the main robot repo supplies
 that adapter. In this standalone repo those routes are unavailable and the
 runtime reports `read_only: true`.
 
-`hexapod-vision-web` is the standalone local entry point at `:8898/vision`.
-Its default light Tag survey workflow wraps `hexapod-zero-survey`, publishes
+> **Deprecated 2026-09-11.** The calibration studio and the iPhone survey are
+> superseded by `hexapod-calibrate-tags` (`src/hexapod_tracker/tag_calibration.py`),
+> which re-derives the tag layout by moving the robot under the fixed cameras.
+> See `DEPRECATED.md`. The paragraphs below describe the retired tools.
+
+`vision_web` (formerly `hexapod-vision-web`) was the standalone local entry point at `:8898/vision`.
+Its default light Tag survey workflow wrapped `zero_pose_survey`, published
 atomic live progress and a clean labelled camera JPEG, renders the tag geometry
 in SVG, and only creates the reviewed config after the operator confirms the
 unchanged chassis anchor. The final action publishes the survey and config to
@@ -809,7 +814,7 @@ when mapped floor tags leave the image. `hexapod-track --record3d-device` keeps
 using Record3D and refreshes RGB intrinsics on every frame, avoiding a silent
 switch to a different Continuity Camera crop. See `docs/RGBD_CALIBRATION.md`.
 
-`hexapod-zero-survey` is the moving-phone companion. The production web flow
+`zero_pose_survey` (formerly `hexapod-zero-survey`, deprecated; use `hexapod-calibrate-tags`) was the moving-phone companion. The production web flow
 merges `configs/hexapod-1-apriltag-layout.json`, yielding 37 named robot mounts:
 13 horizontal chassis/lid tags and 24 vertical yoke tags (four on each leg).
 The six normally visible mapped floor tags (100–105) jointly align Record3D's
@@ -978,7 +983,10 @@ force calibration, and component localization are separate questions.
 - `rgbd_calibrate.py`: Record3D/offline capture and calibrated-config writer.
 - `tag_survey.py`: ARKit/OpenCV frame alignment, robust per-tag pose consensus,
   floor-distance reporting, and zero-pose mount/config updates.
-- `zero_pose_survey.py`: guided live Record3D/offline walk-around CLI.
+- `tag_calibration.py` (`hexapod-calibrate-tags`): the tag layout calibration
+  program: stability check, per-leg motion pass, lid-plane geometry, declared
+  gaps, measured leg azimuths and yaw sense written into the layout.
+- `zero_pose_survey.py`: guided live Record3D/offline walk-around CLI (deprecated).
 - `housing_pose.py`: rigid transforms, kinematic frame fusion, and joint-angle
   reconstruction.
 - `foot_tip_tracking.py`: red boot-tip segmentation, assignment, and short

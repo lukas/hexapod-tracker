@@ -85,9 +85,13 @@ Camera or USB capture mode. A different lens, crop, stabilization mode, or
 resolution can invalidate the intrinsics. The Record3D tracking adapter uses
 the ARKit matrix attached to each RGB frame to avoid that mismatch.
 
-## Handheld zero-pose tag survey
+## Handheld zero-pose tag survey (deprecated 2026-09-11)
 
-`hexapod-zero-survey` uses the same registered RGB, depth, confidence, and
+> Superseded by `hexapod-calibrate-tags`, which needs no phone: see the README
+> section "Tag calibration" and `DEPRECATED.md`. The console script is gone;
+> the module still runs as `python -m hexapod_tracker.zero_pose_survey`.
+
+`hexapod-zero-survey` used the same registered RGB, depth, confidence, and
 intrinsics plus Record3D's ARKit camera trajectory. Unlike fixed-camera
 calibration, the phone is meant to move during this workflow.
 
@@ -124,7 +128,7 @@ tag records remain in the atomic progress checkpoint. Continue the same run and
 re-lock any visible mapped floor tag to align the new ARKit session.
 
 ```sh
-uv run hexapod-zero-survey \
+uv run python -m hexapod_tracker.zero_pose_survey \
   configs/apriltag_pose_config_20260831.json \
   --board configs/rgbd_calibration_board.json \
   --robot-layout configs/hexapod-1-apriltag-layout.json \

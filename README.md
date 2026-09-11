@@ -261,8 +261,10 @@ What it writes into `configs/hexapod-1-apriltag-layout.json` besides the tags:
   frame is z up, x forward between legs 0 and 5.
 - `joint_conventions.yaw_sign_in_body_frame`: a positive yaw command turns a
   leg clockwise from above, so the tracker multiplies by -1 to report yaw in
-  the robot's sense. `planar_pose.py` reads both fields and falls back to the
-  old `(leg + 0.5) * 60` assumption when they are absent.
+  the robot's sense. (The gait code's frame is right-handed with z down, x
+  forward, y right: the tracker's frame rotated 180 degrees about x, not a
+  reflection.) `planar_pose.py` reads both fields and falls back to the old
+  `(leg + 0.5) * 60` assumption when they are absent.
 - `unresolved_mounts`: mounts no camera saw a tag on, declared so the
   validator can tell a known gap from a mistake. Faces carried unseen from the
   previous layout have `verified: false`.

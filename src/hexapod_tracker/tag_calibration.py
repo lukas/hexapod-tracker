@@ -98,9 +98,11 @@ def nominal_azimuth_deg(leg: int) -> float:
 
     The body frame is right-handed with +z up and +x forward, between legs 0
     and 5. Seen from above the legs are numbered clockwise, so leg 0 sits at
-    -30 degrees, leg 1 at -90 and so on. (The robot's own frame, in which the
-    gait code puts leg i at +(i+0.5)*60 and calls a clockwise turn positive,
-    is the mirror image of this; only the y and z axes differ.)
+    -30 degrees, leg 1 at -90 and so on. The gait code's own frame puts leg i
+    at +(i+0.5)*60 and calls a clockwise-from-above yaw positive: both are
+    right-handed about a z axis that points DOWN. That frame (x forward, y
+    right, z down) is this one rotated 180 degrees about x; it is not a
+    reflection, so pitch signs about the leg's y axis are unaffected.
     """
     return float(((-(leg + 0.5) * 60.0 + 180.0) % 360.0) - 180.0)
 
@@ -957,7 +959,13 @@ def assemble_layout(old_layout: dict, old_map: dict, floor: dict, derived: dict[
     have_lids = {(t["leg"], t["joint"]) for t in new_tags if t["kind"] == "servo_lid"}
     carried: list[int] = []
     for tid, t in old_by_id.items():
-        if any(e["id"] == tid for e in new_tags) or t.get("kind") == "chassis_tag":
+        if any(e["id"] == tid for e in new_tags):
+            continue
+        if t.get("kind") == "chassis_tag":
+            # Body +x is defined from the legs and their nominal azimuths, the same way
+            # every run, so an unseen chassis tag keeps its previous rotation.
+            if not any(e["kind"] == "chassis_tag" for e in new_tags):
+                e = dict(t); e["verified"] = False; new_tags.insert(0, e); carried.append(tid)
             continue
         if t["kind"] == "yoke_face" and (int(t["leg"]), t["joint"], t.get("mount_side")) not in have_faces:
             e = dict(t); e["verified"] = False; new_tags.append(e)
@@ -1000,9 +1008,10 @@ def assemble_layout(old_layout: dict, old_map: dict, floor: dict, derived: dict[
         "axes": "+z up, +x forward between legs 0 and 5, +y = z cross x",
         "leg_numbering_from_above": "clockwise",
         "nominal_leg_azimuth_deg": {str(leg): nominal_azimuth_deg(leg) for leg in LEGS},
-        "note": ("The gait code's own frame puts leg i at +(i+0.5)*60 deg and counts a clockwise yaw as "
-                 "positive; it is this frame mirrored (y and z flipped). Azimuths below were measured at the "
-                 "commanded zero pose, so a joint's yaw servo zero offset is absorbed into its azimuth."),
+        "note": ("The gait code's own frame puts leg i at +(i+0.5)*60 deg and counts a clockwise-from-above yaw "
+                 "as positive: it is right-handed with z DOWN (x forward, y right), i.e. this frame rotated 180 deg "
+                 "about x, not a reflection. Azimuths below were measured at the commanded zero pose, so each yaw "
+                 "servo's zero offset is absorbed into its leg's azimuth."),
     }
     azimuths = {str(leg): derived["azimuth_deg"].get(leg, nominal_azimuth_deg(leg)) for leg in LEGS}
     layout["leg_zero_azimuth_body_deg"] = azimuths
@@ -1399,6 +1408,10 @@ def run(args) -> int:
         old = (old_layout.get("joint_conventions") or {}).get("yaw_positive_seen_from_above")
         if old:
             yaw_sense, yaw_source = old, "carried from the previous layout"
+        else:
+            log("WARNING: yaw sense not measured, not given (--yaw-sense) and not in the previous layout; "
+                "the layout will carry yaw_sign_in_body_frame = null and planar_pose will assume +1, which is "
+                "wrong for this robot's clockwise legs")
     link_of = resolve_links(votes, log)
 
     derived = derive_layout(tags_only(zero), {c: o["size"] for c, o in zero.items()}, link_of, old_layout,

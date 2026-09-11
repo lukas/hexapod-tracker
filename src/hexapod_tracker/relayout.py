@@ -615,7 +615,10 @@ def run(args) -> int:
     zero = cams.observe()
     for c, o in zero.items():
         cv2.imwrite(str(out / f"zero_cam{c}.jpg"), annotate(o["image"], o["tags"]))
+        cv2.imwrite(str(out / f"zero_cam{c}_raw.jpg"), o["image"])
         log(f"zero: cam {c} sees {sorted(o['tags'])}")
+    (out / "zero_tags.json").write_text(json.dumps(
+        {str(c): {str(t): crn.tolist() for t, crn in o["tags"].items()} for c, o in zero.items()}))
     K = {c: approx_intrinsics(*cams.size[c], "OV9281" if c == 0 else "") for c in cams.indices}
     horiz_old = {int(t["id"]) for t in old_layout["robot_tags"] if t.get("surface") == "horizontal"}
     focal_fit: dict[int, dict[str, float]] = {}
@@ -701,6 +704,14 @@ def run(args) -> int:
                     cv2.imwrite(str(out / f"leg{leg}_lifted_{k}.jpg"), im)
                 log(f"leg {leg} claude: {str(ans.get('json') or ans.get('text') or ans.get('error'))[:300]}")
         robot.relax()
+    elif args.assign_from:
+        prev = json.loads(Path(args.assign_from).expanduser().read_text())
+        for leg, part in prev["legs"].items():
+            leg_reports[int(leg)] = part
+            for link in LINKS:
+                for tid in part.get(link, []):
+                    assign.setdefault(tid, {"votes": []})["votes"].append((int(leg), link))
+        log(f"no-move: link assignment taken from {args.assign_from}; geometry re-derived from the zero pose")
     else:
         # No motion: trust the old layout for link assignment; geometry is still re-derived.
         for tid, t in old_by_id.items():
@@ -786,17 +797,24 @@ def run(args) -> int:
             axis = (a, in_plane(a - body_pt))
         femur_seen = [t for t in links["femur"] if t in tops]
         knee_lid = None
-        if axis is not None and femur_seen:
-            def off_axis(t: int) -> float:
-                q = plane_pt(center(tops[t])) - axis[0]
-                return abs(float(np.linalg.norm(np.cross(q, axis[1]))))
-            knee_lid = min(femur_seen, key=off_axis)
-            # a lid sits on the axis; a yoke face sits roughly half a servo off it
-            edge_plane = float(np.linalg.norm(plane_pt(tops[knee_lid][1]) - plane_pt(tops[knee_lid][0])))
-            ratio = off_axis(knee_lid) / (edge_plane + 1e-9)
-            notes.setdefault(knee_lid, {})["off_axis_edges"] = round(ratio, 2)
-            if ratio > 0.45:
-                notes[knee_lid]["warning"] = "nearest femur tag is still far off the leg axis; knee lid uncertain"
+
+        def squareness(t: int) -> float:
+            """A flat tag back-projects onto the lid plane as a square (chord ratio 1);
+            a vertical face comes out stretched or squashed."""
+            P = [plane_pt(tops[t][k]) for k in range(4)]
+            a_, b_ = np.linalg.norm(P[1] - P[0]), np.linalg.norm(P[3] - P[0])
+            return abs(math.log((a_ + 1e-9) / (b_ + 1e-9)))
+
+        if femur_seen:
+            knee_lid = min(femur_seen, key=squareness)
+            sq = {t: round(squareness(t), 2) for t in femur_seen}
+            notes.setdefault(knee_lid, {})["chord_log_ratio_by_tag"] = sq
+            if sq[knee_lid] > 0.25:
+                notes[knee_lid]["warning"] = "no femur tag projects as a square; knee lid uncertain"
+            if axis is not None:
+                q = plane_pt(center(tops[knee_lid])) - axis[0]
+                edge_plane = float(np.linalg.norm(plane_pt(tops[knee_lid][1]) - plane_pt(tops[knee_lid][0])))
+                notes[knee_lid]["off_axis_edges"] = round(abs(float(np.linalg.norm(np.cross(q, axis[1])))) / (edge_plane + 1e-9), 2)
         elif len(links["femur"]) == 1:
             knee_lid = links["femur"][0]
         elif links["femur"] and knee_lid is None:
@@ -998,8 +1016,10 @@ def run(args) -> int:
     log(f"validation: {problems or 'clean'}")
 
     if args.write:
-        if problems:
+        if problems and not args.force:
             log("NOT writing: validation problems"); return 2
+        if problems:
+            log(f"writing despite validator notes (--force): {problems}")
         cfg = Path(args.config_dir)
         bak = cfg / f"backup-{dt.date.today().isoformat()}"
         bak.mkdir(exist_ok=True)
@@ -1021,6 +1041,8 @@ def main(argv=None) -> int:
     ap.add_argument("--top-camera", default="2")
     ap.add_argument("--config-dir", default=str(CONFIG_DIR))
     ap.add_argument("--no-move", action="store_true", help="analyse the current pose only")
+    ap.add_argument("--assign-from", default=None, help="report.json of an earlier pass: reuse its motion-based link assignment")
+    ap.add_argument("--force", action="store_true", help="with --write: install even if the validator lists missing faces")
     ap.add_argument("--no-claude", action="store_true")
     ap.add_argument("--write", action="store_true", help="install into configs/ if validation passes")
     return run(ap.parse_args(argv))

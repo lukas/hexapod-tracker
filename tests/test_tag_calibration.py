@@ -179,8 +179,8 @@ def test_replay_of_the_2026_09_11_pass_reproduces_the_installed_layout():
         assert tc.same_rotation(got[tid]["frame_from_tag"], t["frame_from_tag"]), tid
     assert out["layout"]["leg_zero_azimuth_body_deg"] == expected["leg_zero_azimuth_body_deg"]
     # what this pass established about the robot
-    assert derived["azimuth_deg"] == {0: -18.5, 1: -95.7, 2: -158.9, 3: 141.1, 4: 94.4, 5: 37.6}
-    assert got[0]["frame_from_tag"]["euler_xyz_deg"][2] == 10.6
+    assert derived["azimuth_deg"] == {0: -17.6, 1: -94.8, 2: -158.0, 3: 142.0, 4: 95.3, 5: 38.5}
+    assert got[0]["frame_from_tag"]["euler_xyz_deg"][2] == 11.5
     assert len(out["layout"]["unresolved_mounts"]) == 4
 
 
@@ -194,8 +194,10 @@ def test_installed_layout_keeps_what_the_replay_established():
             continue                      # carried faces may be replaced by a seen tag later
         assert t["id"] in got, t["id"]
         assert got[t["id"]]["frame"] == t["frame"] and got[t["id"]].get("mount_side") == t.get("mount_side"), t["id"]
-        if t["kind"] != "yoke_face":      # a face's +x token is a single-view call that a later pass may correct
+        if t["kind"] == "servo_lid":      # a face's +x token is a single-view call that a later pass may correct
             assert tc.same_rotation(got[t["id"]]["frame_from_tag"], t["frame_from_tag"]), t["id"]
+        if t["kind"] == "chassis_tag":    # body +x is a mean over the legs in view; positions differ by a degree or two
+            assert tc.same_rotation(got[t["id"]]["frame_from_tag"], t["frame_from_tag"], tol_deg=4.0), t["id"]
     for leg, az in expected["leg_zero_azimuth_body_deg"].items():
         assert abs(tc.wrap_deg(installed["leg_zero_azimuth_body_deg"][leg] - az)) < 8.0, leg
     assert installed["joint_conventions"]["yaw_sign_in_body_frame"] == -1

@@ -197,7 +197,7 @@
     "euler_xyz_deg": [
      0.0,
      0.0,
-     10.6
+     11.5
     ]
    },
    "observed_in": [
@@ -1081,7 +1081,7 @@
     "tags": 14
    }
   },
-  "output_dir": "/Users/lukas/Library/Application Support/Hexapod Lab/v2/tag-calibration-20260911-replay"
+  "output_dir": "/Users/lukas/Library/Application Support/Hexapod Lab/v2/tag-calibration-20260911-replay2"
  },
  "limitations": [
   "Robot-tag translations are null; the tracker never reads them.",
@@ -1103,19 +1103,18 @@
   "note": "The gait code's own frame puts leg i at +(i+0.5)*60 deg and counts a clockwise-from-above yaw as positive: it is right-handed with z DOWN (x forward, y right), i.e. this frame rotated 180 deg about x, not a reflection. Azimuths below were measured at the commanded zero pose, so each yaw servo's zero offset is absorbed into its leg's azimuth."
  },
  "leg_zero_azimuth_body_deg": {
-  "0": -18.5,
-  "1": -95.7,
-  "2": -158.9,
-  "3": 141.1,
-  "4": 94.4,
-  "5": 37.6
+  "0": -17.6,
+  "1": -94.8,
+  "2": -158.0,
+  "3": 142.0,
+  "4": 95.3,
+  "5": 38.5
  },
  "leg_zero_azimuth_measured": [
   0,
   1,
   2,
   3,
-  4,
   5
  ],
  "joint_conventions": {

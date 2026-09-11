@@ -28,17 +28,6 @@
    "yaw_period_degrees": 180.0
   },
   {
-   "id": "leg1_knee_servo",
-   "display_name": "Leg 1 knee servo assembly",
-   "tag_ids": [
-    21,
-    59
-   ],
-   "pose_reference": "centroid of the two opposing yoke-face tag centers",
-   "surface": "vertical",
-   "yaw_period_degrees": 180.0
-  },
-  {
    "id": "leg2_hip_servo",
    "display_name": "Leg 2 hip servo assembly",
    "tag_ids": [
@@ -108,7 +97,7 @@
    "id": "leg5_hip_servo",
    "display_name": "Leg 5 hip servo assembly",
    "tag_ids": [
-    63,
+    42,
     53
    ],
    "pose_reference": "centroid of the two opposing yoke-face tag centers",

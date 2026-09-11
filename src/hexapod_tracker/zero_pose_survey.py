@@ -2,6 +2,14 @@
 """Guide a handheld iPhone survey around a stationary zero-pose hexapod."""
 from __future__ import annotations
 
+import warnings as _warnings
+
+_warnings.warn(
+    "hexapod_tracker.zero_pose_survey is deprecated (2026-09-11); use hexapod-calibrate-tags. See DEPRECATED.md.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 import argparse
 import base64
 from collections.abc import Iterator, Sequence

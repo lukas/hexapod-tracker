@@ -237,7 +237,63 @@ nor the board-defined world frame moves. See
 [`docs/RGBD_CALIBRATION.md`](docs/RGBD_CALIBRATION.md) for setup, quality gates,
 offline fixtures, coordinate conventions, and limitations.
 
-## Guided zero-pose tag survey
+## Tag calibration (`hexapod-calibrate-tags`)
+
+After tags fall off or the robot is reassembled, re-derive the tag layout by
+moving the robot under the fixed cameras. No handheld scan, no pre-run
+checklist: the program checks that the robot is resting flat and the cameras
+are still, lifts each leg in turn (hip, an antisymmetric yaw swing, knee) to
+learn which tag rides on which link, then does all the geometry in the
+top camera's lid plane and writes a report that says in plain words what
+changed, which mounts have no tag, and which conventions it measured.
+
+```sh
+uv run hexapod-calibrate-tags                 # measure; outputs under Hexapod Lab/v2/tag-calibration-<stamp>/
+uv run hexapod-calibrate-tags --write         # ...and install into configs/ if the validator is clean
+uv run hexapod-calibrate-tags --replay DIR    # redo the geometry from an earlier run's zero_tags.json
+uv run hexapod-calibrate-tags --replay DIR --assign-from other/report.json   # merge passes
+```
+
+What it writes into `configs/hexapod-1-apriltag-layout.json` besides the tags:
+
+- `leg_zero_azimuth_body_deg`: where each leg points at the commanded zero
+  pose, measured. The legs are numbered clockwise seen from above; the body
+  frame is z up, x forward between legs 0 and 5.
+- `joint_conventions.yaw_sign_in_body_frame`: a positive yaw command turns a
+  leg clockwise from above, so the tracker multiplies by -1 to report yaw in
+  the robot's sense. `planar_pose.py` reads both fields and falls back to the
+  old `(leg + 0.5) * 60` assumption when they are absent.
+- `unresolved_mounts`: mounts no camera saw a tag on, declared so the
+  validator can tell a known gap from a mistake. Faces carried unseen from the
+  previous layout have `verified: false`.
+
+Claude (optional, `--no-claude` to skip) only reads annotated crops with the
+ids drawn on, as a placement cross-check and a census of blank faces. The
+program's geometry is deterministic and covered by `tests/test_tag_calibration.py`,
+including a replay of the 2026-09-11 pass. Turn the robot and run again to
+see the faces the first pass could not.
+
+The camera server publishes its own detector's corners at
+`/api/detections.json` (pixels in `/snapshot/{i}.jpg`, with `detect_seq` so a
+poller can tell a fresh detection from a repeat); the calibration program uses
+that when the running server has it and detects on snapshots otherwise.
+
+
+## Relationship to the robot repository
+
+The main hexapod repository includes this project as the
+`hexapod_walker/prototype_sts3215/hexapod-tracker` Git submodule. Compatibility
+entry points at the historical paths import this package, while robot-specific
+gait-survey orchestration remains in the main repository.
+
+## Deprecated calibration tools
+
+The handheld iPhone survey and the browser calibration studio are superseded
+by `hexapod-calibrate-tags` above; their modules still import (with a
+`DeprecationWarning`) but have no console scripts. See
+[`DEPRECATED.md`](DEPRECATED.md) for what replaced each one.
+
+### Guided zero-pose tag survey (deprecated)
 
 The same iPhone stream can survey a stationary robot from a slow handheld walk.
 Put the robot in zero pose beside the calibration board, identify one chassis
@@ -245,7 +301,7 @@ tag whose existing mount has not moved, and keep the configured L0 hip tag as
 the leg-number reference. Then run:
 
 ```sh
-uv run hexapod-zero-survey \
+uv run python -m hexapod_tracker.zero_pose_survey \
   configs/apriltag_pose_config_20260831.json \
   --board configs/rgbd_calibration_board.json \
   --body-anchor-tag-id 0 \
@@ -283,13 +339,13 @@ locations, and tag offsets; exact geometry fitting needs several stationary,
 encoder-known poses using the existing tibia-fixed side tags. See
 [`docs/RGBD_CALIBRATION.md`](docs/RGBD_CALIBRATION.md#handheld-zero-pose-tag-survey).
 
-## Web UI and tests
+### Web UI (deprecated)
 
 The React source and its checked-in production build are in `web/vision_ui`.
 Launch the camera-only calibration studio directly from this repository:
 
 ```sh
-uv run --extra rgbd hexapod-vision-web
+uv run --extra rgbd python -m hexapod_tracker.vision_web
 # open http://127.0.0.1:8898/vision
 ```
 
@@ -323,10 +379,3 @@ make web-build
 `wrap_handler_with_vision(...)` let another Python HTTP server mount the UI at
 `/vision` and the JSON/MJPEG API at `/api/vision/*`. Pass a `survey_factory`
 only in a robot repository that owns its own guarded motion policy.
-
-## Relationship to the robot repository
-
-The main hexapod repository includes this project as the
-`hexapod_walker/prototype_sts3215/hexapod-tracker` Git submodule. Compatibility
-entry points at the historical paths import this package, while robot-specific
-gait-survey orchestration remains in the main repository.

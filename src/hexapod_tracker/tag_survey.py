@@ -7,6 +7,14 @@ It contains no capture or robot I/O.
 """
 from __future__ import annotations
 
+import warnings as _warnings
+
+_warnings.warn(
+    "hexapod_tracker.tag_survey is deprecated (2026-09-11); use hexapod-calibrate-tags. See DEPRECATED.md.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 import copy
 from dataclasses import dataclass
 import math

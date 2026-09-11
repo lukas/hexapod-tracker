@@ -1,6 +1,14 @@
 """Local, read-only process manager for the iPhone zero-pose survey UI."""
 from __future__ import annotations
 
+import warnings as _warnings
+
+_warnings.warn(
+    "hexapod_tracker.zero_survey_web is deprecated (2026-09-11); use hexapod-calibrate-tags. See DEPRECATED.md.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 import base64
 from collections import deque
 import json

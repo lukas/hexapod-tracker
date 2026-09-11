@@ -1,6 +1,14 @@
 """Offline image-first refinement for a zero-pose iPhone survey."""
 from __future__ import annotations
 
+import warnings as _warnings
+
+_warnings.warn(
+    "hexapod_tracker.zero_pose_refinement is deprecated (2026-09-11); use hexapod-calibrate-tags. See DEPRECATED.md.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 import copy
 from dataclasses import dataclass, replace
 import math

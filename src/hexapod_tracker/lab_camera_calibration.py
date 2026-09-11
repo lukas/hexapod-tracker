@@ -12,6 +12,14 @@ sends a motor command.
 """
 from __future__ import annotations
 
+import warnings as _warnings
+
+_warnings.warn(
+    "hexapod_tracker.lab_camera_calibration is deprecated (2026-09-11); hexapod-calibrate-tags fits the focal length it needs itself and camera_server/planar_pose own the floor frame. See DEPRECATED.md.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone

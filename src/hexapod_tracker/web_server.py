@@ -10,6 +10,14 @@ guarded motion adapter.
 """
 from __future__ import annotations
 
+import warnings as _warnings
+
+_warnings.warn(
+    "hexapod_tracker.web_server is deprecated (2026-09-11); use camera_server.py. See DEPRECATED.md.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 from collections import Counter, deque
 import json
 import math

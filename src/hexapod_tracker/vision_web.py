@@ -1,6 +1,14 @@
 """Serve the guided local calibration studio without robot control."""
 from __future__ import annotations
 
+import warnings as _warnings
+
+_warnings.warn(
+    "hexapod_tracker.vision_web is deprecated (2026-09-11); use camera_server.py and the Robot Lab v2 web UI. See DEPRECATED.md.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 import argparse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

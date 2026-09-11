@@ -379,16 +379,16 @@ def test_fixed_camera_keeps_its_floor_calibration_while_anchors_are_hidden():
     first = estimator.estimate([{"index": 2, "width": 1280, "height": 800,
                                  "tags": image({100: corners((0, 0), 0), 101: corners((0, 600), 0),
                                                 102: corners((600, 0), 0), 7: corners((250, 250), 20)})}])
-    assert first["calibration"]["2"]["status"] == "calibrated"
+    assert first["calibration"]["cameras"]["2"]["status"] == "calibrated"
     assert abs(first["markers"]["7"]["position_mm"]["x"] - 250) < 2
     # the robot walks over the floor tags: only the chassis tag is left in view
     second = estimator.estimate([{"index": 2, "width": 1280, "height": 800,
                                   "tags": image({7: corners((310, 250), 20)})}])
-    cal = second["calibration"]["2"]
+    cal = second["calibration"]["cameras"]["2"]
     assert cal["status"] == "held" and cal["anchor_ids"] == [100, 101, 102] and cal["held_for_s"] is not None
     assert second["markers"]["7"]["status"] == "tracked"
     assert abs(second["markers"]["7"]["position_mm"]["x"] - 310) < 2
     # a different image size or an expired hold is not reused
     estimator.hold_calibration_s = -1.0
     third = estimator.estimate([{"index": 2, "width": 1280, "height": 800, "tags": image({7: corners((310, 250), 20)})}])
-    assert third["calibration"]["2"]["status"] == "uncalibrated" and "7" not in third["markers"]
+    assert third["calibration"]["cameras"]["2"]["status"] == "uncalibrated" and "7" not in third["markers"]

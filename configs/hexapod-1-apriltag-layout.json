@@ -197,13 +197,13 @@
     "euler_xyz_deg": [
      0.0,
      0.0,
-     10.6
+     12.2
     ]
    },
    "observed_in": [
     2
    ],
-   "verified": false
+   "verified": true
   },
   {
    "id": 1,
@@ -220,7 +220,9 @@
      90.0
     ]
    },
-   "observed_in": [],
+   "observed_in": [
+    2
+   ],
    "verified": true
   },
   {
@@ -258,7 +260,9 @@
      -90.0
     ]
    },
-   "observed_in": [],
+   "observed_in": [
+    2
+   ],
    "verified": true
   },
   {
@@ -394,7 +398,9 @@
      90.0
     ]
    },
-   "observed_in": [],
+   "observed_in": [
+    2
+   ],
    "verified": true
   },
   {
@@ -510,19 +516,20 @@
    "frame_from_tag": {
     "translation_m": null,
     "quaternion_xyzw": [
-     0.5,
-     0.5,
-     -0.5,
-     0.5
+     0.0,
+     0.7071068,
+     -0.7071068,
+     0.0
     ],
     "tag_axes_in_frame": {
-     "x": "-z",
-     "y": "+x",
-     "z": "-y"
+     "x": "-x",
+     "z": "-y",
+     "y": "-z"
     }
    },
    "observed_in": [
-    1
+    1,
+    2
    ],
    "verified": true
   },
@@ -597,9 +604,7 @@
      "z": "-y"
     }
    },
-   "observed_in": [
-    1
-   ],
+   "observed_in": [],
    "verified": true
   },
   {
@@ -642,7 +647,7 @@
     ]
    },
    "observed_in": [
-    1
+    2
    ],
    "verified": true
   },
@@ -1052,38 +1057,43 @@
   "top_camera": 2,
   "moved": false,
   "decoded_unique_ids": [
+   0,
+   1,
    3,
+   4,
    5,
    6,
    9,
    10,
    11,
+   14,
    18,
    25,
    44,
    48,
    52,
-   59,
    100,
+   101,
    102,
    103,
    104,
    105,
-   109
+   109,
+   112
   ],
   "focal_fit_px": {
    "1": {
-    "f_px": 1024.0,
-    "normal_spread_deg": 0.72,
-    "tags": 5
+    "f_px": 992.0,
+    "normal_spread_deg": 1.24,
+    "tags": 7
    },
    "2": {
     "f_px": 992.0,
-    "normal_spread_deg": 2.04,
-    "tags": 6
+    "normal_spread_deg": 2.03,
+    "tags": 12
    }
   },
-  "output_dir": "/Users/lukas/Library/Application Support/Hexapod Lab/v2/tag-calibration-20260911-merge-leg4"
+  "output_dir": "/Users/lukas/Library/Application Support/Hexapod Lab/v2/tag-calibration-20260911-merge3"
  },
  "limitations": [
   "Robot-tag translations are null; the tracker never reads them.",
@@ -1107,10 +1117,10 @@
  "leg_zero_azimuth_body_deg": {
   "0": -18.5,
   "1": -95.7,
-  "2": -151.1,
-  "3": 147.3,
-  "4": 93.8,
-  "5": 37.6
+  "2": -154.4,
+  "3": 144.5,
+  "4": 90.5,
+  "5": 39.4
  },
  "leg_zero_azimuth_measured": [
   0,

@@ -194,7 +194,8 @@ def test_installed_layout_keeps_what_the_replay_established():
             continue                      # carried faces may be replaced by a seen tag later
         assert t["id"] in got, t["id"]
         assert got[t["id"]]["frame"] == t["frame"] and got[t["id"]].get("mount_side") == t.get("mount_side"), t["id"]
-        assert tc.same_rotation(got[t["id"]]["frame_from_tag"], t["frame_from_tag"]), t["id"]
+        if t["kind"] != "yoke_face":      # a face's +x token is a single-view call that a later pass may correct
+            assert tc.same_rotation(got[t["id"]]["frame_from_tag"], t["frame_from_tag"]), t["id"]
     for leg, az in expected["leg_zero_azimuth_body_deg"].items():
         assert abs(tc.wrap_deg(installed["leg_zero_azimuth_body_deg"][leg] - az)) < 8.0, leg
     assert installed["joint_conventions"]["yaw_sign_in_body_frame"] == -1

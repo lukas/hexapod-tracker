@@ -89,6 +89,7 @@ FRAMES_PER_STATE = 3
 MOVE_EDGE_FRAC = 0.25
 MOVE_PX_FLOOR = 6.0
 MOVE_DEG = 6.0
+MOVE_SCALE_FRAC = 0.08
 # The commanded joint must travel at least this far for a step to count.
 MIN_TRAVEL_DEG = 8.0
 
@@ -332,7 +333,10 @@ def moved(a: dict[int, np.ndarray], b: dict[int, np.ndarray]) -> tuple[set[int],
         shift = float(np.linalg.norm(center(ca) - center(cb)))
         turn = abs(turn_deg(ca, cb))
         thr = max(MOVE_PX_FLOOR, MOVE_EDGE_FRAC * edge_px(ca))
-        (mv if shift > thr or turn > MOVE_DEG else st).add(tid)
+        # A lid lifted toward a top camera may barely shift or turn but grows;
+        # autofocus and frame noise change a median-of-3 size by well under this.
+        grew = abs(ratio - 1.0) > MOVE_SCALE_FRAC and edge_px(ca) > 12.0
+        (mv if shift > thr or turn > MOVE_DEG or grew else st).add(tid)
     return mv, st
 
 
@@ -573,7 +577,10 @@ def moved(a: dict[int, np.ndarray], b: dict[int, np.ndarray]) -> tuple[set[int],
         shift = float(np.linalg.norm(center(ca) - center(cb)))
         turn = abs(turn_deg(ca, cb))
         thr = max(MOVE_PX_FLOOR, MOVE_EDGE_FRAC * edge_px(ca))
-        (mv if shift > thr or turn > MOVE_DEG else st).add(tid)
+        # A lid lifted toward a top camera may barely shift or turn but grows;
+        # autofocus and frame noise change a median-of-3 size by well under this.
+        grew = abs(ratio - 1.0) > MOVE_SCALE_FRAC and edge_px(ca) > 12.0
+        (mv if shift > thr or turn > MOVE_DEG or grew else st).add(tid)
     return mv, st
 
 
@@ -753,7 +760,7 @@ def derive_layout(zero: dict[int, dict[int, np.ndarray]], sizes: dict[int, tuple
             log(f"cam {c}: fitted focal {f:.0f} px from {len(flat)} flat tags (normal spread {spread:.2f} deg)")
     seen_ids = set().union(*(set(t) for t in zero.values())) if zero else set()
     result: dict[str, Any] = {"tags": [], "notes": {}, "azimuth_deg": {}, "azimuth_residual_deg": {},
-                              "body_x_estimates": {}, "focal_fit": focal_fit, "seen_ids": sorted(seen_ids),
+                              "axis_quality": {}, "body_x_estimates": {}, "focal_fit": focal_fit, "seen_ids": sorted(seen_ids),
                               "top_camera": top, "chassis_tag_seen": 0 in zero.get(top, {})}
     if top not in zero:
         result["error"] = f"top camera {top} gave no frame"
@@ -791,18 +798,24 @@ def derive_layout(zero: dict[int, dict[int, np.ndarray]], sizes: dict[int, tuple
             kind_of[t] = "yoke_face"
         femur_seen = [t for t in links["femur"] if t in tops]
         knee_lid = None
+        old_femur_lids = [t for t in links["femur"] if old_by_id.get(t, {}).get("kind") == "servo_lid"]
         if femur_seen:
-            # The knee lid is the femur tag that back-projects as a square.
-            knee_lid = min(femur_seen, key=lambda t: plane.squareness(tops[t]))
+            # The knee lid is the femur tag that back-projects as a square. A tag that
+            # does not (log chord ratio above 0.25) is a yoke face; if none is square the
+            # knee lid was not in view and stays unknown rather than being faked by a face.
             sq = {t: round(plane.squareness(tops[t]), 2) for t in femur_seen}
-            notes.setdefault(knee_lid, {})["chord_log_ratio_by_tag"] = sq
-            if sq[knee_lid] > 0.25:
-                notes[knee_lid]["warning"] = "no femur tag projects as a square; knee lid uncertain"
-        elif len(links["femur"]) == 1:
+            best = min(femur_seen, key=sq.get)
+            if sq[best] <= 0.25:
+                knee_lid = best
+                notes.setdefault(knee_lid, {})["chord_log_ratio_by_tag"] = sq
+            else:
+                knee_lid = old_femur_lids[0] if old_femur_lids else None
+                log(f"leg {leg}: no femur tag projects as a square {sq}; knee lid "
+                    + (f"taken from the previous layout ({knee_lid})" if knee_lid is not None else "unknown"))
+        elif len(links["femur"]) == 1 and not old_by_id.get(links["femur"][0], {}).get("kind") == "yoke_face":
             knee_lid = links["femur"][0]
         elif links["femur"]:
-            old_lids = [t for t in links["femur"] if old_by_id.get(t, {}).get("kind") == "servo_lid"]
-            knee_lid = old_lids[0] if old_lids else None
+            knee_lid = old_femur_lids[0] if old_femur_lids else None
         for t in links["femur"]:
             kind_of[t] = "servo_lid" if t == knee_lid else "yoke_face"
         if hip_lid is not None:
@@ -813,23 +826,31 @@ def derive_layout(zero: dict[int, dict[int, np.ndarray]], sizes: dict[int, tuple
         pts = [plane.point(center(tops[t])) for t in (hip_lid, knee_lid) if t is not None and t in tops]
         if len(pts) == 2:
             axis_of[leg] = (pts[0], plane.in_plane(pts[1] - pts[0]))
+            result["axis_quality"][leg] = "two_lids"
         elif pts and body_pt is not None:
             axis_of[leg] = (pts[0], plane.in_plane(pts[0] - body_pt))
+            result["axis_quality"][leg] = "chassis_fallback"
             notes.setdefault(hip_lid if hip_lid in tops else knee_lid, {})["axis_from_chassis_tag"] = (
                 "only one lid seen; leg direction taken from the chassis tag centre, which is off the body centre")
 
     # ---- body +x from every leg, then each leg's measured azimuth
     if axis_of:
+        # Body +x from the legs whose direction is hip lid -> knee lid; a leg whose
+        # direction had to come from the off-centre chassis tag only joins when
+        # fewer than two proper ones exist.
+        good = [leg for leg, q in result["axis_quality"].items() if q == "two_lids"]
+        use = good if len(good) >= 2 else list(axis_of)
         ests = {leg: plane.rotate(d, -nominal_azimuth_deg(leg)) for leg, (_, d) in axis_of.items()}
-        ref = next(iter(ests.values()))
+        ref = ests[use[0]]
         angles = {leg: plane.angle(ref, v) for leg, v in ests.items()}
-        body_x = plane.rotate(ref, circular_mean_deg(list(angles.values())))
+        mean = circular_mean_deg([angles[leg] for leg in use])
+        body_x = plane.rotate(ref, mean)
         for leg, (_, d) in sorted(axis_of.items()):
             az = plane.angle(body_x, d)
             result["azimuth_deg"][leg] = round(az, 1)
             result["azimuth_residual_deg"][leg] = round(wrap_deg(az - nominal_azimuth_deg(leg)), 1)
-            result["body_x_estimates"][leg] = round(wrap_deg(angles[leg] - circular_mean_deg(list(angles.values()))), 1)
-        spread = max(abs(v) for v in result["body_x_estimates"].values())
+            result["body_x_estimates"][leg] = round(wrap_deg(angles[leg] - mean), 1)
+        spread = max(abs(result["body_x_estimates"][leg]) for leg in use)
         log(f"body +x from {len(axis_of)} legs; per-leg disagreement up to {spread:.1f} deg; "
             f"azimuths {result['azimuth_deg']} (nominal residuals {result['azimuth_residual_deg']})")
         if spread > 15.0:
@@ -1013,11 +1034,20 @@ def assemble_layout(old_layout: dict, old_map: dict, floor: dict, derived: dict[
                  "about x, not a reflection. Azimuths below were measured at the commanded zero pose, so each yaw "
                  "servo's zero offset is absorbed into its leg's azimuth."),
     }
-    # A leg this pass could not see keeps the azimuth an earlier pass measured.
+    # A leg this pass could not see, or saw with only one lid (direction from the
+    # off-centre chassis tag), keeps the azimuth an earlier pass measured properly.
     prior = {int(k): float(v) for k, v in (old_layout.get("leg_zero_azimuth_body_deg") or {}).items()}
-    azimuths = {str(leg): derived["azimuth_deg"].get(leg, prior.get(leg, nominal_azimuth_deg(leg))) for leg in LEGS}
+    prior_measured = {int(v) for v in (old_layout.get("leg_zero_azimuth_measured") or [])}
+    quality = derived.get("axis_quality", {})
+    azimuths = {}
+    for leg in LEGS:
+        if leg in derived["azimuth_deg"] and (quality.get(leg) == "two_lids" or leg not in prior_measured):
+            azimuths[str(leg)] = derived["azimuth_deg"][leg]
+        else:
+            azimuths[str(leg)] = prior.get(leg, nominal_azimuth_deg(leg))
     layout["leg_zero_azimuth_body_deg"] = azimuths
-    layout["leg_zero_azimuth_measured"] = sorted(set(derived["azimuth_deg"]) | set(prior) & set(old_layout.get("leg_zero_azimuth_measured") or []))
+    layout["leg_zero_azimuth_measured"] = sorted(
+        {leg for leg in derived["azimuth_deg"] if quality.get(leg) == "two_lids"} | (prior_measured & set(prior)))
     yaw_sign = None
     if yaw_sense == "clockwise":
         yaw_sign = -1
@@ -1094,7 +1124,8 @@ def ask_claude(images: list[np.ndarray], prompt: str, *, model: str = "claude-so
         content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                                     "data": base64.b64encode(buf.tobytes()).decode()}})
     content.append({"type": "text", "text": prompt})
-    body = {"model": model, "max_tokens": 900, "messages": [{"role": "user", "content": content}]}
+    # The model's hidden reasoning counts against max_tokens; 900 returned empty text.
+    body = {"model": model, "max_tokens": 3000, "messages": [{"role": "user", "content": content}]}
     req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=json.dumps(body).encode(),
                                  headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
                                           "content-type": "application/json"}, method="POST")
@@ -1113,7 +1144,7 @@ def ask_claude(images: list[np.ndarray], prompt: str, *, model: str = "claude-so
             parsed = json.loads(text[start:end + 1])
         except ValueError:
             parsed = None
-    return {"text": text, "json": parsed, "cost_usd": round(cost, 4)}
+    return {"text": text, "json": parsed, "cost_usd": round(cost, 4), "stop_reason": doc.get("stop_reason")}
 
 
 LEG_PROMPT = (
@@ -1272,12 +1303,21 @@ def votes_from_layout(layout: dict) -> dict[int, list[tuple[int, str]]]:
     return votes
 
 
-def resolve_links(votes: dict[int, list[tuple[int, str]]], log: Callable[[str], None]) -> dict[int, tuple[int, str]]:
+def resolve_links(votes: dict[int, list[tuple[int, str]]], log: Callable[[str], None],
+                  old_layout: Optional[dict] = None) -> dict[int, tuple[int, str]]:
+    """Majority link per tag across passes; a tie goes to what the previous layout said."""
+    prior = votes_from_layout(old_layout) if old_layout else {}
     link_of: dict[int, tuple[int, str]] = {}
     for tid, vs in votes.items():
-        best = max(set(vs), key=vs.count)
-        if len(set(vs)) > 1:
-            log(f"tag {tid}: seen on more than one link {sorted(set(vs))}; taking {best}")
+        counts = {v: vs.count(v) for v in set(vs)}
+        top = max(counts.values())
+        tied = sorted(v for v, n in counts.items() if n == top)
+        best = tied[0]
+        if len(tied) > 1 and prior.get(tid) and prior[tid][0] in tied:
+            best = prior[tid][0]
+        if len(counts) > 1:
+            log(f"tag {tid}: seen on more than one link {sorted(counts.items())}; taking {best}"
+                + (" (previous layout breaks the tie)" if len(tied) > 1 else ""))
         link_of[tid] = best
     return link_of
 
@@ -1414,7 +1454,7 @@ def run(args) -> int:
             log("WARNING: yaw sense not measured, not given (--yaw-sense) and not in the previous layout; "
                 "the layout will carry yaw_sign_in_body_frame = null and planar_pose will assume +1, which is "
                 "wrong for this robot's clockwise legs")
-    link_of = resolve_links(votes, log)
+    link_of = resolve_links(votes, log, old_layout)
 
     derived = derive_layout(tags_only(zero), {c: o["size"] for c, o in zero.items()}, link_of, old_layout,
                             floor_ids, top, device={0: "OV9281"}, log=log)

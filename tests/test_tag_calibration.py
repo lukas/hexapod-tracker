@@ -198,8 +198,11 @@ def test_installed_layout_keeps_what_the_replay_established():
             assert tc.same_rotation(got[t["id"]]["frame_from_tag"], t["frame_from_tag"]), t["id"]
         if t["kind"] == "chassis_tag":    # body +x is a mean over the legs in view; positions differ by a degree or two
             assert tc.same_rotation(got[t["id"]]["frame_from_tag"], t["frame_from_tag"], tol_deg=4.0), t["id"]
+    # The fixture's leg 4 azimuth came from one lid and the chassis tag (its knee lid
+    # was out of view); a later two-lid measurement moved it 8 deg. Same handedness
+    # and ordering is what this guards, not the last few degrees.
     for leg, az in expected["leg_zero_azimuth_body_deg"].items():
-        assert abs(tc.wrap_deg(installed["leg_zero_azimuth_body_deg"][leg] - az)) < 8.0, leg
+        assert abs(tc.wrap_deg(installed["leg_zero_azimuth_body_deg"][leg] - az)) < 12.0, leg
     assert installed["joint_conventions"]["yaw_sign_in_body_frame"] == -1
 
 

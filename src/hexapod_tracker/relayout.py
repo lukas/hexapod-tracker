@@ -45,6 +45,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -101,13 +102,20 @@ class Cameras:
             seen: dict[int, list[np.ndarray]] = {}
             img = None
             for _ in range(frames):
-                img = self.snapshot(i)
+                try:
+                    img = self.snapshot(i)
+                except (urllib.error.URLError, RuntimeError, OSError) as exc:
+                    print(f"camera {i}: no frame ({exc}); skipping this camera for this state", flush=True)
+                    time.sleep(0.5)
+                    continue
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 for tid, corners in detect_tag_corners(gray, self.detector).items():
                     seen.setdefault(tid, []).append(corners)
                 time.sleep(0.15)
             need = max(1, (frames + 1) // 2)
             tags = {tid: np.median(np.stack(c), axis=0) for tid, c in seen.items() if len(c) >= need}
+            if img is None:
+                continue
             out[i] = {"tags": tags, "image": img}
         return out
 

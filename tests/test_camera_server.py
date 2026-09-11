@@ -185,3 +185,21 @@ def test_status_payload_carries_the_server_run_id():
         __import__("pathlib").Path(
             __import__("hexapod_tracker.camera_server", fromlist=["__file__"]).__file__
         ).read_text()
+
+
+def test_detections_snapshot_serves_corners_in_snapshot_coordinates():
+    worker = CameraWorker(0, 1280, 720, 30.0, 10.0, 82)
+    worker.status.reported_width, worker.status.reported_height = 1280, 720
+    worker.status.detect_width, worker.status.detect_height = 1920, 1080
+    corners = np.array([[10.0, 10.0], [40.0, 10.0], [40.0, 40.0], [10.0, 40.0]])
+    worker._publish(b"raw", b"jpeg", [7], {7: corners})
+    worker._detect_seq = 3
+
+    snap = worker.detections_snapshot()
+
+    assert snap["index"] == 0
+    assert (snap["width"], snap["height"]) == (1280, 720)
+    assert (snap["detect_width"], snap["detect_height"]) == (1920, 1080)
+    assert snap["detect_seq"] == 3
+    assert snap["tags"] == {"7": corners.tolist()}
+    assert snap["frame_age_s"] is not None and snap["captured_unix"] is not None

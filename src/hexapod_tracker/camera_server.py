@@ -392,6 +392,9 @@ class CameraWorker:
         self.detect_interval_s = float(detect_interval_s)
         self._last_detect_at: float | None = None
         self._last_detect_corners: dict[int, np.ndarray] = {}
+        # Counts detector passes so a client polling /api/detections.json can
+        # tell a fresh set of corners from the previous one served again.
+        self._detect_seq = 0
         self.width = width
         self.height = height
         self.fps = fps
@@ -577,6 +580,35 @@ class CameraWorker:
                 },
             }
 
+    def detections_snapshot(self) -> dict[str, Any]:
+        """Raw tag corners for tools that do their own geometry.
+
+        Corners are in the coordinates of ``/snapshot/{index}.jpg`` (``width`` x
+        ``height``), whatever size the detector actually ran at
+        (``detect_width`` x ``detect_height``): the detector scales them into
+        the display frame before publishing. ``detect_seq`` increments once per
+        detector pass, so the same corners served twice are recognisable.
+        """
+        with self._condition:
+            age = None
+            if self._last_frame_at is not None:
+                age = time.monotonic() - self._last_frame_at
+            return {
+                "index": self.index,
+                "state": self.status.state,
+                "width": self.status.reported_width or self.width,
+                "height": self.status.reported_height or self.height,
+                "detect_width": self.status.detect_width,
+                "detect_height": self.status.detect_height,
+                "detect_seq": self._detect_seq,
+                "frame_age_s": age,
+                "captured_unix": self._last_frame_unix,
+                "tags": {
+                    str(tag_id): np.asarray(corners, dtype=float).reshape(4, 2).round(3).tolist()
+                    for tag_id, corners in self._tag_corners.items()
+                },
+            }
+
     def wait_for_frame(
         self,
         previous_frames: int,
@@ -742,6 +774,7 @@ class CameraWorker:
                     self.status.detect_width, self.status.detect_height = detect_size
                     self._last_detect_corners = tag_corners
                     self._last_detect_at = now
+                    self._detect_seq += 1
                 else:
                     # Reuse the last detection only to keep the reported tag
                     # list steady. It is deliberately not drawn: overlaying
@@ -1296,6 +1329,15 @@ class StreamHandler(BaseHTTPRequestHandler):
             self.server.expire_leases()
             self._send_json({"leases": self.server.leases()})
             return
+        if path in ("/api/detections", "/api/detections.json"):
+            body = json.dumps(self.server.detections_status()).encode()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path in ("/api/poses", "/api/poses.json"):
             body = json.dumps(self.server.pose_status()).encode()
             self.send_response(HTTPStatus.OK)
@@ -1675,6 +1717,13 @@ class CameraHTTPServer(ThreadingHTTPServer):
             "floor_anchors_seen": sorted(union & self.floor_anchor_ids),
             "floor_anchors_missing": sorted(self.floor_anchor_ids - union),
             "cameras": cameras,
+        }
+
+    def detections_status(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "coordinates": "pixels in /snapshot/{index}.jpg; corners ordered as OpenCV AprilTag 0..3",
+            "cameras": [worker.detections_snapshot() for worker in self.workers],
         }
 
     def pose_status(self) -> dict[str, Any]:

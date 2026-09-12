@@ -28,6 +28,7 @@ hexapod-gait-video = "hexapod_tracker.telemetry_video:main"
 hexapod-audit-layout = "hexapod_tracker.layout_audit:main"
 hexapod-calibrate-tags = "hexapod_tracker.tag_calibration:main"
 hexapod-relayout = "hexapod_tracker.tag_calibration:main"
+hexapod-zero-check = "hexapod_tracker.zero_check:main"
 hexapod-calibration-board = "hexapod_tracker.calibration_board:main"
 hexapod-rgbd-calibrate = "hexapod_tracker.rgbd_calibrate:main"
 

@@ -237,6 +237,25 @@ nor the board-defined world frame moves. See
 [`docs/RGBD_CALIBRATION.md`](docs/RGBD_CALIBRATION.md) for setup, quality gates,
 offline fixtures, coordinate conventions, and limitations.
 
+## Zero check (`hexapod-zero-check`)
+
+Before a protocol that starts from the zero pose, Robot Lab asks the top
+camera whether the pose looks like zero. The encoders sit on the servo output
+shafts, so a horn whose screws have slipped passes the runner's start-pose
+check while the leg points somewhere else; the lid tags cannot be fooled.
+`hexapod-zero-check` re-derives each leg's azimuth from one observation with
+the calibration program's geometry and compares it with
+`leg_zero_azimuth_body_deg` in the installed layout. A two-lid leg gets 12 deg
+of tolerance, a one-lid leg 18.
+
+    uv run hexapod-zero-check                      # cameras, top camera 2
+    uv run hexapod-zero-check --replay DIR --json  # a saved zero_tags.json
+
+Exit 0 when every seen leg agrees, 2 when a leg is off, 3 when nothing could
+be measured. The lab (`hexapod-lab2 zero-check`) combines it with the encoders:
+only "encoders at zero, camera says a leg is off" holds the loop; "not at zero"
+and "camera blind" are noted and the run goes ahead.
+
 ## Tag calibration (`hexapod-calibrate-tags`)
 
 After tags fall off or the robot is reassembled, re-derive the tag layout by

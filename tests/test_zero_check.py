@@ -58,3 +58,53 @@ def test_cli_replay_exits_zero_and_prints_json(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["ok"]
     assert (tmp_path / "zero_check.json").exists()
+
+
+def _swing(tags, ids, deg):
+    pivot = center(tags[0])
+    a = math.radians(deg)
+    R = np.array([[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]])
+    for tid in ids:
+        tags[tid] = (R @ (tags[tid] - pivot).T).T + pivot
+    return tags
+
+
+def test_a_spare_tag_far_from_the_robot_is_ignored():
+    zero, sizes, layout, floor = _replay()
+    tags = dict(zero[2])
+    del tags[4]                                                        # leg 5's real hip lid out of view
+    from hexapod_tracker.tag_calibration import edge_px
+    tags[4] = tags[1] + np.array([16.0 * edge_px(tags[0]), 0.0])         # a printed copy lying on the floor, far away
+    r = zc.check({**zero, 2: tags}, sizes, layout, floor, 2)
+    assert r["far_ids"] == [4]
+    assert r["off"] == [], r["summary"]
+    assert r["legs"]["5"]["lids_seen"] == [14]                          # knee lid only: still measurable
+    assert r["legs"]["5"]["verdict"] == "ok"
+
+
+def test_a_leg_seen_only_by_its_hip_lid_is_not_judged():
+    zero, sizes, layout, floor = _replay()
+    tags = dict(zero[2])
+    del tags[14]                                                       # leg 5: only hip lid 4 remains
+    r = zc.check({**zero, 2: tags}, sizes, layout, floor, 2)
+    assert r["legs"]["5"]["verdict"] == "unseen" and r["legs"]["5"]["why"] == "hip lid only"
+    assert r["ok"]
+
+
+def test_one_bad_leg_does_not_drag_the_others_off():
+    zero, sizes, layout, floor = _replay()
+    tags = _swing(dict(zero[2]), (5, 9), 40.0)                          # leg 3 both lids turned 40 deg
+    r = zc.check({**zero, 2: tags}, sizes, layout, floor, 2)
+    assert r["off"] == [3], r["summary"]
+    others = [abs(e["residual_deg"]) for l, e in r["legs"].items() if l != "3" and e["residual_deg"] is not None]
+    assert max(others) < 12, r["legs"]      # leg 4 reads from one lid and sits near 10 anyway
+
+
+def test_two_legs_that_disagree_are_ambiguous_not_a_hold():
+    zero, sizes, layout, floor = _replay()
+    keep = {0, 1, 7, 109, 113, 3, 10} | {tid for tid in zero[2] if tid >= 100}   # legs 0, 1 and 2 only
+    tags = {tid: c for tid, c in zero[2].items() if tid in keep}
+    del tags[109]; del tags[113]                                        # leg 1 gone: legs 0 and 2 remain
+    tags = _swing(tags, (3, 10), 30.0)                                  # and leg 2 is turned
+    r = zc.check({**zero, 2: tags}, sizes, layout, floor, 2)
+    assert not r["ok"] and r["off"] == [] and r["error"] and "disagree" in r["error"]

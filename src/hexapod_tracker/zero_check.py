@@ -29,11 +29,15 @@ import numpy as np
 
 from .paths import CONFIG_DIR
 from .tag_calibration import (
-    Cameras, annotate, derive_layout, load_configs, load_tags, resolve_links, tags_only,
+    Cameras, annotate, center, derive_layout, edge_px, load_configs, load_tags, resolve_links, tags_only,
     votes_from_layout, wrap_deg,
 )
 
 DEFAULT_TOL_DEG = 12.0
+# A lid further than this many chassis-tag edges from the chassis tag is not on
+# this robot: on 2026-09-11 a spare printed copy of tag 4 in a bag on the floor
+# was taken for leg 5's hip lid and made three legs look 30-76 deg off.
+MAX_LID_DISTANCE_EDGES = 12.0   # a knee lid at zero sits ~7 edges (200 mm / 27 mm) from the chassis tag
 
 
 def check(zero: dict[int, dict[int, np.ndarray]], sizes: dict[int, tuple[int, int]], layout: dict, floor: dict,
@@ -47,33 +51,68 @@ def check(zero: dict[int, dict[int, np.ndarray]], sizes: dict[int, tuple[int, in
     """
     log = log or (lambda msg: None)
     floor_ids = {int(t["id"]) for t in floor["tags"]}
-    link_of = resolve_links(votes_from_layout(layout), log, layout)
+    by_id = {int(t["id"]): t for t in layout.get("robot_tags", [])}
     expected = {int(k): float(v) for k, v in (layout.get("leg_zero_azimuth_body_deg") or {}).items()}
     out: dict[str, Any] = {"ok": False, "top_camera": top, "tol_deg": tol_deg, "legs": {}, "off": [], "unseen": [],
-                           "error": None, "warning": None}
+                           "far_ids": [], "error": None, "warning": None, "body_shift_deg": None}
     if not expected:
         out["error"] = "layout has no leg_zero_azimuth_body_deg; run hexapod-calibrate-tags first"
         return out
+    # Only servo lids say where a leg points; yoke faces are on the sides of the
+    # links and their centres are not on the leg's centreline.
+    link_of = {tid: link for tid, link in resolve_links(votes_from_layout(layout), log, layout).items()
+               if by_id.get(tid, {}).get("kind") == "servo_lid"}
+    tops = dict(zero.get(top, {}))
+    if 0 in tops:
+        c0, e0 = center(tops[0]), edge_px(tops[0])
+        far = sorted(tid for tid in tops if tid in link_of
+                     and float(np.hypot(*(center(tops[tid]) - c0))) > MAX_LID_DISTANCE_EDGES * e0)
+        if far:
+            log(f"ignoring {far}: further than {MAX_LID_DISTANCE_EDGES:g} chassis-tag edges from tag 0 (spare tags in view?)")
+            out["far_ids"] = far
+            tops = {tid: crn for tid, crn in tops.items() if tid not in far}
+    if top in zero:
+        zero = {**zero, top: tops}
     derived = derive_layout(zero, sizes, link_of, layout, floor_ids, top, device={0: "OV9281"}, log=log)
     out["chassis_tag_seen"] = bool(derived.get("chassis_tag_seen"))
-    out["warning"] = derived.get("warning")
     if derived.get("error"):
         out["error"] = derived["error"]
         return out
-    by_id = {int(t["id"]): t for t in layout.get("robot_tags", [])}
-    seen_top = set(zero.get(top, {}))
+    seen_top = set(tops)
+    hip_lid = {leg: tid for tid, (leg, _l) in link_of.items() if by_id[tid].get("joint") == "hip"}
+    # derive_layout defines body +x as the mean over the legs it measured, so one
+    # leg far from its zero drags every other leg's residual the opposite way.
+    # Take the body-frame shift as the median deviation of the two-lid legs
+    # instead: with three or more it ignores one bad leg; with two it cannot tell
+    # which is wrong and says so.
+    devs = {leg: wrap_deg(derived["azimuth_deg"][leg] - expected[leg]) for leg in derived["azimuth_deg"]
+            if derived["axis_quality"].get(leg) == "two_lids" and leg in expected}
+    if len(devs) >= 3:
+        shift = float(np.median(list(devs.values())))
+    elif len(devs) == 2:
+        a, b = devs.values()
+        shift = 0.5 * (a + b) if abs(wrap_deg(a - b)) <= tol_deg else None
+        if shift is None:
+            out["warning"] = (f"only two legs measured and they disagree by {abs(wrap_deg(a - b)):.0f} deg; "
+                              "cannot tell which one is off")
+    else:
+        shift = float(np.mean(list(devs.values()))) if devs else 0.0
+    out["body_shift_deg"] = round(shift, 1) if shift is not None else None
     for leg in range(6):
-        lids = sorted(tid for tid, (l, _link) in link_of.items()
-                      if l == leg and by_id.get(tid, {}).get("surface") == "horizontal")
+        lids = sorted(tid for tid, (l, _link) in link_of.items() if l == leg)
+        seen = sorted(t for t in lids if t in seen_top)
         az = derived["azimuth_deg"].get(leg)
-        entry: dict[str, Any] = {"lids": lids, "lids_seen": sorted(t for t in lids if t in seen_top),
-                                 "azimuth_deg": az, "expected_deg": expected.get(leg),
+        entry: dict[str, Any] = {"lids": lids, "lids_seen": seen, "azimuth_deg": az, "expected_deg": expected.get(leg),
                                  "quality": derived["axis_quality"].get(leg)}
-        if az is None or leg not in expected:
+        hip_only = seen == [hip_lid.get(leg)] and hip_lid.get(leg) is not None
+        if az is None or leg not in expected or shift is None or hip_only:
+            # A hip lid sits a few cm from the body centre: its direction from the
+            # off-centre chassis tag says nothing about where the leg points.
             entry["residual_deg"], entry["verdict"] = None, "unseen"
+            entry["why"] = ("hip lid only" if hip_only else "two legs disagree" if shift is None else "not seen")
             out["unseen"].append(leg)
         else:
-            res = round(wrap_deg(az - expected[leg]), 1)
+            res = round(wrap_deg(az - expected[leg] - shift), 1)
             entry["residual_deg"] = res
             # One lid only: the axis runs through the chassis tag instead of
             # two lids and is about twice as noisy (leg 4 read 8.4 deg from a
@@ -83,10 +122,16 @@ def check(zero: dict[int, dict[int, np.ndarray]], sizes: dict[int, tuple[int, in
             if entry["verdict"] == "off":
                 out["off"].append(leg)
         out["legs"][str(leg)] = entry
-    out["ok"] = not out["off"] and len(out["unseen"]) < 6
-    if len(out["unseen"]) == 6:
+    measured = 6 - len(out["unseen"])
+    out["ok"] = not out["off"] and measured >= 2
+    if shift is None:
+        out["error"] = out["warning"]
+    elif measured == 0:
         out["error"] = "no leg's lids were seen by the top camera"
+    elif measured == 1:
+        out["error"] = "only one leg measured; nothing to compare it with"
     out["summary"] = (
+        str(out["error"]) if out["error"] else
         "camera agrees with the layout" if out["ok"] and not out["unseen"] else
         f"legs {out['off']} point " + ", ".join(
             f"{out['legs'][str(l)]['residual_deg']:+.0f} deg" for l in out["off"]) + " from where the layout says zero is"

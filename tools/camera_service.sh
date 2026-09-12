@@ -16,6 +16,10 @@ PORT="${CAMERA_SERVICE_PORT:-8766}"
 HOST="${CAMERA_SERVICE_HOST:-127.0.0.1}"
 ROBOT_URL="${CAMERA_SERVICE_ROBOT_URL:-}"
 EXTRA_ARGS="${CAMERA_SERVICE_EXTRA_ARGS:-}"
+# Per-camera intrinsics, keyed by camera identity (stable_id / device_name),
+# so the file survives the slot renumbering that discovery does at every
+# start. Set to an empty string to run planar-only.
+CALIBRATION="${CAMERA_SERVICE_CALIBRATION-$ROOT/configs/camera_intrinsics_lab_20260912.json}"
 # Comma-separated uniqueIDs to skip. Two cameras on one USB controller
 # cannot both stream, and the loser retries forever, taking bandwidth from
 # the cameras that do work -- so excluding it is better than letting it
@@ -38,6 +42,8 @@ Usage: tools/camera_service.sh <command>
 Env: CAMERA_SERVICE_PORT, CAMERA_SERVICE_HOST, CAMERA_SERVICE_ROBOT_URL,
      CAMERA_SERVICE_EXTRA_ARGS, CAMERA_SERVICE_LABEL,
      CAMERA_SERVICE_EXCLUDE=<uniqueID,uniqueID>
+     CAMERA_SERVICE_CALIBRATION=<identity-keyed intrinsics json; "" for none>
+       default: configs/camera_intrinsics_lab_20260912.json
 EOF
 }
 
@@ -85,6 +91,13 @@ build_args() {
   printf '%s\n' "--indices" "${slots[@]}" "--native-avfoundation" "${slots[@]}" \
     "${pins[@]}" "--host" "$HOST" "--port" "$PORT"
   [ -n "$ROBOT_URL" ] && printf '%s\n' "--robot-url" "$ROBOT_URL"
+  if [ -n "$CALIBRATION" ]; then
+    if [ -f "$CALIBRATION" ]; then
+      printf '%s\n' "--camera-calibration" "$CALIBRATION"
+    else
+      echo "calibration file not found, running planar-only: $CALIBRATION" >&2
+    fi
+  fi
   # shellcheck disable=SC2086
   [ -n "$EXTRA_ARGS" ] && printf '%s\n' $EXTRA_ARGS
   return 0

@@ -219,3 +219,90 @@ def test_duplicate_tag_ids_in_one_frame_are_dropped_and_reported():
 
     assert duplicates == [7]
     assert sorted(corners) == [9]
+
+
+def _fake_worker(index, stable_id=None, device_name=None, capture_size=None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        index=index,
+        stable_id=stable_id,
+        capture_size=capture_size,
+        status=SimpleNamespace(device_name=device_name),
+    )
+
+
+def test_intrinsics_resolve_by_camera_identity_not_by_slot_number():
+    from hexapod_tracker.camera_server import resolve_intrinsics_by_identity
+
+    workers = [
+        _fake_worker(0, "0x830000032e40362", "12MP AF Camera"),
+        _fake_worker(1, "0x520000032e46678", "4K U3 Camera "),
+        _fake_worker(3, "0x41100000c456366", "Arducam OV9281 USB Camera"),
+    ]
+    calibration = {
+        "quality": "provisional",
+        "cameras": {
+            # Wrong numeric key on purpose: identity must win over the key.
+            "7": {"stable_id": "0x520000032e46678", "camera_matrix": [[4280, 0, 1920], [0, 4280, 1080], [0, 0, 1]]},
+            # Stable id from a port the camera no longer occupies; unique name rescues it.
+            "ov": {"stable_id": "0x84000000c456366", "device_name": "Arducam OV9281 USB Camera", "camera_matrix": [[948, 0, 640], [0, 948, 360], [0, 0, 1]]},
+            # Identity that matches nothing must be dropped, not fall back to key "0".
+            "0": {"stable_id": "0x412000032e40362", "camera_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
+            # Legacy entry with no identity keeps its numeric key.
+            "5": {"camera_matrix": [[2, 0, 0], [0, 2, 0], [0, 0, 1]]},
+        },
+    }
+    messages = []
+    resolved = resolve_intrinsics_by_identity(calibration, workers, log=messages.append)
+
+    assert set(resolved["cameras"]) == {"1", "3", "5"}
+    assert resolved["cameras"]["1"]["camera_matrix"][0][0] == 4280
+    assert resolved["cameras"]["3"]["camera_matrix"][0][0] == 948
+    assert resolved["cameras"]["5"]["camera_matrix"][0][0] == 2
+    assert resolved["quality"] == "provisional"
+    assert any("re-pin" in message for message in messages)
+    assert any("dropped" in message for message in messages)
+    # Every key is a slot number, which is what PlanarPoseEstimator requires.
+    assert all(key.isdigit() for key in resolved["cameras"])
+
+
+def test_intrinsics_ambiguous_device_name_is_dropped():
+    from hexapod_tracker.camera_server import resolve_intrinsics_by_identity
+
+    workers = [
+        _fake_worker(0, "0x830000032e40362", "12MP AF Camera"),
+        _fake_worker(1, "0x412000032e40362", "12MP AF Camera"),
+    ]
+    calibration = {"cameras": {"a": {"device_name": "12MP AF Camera", "camera_matrix": []}}}
+    resolved = resolve_intrinsics_by_identity(calibration, workers, log=lambda _m: None)
+
+    assert resolved["cameras"] == {}
+
+
+def test_intrinsics_entry_supplies_default_capture_size_only_when_unset():
+    from hexapod_tracker.camera_server import apply_intrinsics_capture_sizes
+
+    pinned_by_flag = _fake_worker(0, "a", "cam a", capture_size=(1280, 720))
+    unset = _fake_worker(1, "b", "cam b")
+    calibration = {
+        "cameras": {
+            "0": {"capture_size": [3840, 2160]},
+            "1": {"capture_size": [3840, 2160]},
+        }
+    }
+    apply_intrinsics_capture_sizes(calibration, [pinned_by_flag, unset], log=lambda _m: None)
+
+    assert pinned_by_flag.capture_size == (1280, 720)
+    assert unset.capture_size == (3840, 2160)
+
+
+def test_committed_lab_intrinsics_are_identity_keyed():
+    import json
+
+    document = json.loads((CONFIG_DIR / "camera_intrinsics_lab_20260912.json").read_text())
+    for key, spec in document["cameras"].items():
+        assert not key.isdigit(), "entries must not rely on slot numbers"
+        assert spec.get("stable_id") and spec.get("device_name")
+        assert len(spec["camera_matrix"]) == 3
+        assert spec["image_size"]["width"] > 0

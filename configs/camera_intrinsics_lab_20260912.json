@@ -1,0 +1,72 @@
+{
+ "schema_version": 1,
+ "name": "Lab camera intrinsic profiles, keyed by camera identity",
+ "captured": "2026-09-12",
+ "quality": "provisional",
+ "image_size": {
+  "width": 3840,
+  "height": 2160
+ },
+ "method": "Per-camera constrained single-plane fits against the surveyed floor grid; see each camera record. Entries are matched to server slots by stable_id (AVFoundation uniqueID, which embeds the USB port) and then by a unique device_name, never by slot number -- tools/camera_service.sh renumbers slots from enumeration order at every start. An entry that matches no attached camera is dropped.",
+ "cameras": {
+  "elp_4k_u3": {
+   "device_name": "4K U3 Camera",
+   "device_model": "ELP 4K USB camera, AVFoundation name '4K U3 Camera', UVC VendorID_13028 ProductID_26232",
+   "stable_id": "0x520000032e46678",
+   "image_size": {
+    "width": 3840,
+    "height": 2160
+   },
+   "camera_matrix": [
+    [
+     4280.0,
+     0.0,
+     1920.0
+    ],
+    [
+     0.0,
+     4280.0,
+     1080.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "distortion_coefficients": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "quality": "provisional",
+   "method": "Constrained single-plane fit to 40 native 3840x2160 luma frames of floor anchors [100, 103, 112] (camera fixed, optical axis ~21 deg off vertical, ~1.25 m above the grid): focal length chosen to minimise pooled PnP reprojection error of the anchors' surveyed corners; principal point fixed at the image centre, square pixels, zero skew, zero distortion. Chassis/coxa-lid normal fits were rejected as ill-conditioned for this near-top-down view; femur lids were sagging.",
+   "floor_reprojection_rms_px": 4.751,
+   "focal_sample_standard_deviation_px": 11.3,
+   "focal_uncertainty_band_px": {
+    "within_plus_0_5px_rms": [
+     4080,
+     4500
+    ],
+    "note": "Error floor is the floor map's 5 mm anchor tolerance, not the lens; treat focal length as +/-5 percent."
+   },
+   "horizontal_fov_deg": 48.3,
+   "resolution_note": "Matrix is fitted at 3840x2160 and the server scales it linearly to the slot's live capture size; capture_size above pins the slot to the fitted mode. Valid only if other ELP modes are downscales of the full field; some 60 fps modes on 4K UVC modules are sensor crops. Re-fit if the capture size changes.",
+   "captured": "2026-09-12",
+   "capture_size": [
+    3840,
+    2160
+   ]
+  }
+ },
+ "validation": {
+  "note": "Provisional. Replace with a multi-pose ChArUco/AprilTag board calibration (hexapod_tracker.lab_camera_calibration) before metrology-grade 3-D claims. The OV9281 and the 12MP AF module have no entry yet; both currently see enough floor anchors for the same fit."
+ },
+ "source": {
+  "floor_map": "floor_tag_map.json",
+  "robot_layout": "hexapod-1-apriltag-layout.json",
+  "fit_artifacts": "fit on 2026-09-12 from 40 native luma frames pulled from /native-luma/<slot>.png; anchors 100, 103, 112"
+ }
+}

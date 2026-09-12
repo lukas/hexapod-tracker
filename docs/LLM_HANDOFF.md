@@ -104,15 +104,26 @@ both.
 
 `configs/camera_capture_profiles.json` is the source of truth for a saved
 setup, but both checked-in profiles describe the September 3 layout and no
-longer match the hardware. As of 2026-09-08 there are four Arducam OV9281
-modules attached and no Continuity Camera slot in use, so `lab-tracking`
-(iPhone at index 0 plus two OV9281s) and `lab-usb-only` (two OV9281s at
-indexes 1 and 2) both mis-describe the rig. Do not pass `--capture-profile`
-until a profile is rewritten for the current cabling. The same staleness
-applies to `configs/camera_intrinsics.json`, whose index-keyed entries assume
-index 0 is the iPhone; supplying an empty `cameras` map is the safe way to run
-the planar-only pose API without silently attaching iPhone intrinsics to an
-Arducam.
+longer match the hardware, so `lab-tracking` (iPhone at index 0 plus two
+OV9281s) and `lab-usb-only` (two OV9281s at indexes 1 and 2) both
+mis-describe the rig. Do not pass `--capture-profile` until a profile is
+rewritten for the current cabling. `configs/camera_intrinsics.json` is stale
+for the same reason: its entries are keyed by slot number and assume index 0
+is the iPhone.
+
+Intrinsics now live in `configs/camera_intrinsics_lab_20260912.json`, keyed
+by camera **identity** instead. Each entry names its camera by `stable_id`
+(AVFoundation `uniqueID`) and `device_name`; at start the server matches
+entries to slots by stable id first, then by a device name that fits exactly
+one attached camera (with a warning that the camera changed ports), and drops
+an entry that matches nothing. It never falls back to a slot number, so a
+profile cannot silently attach one camera's lens to another. An entry may
+also carry `capture_size`, which becomes that slot's native mode unless
+`--capture-size` names the slot; a matrix is only valid at the size it was
+fitted for. `tools/camera_service.sh` passes this file by default
+(`CAMERA_SERVICE_CALIBRATION` overrides it; an empty value runs planar-only).
+As of 2026-09-12 only the ELP has an entry; the OV9281 and the 12MP module
+run planar-only until they are fitted.
 
 The `lab-tracking` profile captures the iPhone's full 1920x1440 420v/NV12 source at
 30 fps, processes a 1280x960 color preview, uses both OV9281 cameras at their
@@ -349,6 +360,34 @@ One OV9281 is physically mounted rotated about 90 degrees. `--rotate-180` is
 the only rotation the server offers, so a 90-degree mount cannot be corrected
 in software -- rotate it in hardware, or add 90/270 support.
 
+#### The ELP 4K module
+
+`4K U3 Camera` (ELP 4K USB, UVC `VendorID_13028 ProductID_26232`) enumerates
+as a USB 3 device and is plain UVC: nothing to install, and it appeared in
+AVFoundation the moment it was on a working cable. It advertises `420v` and
+`yuvs` at every size from 640x480 up to 3840x2160, with 30 fps available at
+all of them and 60 fps at most; the fixed-camera rig runs it at 3840x2160
+`420v`, where the server holds 21-23 fps with tag detection on the full frame.
+Its `focusMode` has not been checked; do that before a calibration run, as
+with the 12MP module. Note the trailing space in its AVFoundation name.
+
+Its intrinsics were fitted on 2026-09-12 from 40 native luma frames of floor
+anchors 100, 103 and 112 (three non-collinear anchors, camera about 1.25 m up
+with the optical axis about 21 degrees off vertical): focal length 4280 px at
+3840 wide, about 48 degrees horizontal, chosen to minimise the pooled PnP
+reprojection error of the surveyed anchor corners with the principal point
+fixed at the image centre and zero distortion. Per-frame scatter was 11 px.
+The residual floor of 4.75 px is the floor map's own 5 mm anchor tolerance,
+not the lens, so treat the focal length as +/-5 percent and the profile as
+provisional. Two other single-view methods were tried first and should not be
+repeated for a near-top-down camera: fitting the focal length that makes the
+chassis and coxa-lid tag normals parallel has an almost flat objective for
+small clustered coplanar tags (it swung 33 percent depending on which tags
+were included, and the femur lids were sagging), and the closed-form focal
+length from a plane homography divides by the perspective terms, which are
+near zero when the plane is viewed nearly fronto-parallel. Pooled PnP
+reprojection over many frames was the estimator that stayed put.
+
 Physically inverted cameras must be listed under `--rotate-180`. This rotates
 frames before tag detection, annotation, raw/annotated JPEG encoding, and pose
 snapshots. Never implement orientation as an `img` CSS transform: that makes
@@ -370,6 +409,21 @@ ports; a recorded list goes stale the moment the rig is re-cabled, which is
 exactly how Robot Lab ended up configured for four cameras that no longer
 existed. Discovery keeps external USB cameras and drops the Studio Display
 and any Continuity iPhone, which are not part of the rig.
+
+**Slot numbers follow AVFoundation enumeration order at each start**, so a
+camera's slot can change when any device joins or leaves. Never key anything
+persistent by slot; use the stable id (`--device-id`) or the identity-keyed
+intrinsics file. The installed lab plist has been started with
+`CAMERA_SERVICE_HOST=::` so the page is reachable over the LAN; a bare `start`
+would bind `127.0.0.1`. Any hand edit to the plist is lost at the next
+`start`, because the plist is regenerated from discovery.
+
+The server does not notice cameras that leave or re-enumerate while it runs.
+Observed 2026-09-11: an unplugged pinned camera kept reporting AVFoundation
+"Cannot Use" instead of "not attached", and a camera that dropped off the bus
+and came back with a new registry id opened but delivered no frames until the
+server was restarted, while a fresh process streamed it fine. After any
+cabling change, `tools/camera_service.sh restart`.
 
 `CAMERA_SERVICE_EXCLUDE=<uniqueID,...>` skips a camera. That matters when two
 share a USB controller: only one can stream, and the loser retries forever and

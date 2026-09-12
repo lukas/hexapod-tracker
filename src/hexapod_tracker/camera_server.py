@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 from urllib.parse import parse_qs, urlparse
 
 import cv2
@@ -2028,6 +2028,98 @@ def parse_capture_sizes(values: list[str]) -> dict[int, tuple[int, int]]:
     return sizes
 
 
+def resolve_intrinsics_by_identity(
+    calibration: dict[str, Any],
+    workers: Sequence[Any],
+    *,
+    log: Callable[[str], None] = print,
+) -> dict[str, Any]:
+    """Return a copy of ``calibration`` whose ``cameras`` are keyed by slot.
+
+    An entry that names a camera -- ``stable_id`` (AVFoundation uniqueID)
+    and/or ``device_name`` -- is attached to the slot whose worker is pinned
+    to that camera: stable id first, then a device name that matches exactly
+    one worker (with a warning, because a name match after a stable-id miss
+    means the camera changed ports and the entry should be re-pinned). An
+    identity entry that matches nothing is dropped; it must never fall back
+    to whatever numeric key it happened to carry, because intrinsics quietly
+    attached to the wrong camera are worse than none. Entries with neither
+    field keep their numeric key so legacy index-keyed profiles still load.
+
+    Slot numbers are not identities: ``tools/camera_service.sh`` assigns them
+    from AVFoundation enumeration order at every start.
+    """
+    resolved: dict[str, Any] = {}
+    by_stable = {
+        str(worker.stable_id): worker for worker in workers if getattr(worker, "stable_id", None)
+    }
+    by_name: dict[str, list[Any]] = {}
+    for worker in workers:
+        name = getattr(getattr(worker, "status", None), "device_name", None)
+        if name:
+            by_name.setdefault(str(name).strip(), []).append(worker)
+    for key, spec in (calibration.get("cameras") or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        stable_id = str(spec.get("stable_id") or "").strip()
+        device_name = str(spec.get("device_name") or "").strip()
+        if not stable_id and not device_name:
+            resolved[str(key)] = spec
+            continue
+        worker = by_stable.get(stable_id) if stable_id else None
+        if worker is None and device_name:
+            candidates = by_name.get(device_name, [])
+            if len(candidates) == 1:
+                worker = candidates[0]
+                if stable_id:
+                    log(
+                        f"intrinsics {key!r}: stable id {stable_id} is not attached; "
+                        f"matched {device_name!r} by name on slot {worker.index} -- "
+                        "the camera changed ports, re-pin this entry"
+                    )
+            elif len(candidates) > 1:
+                log(
+                    f"intrinsics {key!r}: {device_name!r} matches {len(candidates)} "
+                    "cameras and no stable id matched; entry dropped"
+                )
+        if worker is None:
+            log(f"intrinsics {key!r}: no attached camera matches; entry dropped")
+            continue
+        slot = str(worker.index)
+        if slot in resolved:
+            log(f"intrinsics {key!r}: slot {slot} already has an entry; keeping the first")
+            continue
+        resolved[slot] = spec
+    return {**calibration, "cameras": resolved}
+
+
+def apply_intrinsics_capture_sizes(
+    calibration: dict[str, Any],
+    workers: Sequence[Any],
+    *,
+    log: Callable[[str], None] = print,
+) -> None:
+    """Default each slot's native capture size from its intrinsics entry.
+
+    A camera matrix is only valid at the capture size it was fitted for, so
+    an entry may carry ``capture_size: [width, height]``. It applies when no
+    ``--capture-size`` named that slot on the command line.
+    """
+    for worker in workers:
+        spec = (calibration.get("cameras") or {}).get(str(worker.index))
+        size = (spec or {}).get("capture_size")
+        if not size or getattr(worker, "capture_size", None):
+            continue
+        try:
+            width, height = (int(size[0]), int(size[1]))
+        except (TypeError, ValueError, IndexError):
+            log(f"intrinsics for slot {worker.index}: unusable capture_size {size!r}")
+            continue
+        if width > 0 and height > 0:
+            worker.capture_size = (width, height)
+            log(f"slot {worker.index}: capture size {width}x{height} from its intrinsics entry")
+
+
 def parse_device_ids(values: list[str]) -> dict[int, str]:
     """Parse ``INDEX:STABLE_ID`` pairs pinning slots to specific cameras."""
 
@@ -2137,12 +2229,6 @@ def main() -> None:
     else:
         camera_modes = parse_camera_modes(args.camera_mode)
     floor_map = json.loads(args.floor_map.read_text())
-    pose_estimator = PlanarPoseEstimator(
-        floor_map,
-        json.loads(args.part_map.read_text()),
-        json.loads(args.robot_tag_layout.read_text()),
-        json.loads(args.camera_calibration.read_text()),
-    )
     capture_sizes = parse_capture_sizes(args.capture_size)
     unknown_capture = sorted(set(capture_sizes) - set(args.indices))
     if unknown_capture:
@@ -2182,6 +2268,18 @@ def main() -> None:
         )
         for index in args.indices
     ]
+    # Intrinsics are attached by camera identity, so the workers (which resolve
+    # their pinned device names without opening anything) must exist first.
+    camera_calibration = resolve_intrinsics_by_identity(
+        json.loads(args.camera_calibration.read_text()), workers
+    )
+    apply_intrinsics_capture_sizes(camera_calibration, workers)
+    pose_estimator = PlanarPoseEstimator(
+        floor_map,
+        json.loads(args.part_map.read_text()),
+        json.loads(args.robot_tag_layout.read_text()),
+        camera_calibration,
+    )
     for worker in workers:
         worker.start()
         time.sleep(0.4)

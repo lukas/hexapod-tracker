@@ -3,7 +3,7 @@
  "name": "Hexapod 1 AprilTag layout",
  "robot_id": "hexapod-1",
  "platform": "prototype_sts3215",
- "captured": "2026-09-12",
+ "captured": "2026-09-11",
  "tag_family": "tag36h11",
  "tag_geometry": {
   "outer_with_quiet_zone_m": 0.034,
@@ -197,21 +197,19 @@
     "euler_xyz_deg": [
      0.0,
      0.0,
-     14.2
+     12.2
     ]
    },
    "measured_from_legs": [
-    0,
-    1,
     2,
     3,
     4,
     5
    ],
    "observed_in": [
-    0,
-    1
+    2
    ],
+   "note": "rotation kept from the pass that saw 4 legs with both lids; this pass saw 5",
    "verified": true
   },
   {
@@ -230,7 +228,7 @@
     ]
    },
    "observed_in": [
-    1
+    2
    ],
    "verified": true
   },
@@ -249,9 +247,25 @@
      90.0
     ]
    },
-   "observed_in": [
-    1
-   ],
+   "observed_in": [],
+   "verified": true
+  },
+  {
+   "id": 4,
+   "leg": 5,
+   "frame": "L5_coxa",
+   "kind": "servo_lid",
+   "joint": "hip",
+   "surface": "horizontal",
+   "frame_from_tag": {
+    "translation_m": null,
+    "euler_xyz_deg": [
+     0.0,
+     0.0,
+     -90.0
+    ]
+   },
+   "observed_in": [],
    "verified": true
   },
   {
@@ -270,8 +284,7 @@
     ]
    },
    "observed_in": [
-    0,
-    1
+    2
    ],
    "verified": true
   },
@@ -291,7 +304,7 @@
     ]
    },
    "observed_in": [
-    1
+    2
    ],
    "verified": true
   },
@@ -311,7 +324,7 @@
     ]
    },
    "observed_in": [
-    1
+    2
    ],
    "verified": true
   },
@@ -330,10 +343,7 @@
      180.0
     ]
    },
-   "observed_in": [
-    0,
-    1
-   ],
+   "observed_in": [],
    "verified": true
   },
   {
@@ -351,10 +361,7 @@
      180.0
     ]
    },
-   "observed_in": [
-    0,
-    1
-   ],
+   "observed_in": [],
    "verified": true
   },
   {
@@ -373,7 +380,27 @@
     ]
    },
    "observed_in": [
-    1
+    2
+   ],
+   "verified": true
+  },
+  {
+   "id": 14,
+   "leg": 5,
+   "frame": "L5_femur",
+   "kind": "servo_lid",
+   "joint": "knee",
+   "surface": "horizontal",
+   "frame_from_tag": {
+    "translation_m": null,
+    "euler_xyz_deg": [
+     0.0,
+     0.0,
+     90.0
+    ]
+   },
+   "observed_in": [
+    2
    ],
    "verified": true
   },
@@ -398,9 +425,7 @@
      "y": "-x"
     }
    },
-   "observed_in": [
-    1
-   ],
+   "observed_in": [],
    "verified": true
   },
   {
@@ -425,7 +450,35 @@
     }
    },
    "observed_in": [
-    0
+    1,
+    2
+   ],
+   "verified": true
+  },
+  {
+   "id": 21,
+   "leg": 5,
+   "frame": "L5_tibia",
+   "kind": "yoke_face",
+   "joint": "knee",
+   "mount_side": "+y",
+   "frame_from_tag": {
+    "translation_m": null,
+    "quaternion_xyzw": [
+     0.5,
+     0.5,
+     0.5,
+     -0.5
+    ],
+    "tag_axes_in_frame": {
+     "x": "+z",
+     "z": "+y",
+     "y": "+x"
+    }
+   },
+   "observed_in": [
+    1,
+    2
    ],
    "verified": true
   },
@@ -450,9 +503,7 @@
      "y": "-z"
     }
    },
-   "observed_in": [
-    1
-   ],
+   "observed_in": [],
    "verified": true
   },
   {
@@ -477,7 +528,7 @@
     }
    },
    "observed_in": [
-    0
+    2
    ],
    "verified": true
   },
@@ -503,6 +554,33 @@
     }
    },
    "observed_in": [],
+   "verified": true
+  },
+  {
+   "id": 42,
+   "leg": 5,
+   "frame": "L5_femur",
+   "kind": "yoke_face",
+   "joint": "hip",
+   "mount_side": "+y",
+   "frame_from_tag": {
+    "translation_m": null,
+    "quaternion_xyzw": [
+     0.5,
+     0.5,
+     0.5,
+     -0.5
+    ],
+    "tag_axes_in_frame": {
+     "x": "+z",
+     "z": "+y",
+     "y": "+x"
+    }
+   },
+   "observed_in": [
+    1,
+    2
+   ],
    "verified": true
   },
   {
@@ -550,35 +628,7 @@
      "y": "-z"
     }
    },
-   "observed_in": [
-    1
-   ],
-   "verified": true
-  },
-  {
-   "id": 51,
-   "leg": 2,
-   "frame": "L2_femur",
-   "kind": "yoke_face",
-   "joint": "hip",
-   "mount_side": "-y",
-   "frame_from_tag": {
-    "translation_m": null,
-    "quaternion_xyzw": [
-     0.0,
-     0.7071068,
-     -0.7071068,
-     0.0
-    ],
-    "tag_axes_in_frame": {
-     "x": "-x",
-     "z": "-y",
-     "y": "-z"
-    }
-   },
-   "observed_in": [
-    1
-   ],
+   "observed_in": [],
    "verified": true
   },
   {
@@ -639,73 +689,43 @@
    "frame_from_tag": {
     "translation_m": null,
     "quaternion_xyzw": [
-     0.5,
-     0.5,
-     -0.5,
-     0.5
-    ],
-    "tag_axes_in_frame": {
-     "x": "-z",
-     "z": "-y",
-     "y": "+x"
-    }
-   },
-   "observed_in": [
-    0,
-    1
-   ],
-   "verified": true
-  },
-  {
-   "id": 61,
-   "leg": 2,
-   "frame": "L2_tibia",
-   "kind": "yoke_face",
-   "joint": "knee",
-   "mount_side": "-y",
-   "frame_from_tag": {
-    "translation_m": null,
-    "quaternion_xyzw": [
-     0.5,
-     0.5,
-     -0.5,
-     0.5
-    ],
-    "tag_axes_in_frame": {
-     "x": "-z",
-     "z": "-y",
-     "y": "+x"
-    }
-   },
-   "observed_in": [
-    0,
-    1
-   ],
-   "verified": true
-  },
-  {
-   "id": 62,
-   "leg": 5,
-   "frame": "L5_femur",
-   "kind": "yoke_face",
-   "joint": "hip",
-   "mount_side": "+y",
-   "frame_from_tag": {
-    "translation_m": null,
-    "quaternion_xyzw": [
      0.0,
-     0.7071068,
+     -0.7071068,
      0.7071068,
      0.0
     ],
     "tag_axes_in_frame": {
      "x": "-x",
+     "y": "-z",
+     "z": "-y"
+    }
+   },
+   "observed_in": [],
+   "verified": true
+  },
+  {
+   "id": 62,
+   "leg": 0,
+   "frame": "L0_tibia",
+   "kind": "yoke_face",
+   "joint": "knee",
+   "mount_side": "+y",
+   "frame_from_tag": {
+    "translation_m": null,
+    "quaternion_xyzw": [
+     0.5,
+     0.5,
+     0.5,
+     -0.5
+    ],
+    "tag_axes_in_frame": {
+     "x": "+z",
      "z": "+y",
-     "y": "+z"
+     "y": "+x"
     }
    },
    "observed_in": [
-    1
+    2
    ],
    "verified": true
   },
@@ -749,7 +769,7 @@
     ]
    },
    "observed_in": [
-    1
+    2
    ],
    "verified": true
   },
@@ -769,48 +789,7 @@
     ]
    },
    "observed_in": [
-    0,
-    1
-   ],
-   "verified": true
-  },
-  {
-   "id": 114,
-   "leg": 5,
-   "frame": "L5_coxa",
-   "kind": "servo_lid",
-   "joint": "hip",
-   "surface": "horizontal",
-   "frame_from_tag": {
-    "translation_m": null,
-    "euler_xyz_deg": [
-     0.0,
-     0.0,
-     -90.0
-    ]
-   },
-   "observed_in": [
-    1
-   ],
-   "verified": true
-  },
-  {
-   "id": 117,
-   "leg": 5,
-   "frame": "L5_femur",
-   "kind": "servo_lid",
-   "joint": "knee",
-   "surface": "horizontal",
-   "frame_from_tag": {
-    "translation_m": null,
-    "euler_xyz_deg": [
-     0.0,
-     0.0,
-     90.0
-    ]
-   },
-   "observed_in": [
-    1
+    2
    ],
    "verified": true
   },
@@ -843,6 +822,59 @@
    "verified": false
   },
   {
+   "id": 31,
+   "kind": "yoke_face",
+   "leg": 2,
+   "joint": "hip",
+   "frame": "L2_femur",
+   "mount_side": "-y",
+   "frame_from_tag": {
+    "translation_m": null,
+    "quaternion_xyzw": [
+     0.0,
+     -0.7071068,
+     0.7071068,
+     0.0
+    ],
+    "tag_axes_in_frame": {
+     "x": "-x",
+     "y": "-z",
+     "z": "-y"
+    }
+   },
+   "observed_in": [
+    3746
+   ],
+   "verified": false
+  },
+  {
+   "id": 16,
+   "kind": "yoke_face",
+   "leg": 2,
+   "joint": "knee",
+   "frame": "L2_tibia",
+   "mount_side": "-y",
+   "frame_from_tag": {
+    "translation_m": null,
+    "quaternion_xyzw": [
+     0.7071068,
+     0.0,
+     0.0,
+     0.7071068
+    ],
+    "tag_axes_in_frame": {
+     "x": "+x",
+     "y": "+z",
+     "z": "-y"
+    }
+   },
+   "observed_in": [
+    3746,
+    3751
+   ],
+   "verified": false
+  },
+  {
    "id": 33,
    "kind": "yoke_face",
    "leg": 3,
@@ -867,6 +899,63 @@
     3748
    ],
    "verified": false
+  },
+  {
+   "id": 51,
+   "kind": "yoke_face",
+   "leg": 4,
+   "joint": "hip",
+   "frame": "L4_femur",
+   "mount_side": "-y",
+   "frame_from_tag": {
+    "translation_m": null,
+    "quaternion_xyzw": [
+     0.0,
+     -0.7071068,
+     0.7071068,
+     0.0
+    ],
+    "tag_axes_in_frame": {
+     "x": "-x",
+     "y": "-z",
+     "z": "-y"
+    }
+   },
+   "observed_in": [
+    3744,
+    3745,
+    3748
+   ],
+   "verified": false
+  },
+  {
+   "id": 61,
+   "kind": "yoke_face",
+   "leg": 4,
+   "joint": "knee",
+   "frame": "L4_tibia",
+   "mount_side": "-y",
+   "frame_from_tag": {
+    "translation_m": null,
+    "quaternion_xyzw": [
+     0.5,
+     0.5,
+     -0.5,
+     0.5
+    ],
+    "tag_axes_in_frame": {
+     "x": "-z",
+     "y": "+x",
+     "z": "-y"
+    }
+   },
+   "observed_in": [
+    3744,
+    3745,
+    3747,
+    3748
+   ],
+   "verified": false
   }
  ],
  "unresolved_mounts": [
@@ -875,119 +964,78 @@
    "joint": "hip",
    "kind": "yoke_face",
    "mount_side": "+y",
-   "reason": "no camera saw a tag on this face during the 2026-09-12 pass and the previous layout had none",
-   "since": "2026-09-12"
+   "reason": "no camera saw a tag on this face during the 2026-09-11 pass and the previous layout had none",
+   "since": "2026-09-11"
   },
   {
    "leg": 0,
    "joint": "hip",
    "kind": "yoke_face",
    "mount_side": "-y",
-   "reason": "no camera saw a tag on this face during the 2026-09-12 pass and the previous layout had none",
-   "since": "2026-09-12"
-  },
-  {
-   "leg": 0,
-   "joint": "knee",
-   "kind": "yoke_face",
-   "mount_side": "+y",
-   "reason": "no camera saw a tag on this face during the 2026-09-12 pass and the previous layout had none",
-   "since": "2026-09-12"
+   "reason": "no camera saw a tag on this face during the 2026-09-11 pass and the previous layout had none",
+   "since": "2026-09-11"
   },
   {
    "leg": 1,
    "joint": "knee",
    "kind": "yoke_face",
    "mount_side": "+y",
-   "reason": "no camera saw a tag on this face during the 2026-09-12 pass and the previous layout had none",
-   "since": "2026-09-12"
-  },
-  {
-   "leg": 4,
-   "joint": "hip",
-   "kind": "yoke_face",
-   "mount_side": "-y",
-   "reason": "no camera saw a tag on this face during the 2026-09-12 pass and the previous layout had none",
-   "since": "2026-09-12"
-  },
-  {
-   "leg": 4,
-   "joint": "knee",
-   "kind": "yoke_face",
-   "mount_side": "-y",
-   "reason": "no camera saw a tag on this face during the 2026-09-12 pass and the previous layout had none",
-   "since": "2026-09-12"
+   "reason": "no camera saw a tag on this face during the 2026-09-11 pass and the previous layout had none",
+   "since": "2026-09-11"
   },
   {
    "leg": 5,
    "joint": "knee",
    "kind": "yoke_face",
    "mount_side": "-y",
-   "reason": "leg 5's new tibia design has no tag mounts on its sides (operator, 2026-09-12)",
-   "since": "2026-09-12"
-  },
-  {
-   "leg": 5,
-   "joint": "knee",
-   "kind": "yoke_face",
-   "mount_side": "+y",
-   "reason": "leg 5's new tibia design has no tag mounts on its sides (operator, 2026-09-12)",
-   "since": "2026-09-12"
+   "reason": "no camera saw a tag on this face during the 2026-09-11 pass and the previous layout had none",
+   "since": "2026-09-11"
   }
  ],
  "id_collisions": [],
  "evidence": {
   "method": "hexapod-calibrate-tags: motion partition + lid-plane geometry + Claude census",
   "cameras": [
-   0,
-   1
+   1,
+   2
   ],
-  "top_camera": 1,
+  "top_camera": 2,
   "moved": false,
   "decoded_unique_ids": [
    0,
    1,
-   3,
    5,
    6,
    7,
-   9,
-   10,
    11,
-   18,
+   14,
    19,
-   25,
+   21,
    27,
-   33,
-   48,
-   51,
-   59,
-   61,
+   42,
    62,
    100,
    101,
    102,
-   103,
+   104,
+   105,
    109,
-   111,
    112,
-   113,
-   114,
-   117
+   113
   ],
   "focal_fit_px": {
-   "0": {
-    "f_px": 960.0,
-    "normal_spread_deg": 3.8,
-    "tags": 9
-   },
    "1": {
-    "f_px": 576.0,
-    "normal_spread_deg": 5.27,
-    "tags": 14
+    "f_px": 992.0,
+    "normal_spread_deg": 0.79,
+    "tags": 6
+   },
+   "2": {
+    "f_px": 960.0,
+    "normal_spread_deg": 1.57,
+    "tags": 10
    }
   },
-  "output_dir": "/Users/lukas/Library/Application Support/Hexapod Lab/v2/tag-calibration-20260912-full1-assembled2"
+  "output_dir": "/Users/lukas/Library/Application Support/Hexapod Lab/v2/tag-calibration-20260911-merge4"
  },
  "limitations": [
   "Robot-tag translations are null; the tracker never reads them.",
@@ -1009,12 +1057,12 @@
   "note": "The gait code's own frame puts leg i at +(i+0.5)*60 deg and counts a clockwise-from-above yaw as positive: it is right-handed with z DOWN (x forward, y right), i.e. this frame rotated 180 deg about x, not a reflection. Azimuths below were measured at the commanded zero pose, so each yaw servo's zero offset is absorbed into its leg's azimuth."
  },
  "leg_zero_azimuth_body_deg": {
-  "0": -18.7,
-  "1": -94.7,
-  "2": -160.8,
-  "3": 151.0,
-  "4": 88.0,
-  "5": 35.2
+  "0": -19.6,
+  "1": -97.2,
+  "2": -154.4,
+  "3": 144.5,
+  "4": 86.9,
+  "5": 39.4
  },
  "leg_zero_azimuth_measured": [
   0,
@@ -1027,7 +1075,7 @@
  "joint_conventions": {
   "yaw_positive_seen_from_above": "clockwise",
   "yaw_sign_in_body_frame": -1,
-  "source": "from earlier report /Users/lukas/Library/Application Support/Hexapod Lab/v2/tag-calibration-20260912-full1/report.json",
+  "source": "from earlier report /Users/lukas/Library/Application Support/Hexapod Lab/v2/tag-calibration-20260911-leg4-check/report.json",
   "note": "robot yaw = yaw_sign_in_body_frame * (coxa heading - body heading - leg zero azimuth)"
  }
 }

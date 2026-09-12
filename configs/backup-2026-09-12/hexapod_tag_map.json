@@ -6,6 +6,17 @@
  "layout_source": "hexapod-1-apriltag-layout.json",
  "parts": [
   {
+   "id": "leg0_knee_servo",
+   "display_name": "Leg 0 knee servo assembly",
+   "tag_ids": [
+    62,
+    52
+   ],
+   "pose_reference": "centroid of the two opposing yoke-face tag centers",
+   "surface": "vertical",
+   "yaw_period_degrees": 180.0
+  },
+  {
    "id": "leg1_hip_servo",
    "display_name": "Leg 1 hip servo assembly",
    "tag_ids": [
@@ -21,7 +32,7 @@
    "display_name": "Leg 2 hip servo assembly",
    "tag_ids": [
     39,
-    51
+    31
    ],
    "pose_reference": "centroid of the two opposing yoke-face tag centers",
    "surface": "vertical",
@@ -32,7 +43,7 @@
    "display_name": "Leg 2 knee servo assembly",
    "tag_ids": [
     64,
-    61
+    16
    ],
    "pose_reference": "centroid of the two opposing yoke-face tag centers",
    "surface": "vertical",
@@ -61,10 +72,32 @@
    "yaw_period_degrees": 180.0
   },
   {
+   "id": "leg4_hip_servo",
+   "display_name": "Leg 4 hip servo assembly",
+   "tag_ids": [
+    18,
+    51
+   ],
+   "pose_reference": "centroid of the two opposing yoke-face tag centers",
+   "surface": "vertical",
+   "yaw_period_degrees": 180.0
+  },
+  {
+   "id": "leg4_knee_servo",
+   "display_name": "Leg 4 knee servo assembly",
+   "tag_ids": [
+    25,
+    61
+   ],
+   "pose_reference": "centroid of the two opposing yoke-face tag centers",
+   "surface": "vertical",
+   "yaw_period_degrees": 180.0
+  },
+  {
    "id": "leg5_hip_servo",
    "display_name": "Leg 5 hip servo assembly",
    "tag_ids": [
-    62,
+    42,
     53
    ],
    "pose_reference": "centroid of the two opposing yoke-face tag centers",

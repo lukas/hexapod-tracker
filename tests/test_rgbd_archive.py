@@ -5,8 +5,7 @@ from scipy.spatial.transform import Rotation
 
 from hexapod_tracker.apriltag_vision import TagCorners
 from hexapod_tracker.housing_pose import RigidTransform
-from hexapod_tracker.rgbd_calibrate import RGBDFrame, _npz_frames
-from hexapod_tracker.zero_pose_survey import _archive_frame
+from hexapod_tracker.rgbd_calibrate import RGBDFrame, _npz_frames, archive_frame
 
 
 def test_archived_rgbd_frame_replays_through_calibration_reader(tmp_path) -> None:
@@ -29,7 +28,7 @@ def test_archived_rgbd_frame_replays_through_calibration_reader(tmp_path) -> Non
         np.asarray([[10, 10], [20, 10], [20, 20], [10, 20]], dtype=np.float32),
     )
 
-    saved = _archive_frame(tmp_path, frame, [detection])
+    saved = archive_frame(tmp_path, frame, [detection])
     replayed = list(_npz_frames(tmp_path))
 
     assert saved.is_file()

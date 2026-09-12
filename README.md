@@ -16,15 +16,19 @@ fastest orientation document for both human and LLM maintainers.
 
 ## Quick start
 
-Install the Python environment and launch the multi-camera viewer:
+Install the Python environment and run the multi-camera server as the lab
+does, discovering the attached cameras and pinning each slot by identity:
 
 ```sh
 uv sync --extra dev
-uv run hexapod-camera-server \
-  --indices 0 1 --host 0.0.0.0 --port 8766 \
-  --rotate-180 0 1 \
-  --robot-url http://hexapod.local:8080
+tools/camera_service.sh cameras       # what would be pinned, and why anything is excluded
+CAMERA_SERVICE_HOST=:: CAMERA_SERVICE_ROBOT_URL=http://hexapod.local:8080 \
+  tools/camera_service.sh start       # launchd job; relaunches itself when the rig changes
+tools/camera_service.sh status
 ```
+
+`hexapod-camera-server` can also be run by hand with explicit `--indices`
+and `--device-id SLOT:uniqueID` pins; see `--help`.
 
 Open `http://localhost:8766/` locally, or replace `localhost` with the
 computer's LAN address. The viewer exposes annotated and raw MJPEG feeds,
@@ -33,59 +37,26 @@ The optional `--robot-url` enables read-only motor-angle and calibrated IMU
 telemetry in the Pose tab. The tracker only calls `GET /api/feedback` and has
 no robot command path.
 
-On the September 3 macOS setup, use the saved profile so the Continuity Camera
-native path, USB modes, rotations, and matching intrinsic calibration cannot
-drift apart:
-
-```sh
-OPENCV_AVFOUNDATION_SKIP_AUTH=1 uv run hexapod-camera-server \
-  --capture-profile lab-tracking \
-  --host 127.0.0.1 --port 8766 \
-  --robot-url http://192.168.4.39:8080
-```
-
-If Continuity Camera is disconnected, use the USB-only profile instead. This
-is intentionally a separate profile: leaving native camera index 0 enabled can
-silently select an OV9281 after the iPhone disappears and duplicate one of the
-OpenCV USB feeds.
-
-```sh
-OPENCV_AVFOUNDATION_SKIP_AUTH=1 uv run hexapod-camera-server \
-  --capture-profile lab-usb-only \
-  --host 127.0.0.1 --port 8766 \
-  --robot-url http://192.168.4.39:8080
-```
-
-Here native AVFoundation index 0 is `lukas's iPhone Camera`; OpenCV indices 1
-and 2 are the OV9281 USB cameras. These numbers describe this boot only and
-must be checked from `/status.json` and the live images after reconnecting.
-The source of truth for this setup and the observed device mode inventory is
-`configs/camera_capture_profiles.json`.
-
 The live IMU card shows measurements only. The combined JSON API renames the
 robot's legacy `body_pitch_target_deg` field to
 `rear_pose_pitch_reference_deg`: it is fixed metadata captured during the
 known rear-lean body-frame calibration pose, not a current measurement or a
 live controller target, and it is intentionally not displayed in the UI.
 
-### Choose the correct camera web server
+### One server owns the cameras
 
-There are two different camera web interfaces in this repository:
+`hexapod-camera-server` is the only camera web server. Its page at `/` shows
+one card per slot; frames, `/status.json`, `/api/cameras/health`, camera
+leases and the fused `/api/poses` document are all served from it, and every
+other tool (Robot Lab, the sysid runner, the calibration programs) reads
+frames over HTTP rather than opening a device. Two processes opening one
+camera fight over its active format and, on a shared USB controller, starve
+each other.
 
-- **Show all configured cameras:** use the standalone
-  `hexapod-camera-server` above. Its page is served at `/` and displays one
-  card per index passed with `--indices`. A request such as “show the available
-  cameras” or “show both USB cameras” refers to this server, not the React
-  vision UI.
-- **Inspect one selected camera in the robot application:** use
-  `hexapod_tracker.web_server.VisionRuntime`, mounted at `/vision`. This is the
-  single-camera calibrated-tracking interface and is not the all-camera page.
-
-The normal `hexapod-camera-server` command starts capture workers immediately.
-If the operator asks to list camera cards without turning cameras on, serve the
-standalone page with dormant `CameraWorker` instances; do not substitute the
-single-camera `/vision` UI. In that state `/status.json` must report zero
-frames for every camera until capture is explicitly started by a later action.
+Slots are numbered by `tools/camera_service.sh` from enumeration order at
+every launch, so a slot number is not an identity. Pin, calibrate and exclude
+cameras by their AVFoundation stable id, which `/status.json` reports per
+slot as `requested_stable_id`.
 
 On macOS, do not assume AVFoundation discovery-list indices match the indices
 used by OpenCV's `VideoCapture`. Treat the live image and reported capture mode
@@ -137,7 +108,7 @@ stationary repeatability; simultaneous camera disagreement can raise it.
 Elevated vertical yoke tags are still returned only as `projection_only`
 diagnostics in the planar `parts` output: their camera-ray/floor intersections
 are not physical part positions. Joint orientation is handled separately.
-With `configs/camera_intrinsics.json`, a camera that sees chassis tag
+With an intrinsics entry (`configs/camera_intrinsics_lab_20260912.json`), a camera that sees chassis tag
 `0`, floor anchors, and any documented `L*_femur` tag uses square-tag PnP and
 the layout's mount rotation to calculate robot-relative hip pitch. The solver
 enumerates both planar pose branches and rejects the one inconsistent with the
@@ -303,100 +274,26 @@ that when the running server has it and detects on snapshots otherwise.
 ## Relationship to the robot repository
 
 The main hexapod repository includes this project as the
-`hexapod_walker/prototype_sts3215/hexapod-tracker` Git submodule. Compatibility
-entry points at the historical paths import this package, while robot-specific
-gait-survey orchestration remains in the main repository.
+`hexapod_walker/prototype_sts3215/hexapod-tracker` Git submodule and runs the
+camera server from it. The handheld iPhone survey and the browser calibration
+studio that used to live here were removed on 2026-09-12 after
+`hexapod-calibrate-tags` replaced them; see [`DEPRECATED.md`](DEPRECATED.md).
 
-## Deprecated calibration tools
+## Intrinsics (`hexapod-fit-intrinsics`)
 
-The handheld iPhone survey and the browser calibration studio are superseded
-by `hexapod-calibrate-tags` above; their modules still import (with a
-`DeprecationWarning`) but have no console scripts. See
-[`DEPRECATED.md`](DEPRECATED.md) for what replaced each one.
-
-### Guided zero-pose tag survey (deprecated)
-
-The same iPhone stream can survey a stationary robot from a slow handheld walk.
-Put the robot in zero pose beside the calibration board, identify one chassis
-tag whose existing mount has not moved, and keep the configured L0 hip tag as
-the leg-number reference. Then run:
+Per-camera intrinsics live in `configs/camera_intrinsics_lab_20260912.json`,
+keyed by camera identity (`stable_id`, then a unique `device_name`), never by
+slot. An entry may pin the slot's `capture_size` to the mode it was fitted
+for. Fit or refresh one camera from the running server:
 
 ```sh
-uv run python -m hexapod_tracker.zero_pose_survey \
-  configs/apriltag_pose_config_20260831.json \
-  --board configs/rgbd_calibration_board.json \
-  --body-anchor-tag-id 0 \
-  --output artifacts/zero-pose-tag-survey.json \
-  --updated-config artifacts/apriltag_pose_config_surveyed.json
+uv run hexapod-fit-intrinsics --slot 1 --frames 40          # add --dry-run to only report
+tools/camera_service.sh restart                             # load it
 ```
 
-The production layout expands the checklist to 37 robot mounts: the chassis and
-12 servo-lid tags plus four vertical angle tags on each of six legs. The preview
-first asks for a stable mapped-floor lock, then becomes a scan dashboard
-with the live camera, an isometric 3-D tag map, the phone path, tracking health,
-and a physical-position checklist (`L0 hip`, `L0 knee`, and so on). It clearly
-separates a position that has never been seen from a tag that was decoded but
-needs another clean view. It records each tag's metric 6-D pose, orientation
-axes, observation spread, automatically discovered tag IDs, and all pairwise
-floor-tag distances. Stable floor poses and relearned robot-tag mounts are
-written to the optional new config; the trusted body anchor is deliberately
-left unchanged. Use `--expected-floor-ids 12,13,15` when the input floor map is
-not the exact list that should gate completion.
-
-Robot completion is position-based rather than old-ID-based. When a configured
-ID is absent, the survey fits the existing calibration-photo layout to the
-recognized tags and may assign a nearby stable new ID to that empty mount. The
-L0 hip is protected because it defines leg numbering; if that particular tag
-was replaced, declare the new identity with `--leg-zero-anchor-tag-id NEW_ID`.
-
-This captures every configured robot position and expected floor tag, but it cannot
-know that an unlisted, never-visible physical tag exists. The seven known floor
-tags are solved jointly whenever two or more are visible, and Save stays disabled
-until the floor-grid, LiDAR-plane, per-tag spread, and full coverage checks pass.
-One zero-pose capture
-can relearn tag mounts against the current kinematic model and measure static
-inter-tag baselines. It cannot uniquely separate link lengths, joint-axis
-locations, and tag offsets; exact geometry fitting needs several stationary,
-encoder-known poses using the existing tibia-fixed side tags. See
-[`docs/RGBD_CALIBRATION.md`](docs/RGBD_CALIBRATION.md#handheld-zero-pose-tag-survey).
-
-### Web UI (deprecated)
-
-The React source and its checked-in production build are in `web/vision_ui`.
-Launch the camera-only calibration studio directly from this repository:
-
-```sh
-uv run --extra rgbd python -m hexapod_tracker.vision_web
-# open http://127.0.0.1:8898/vision
-```
-
-The default **Tag survey** page walks through Record3D connection, mapped-floor
-lock, 13 top/chassis + 24 vertical robot mounts, a live 3-D schematic, reviewed config
-creation, and Robot Lab publication. USB is the precision path. Record3D 1.11+
-can also relay its WebRTC Wi-Fi RGB-D stream, synchronized intrinsics, and ARKit
-pose through the page; the app's paid Wi-Fi extension is required and its lossy
-depth is expected to be noisier. The live quality coach reports corner error,
-position/angle spread, phone speed, and corrective guidance. Stable observations
-are checkpointed so an unplugged or dropped connection can be continued after
-re-locking any mapped floor tag instead of starting over.
-
-The workflow never commands the robot. Robot Lab publication uses only the
-versioned `/api/calibrations` endpoint. The server first reads
-`HEXIPOD_LAB_TOKEN` (or `HEXAPOD_LAB_TOKEN`), then a protected path from
-`HEXIPOD_LAB_TOKEN_FILE` (by default it checks both `~/Documents/hexapod.rtf`
-and TextEdit's sandboxed Documents folder), then the
-`HEXIPOD_LAB_TOKEN_OP_REF` 1Password reference (default
-`op://Private/Hexapod Lab API/credential`). The `op` CLI must be installed and
-signed in for 1Password lookup. `HEXAPOD_LAB_URL` selects another server.
-Without a token the survey stays local and the page shows a specific retry
-diagnostic.
-
-```sh
-make check
-make web-build
-```
-
-`hexapod_tracker.web_server.VisionRuntime` and
-`wrap_handler_with_vision(...)` let another Python HTTP server mount the UI at
-`/vision` and the JSON/MJPEG API at `/api/vision/*`. Pass a `survey_factory`
-only in a robot repository that owns its own guarded motion policy.
+It needs at least three floor anchors that are not in a line and a view with
+enough tilt that reprojection error actually depends on focal length; it
+refuses to write otherwise and says what to change. The result is a
+constrained single-plane fit (centred principal point, square pixels, zero
+distortion) and is labelled provisional. Replace it with a multi-pose board
+calibration before making metrology-grade 3-D claims.

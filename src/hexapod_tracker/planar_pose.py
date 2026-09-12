@@ -213,7 +213,7 @@ class PlanarPoseEstimator:
                 ),
             )
 
-    def _anchor_corners(self, tag_id: int) -> np.ndarray:
+    def anchor_corners(self, tag_id: int) -> np.ndarray:
         anchor = self.anchors[tag_id]
         center = np.asarray(anchor["center"][:2], dtype=np.float64)
         half = self.tag_size_mm / 2.0
@@ -241,7 +241,7 @@ class PlanarPoseEstimator:
     ) -> np.ndarray | None:
         if not anchor_ids:
             return None
-        world = np.concatenate([self._anchor_corners(tag_id) for tag_id in anchor_ids])
+        world = np.concatenate([self.anchor_corners(tag_id) for tag_id in anchor_ids])
         image = np.concatenate([tags[tag_id] for tag_id in anchor_ids])
         method = cv2.RANSAC if len(world) > 4 else 0
         homography, _mask = cv2.findHomography(
@@ -258,7 +258,7 @@ class PlanarPoseEstimator:
         if homography is None:
             return None
         inverse = np.linalg.inv(homography)
-        world = np.concatenate([self._anchor_corners(tag_id) for tag_id in visible])
+        world = np.concatenate([self.anchor_corners(tag_id) for tag_id in visible])
         image = np.concatenate([tags[tag_id] for tag_id in visible])
         image_residual = _project(world, homography) - image
         world_residual = _project(image, inverse) - world
@@ -274,7 +274,7 @@ class PlanarPoseEstimator:
                 if trial is None:
                     continue
                 estimated = _project(tags[held_out], np.linalg.inv(trial))
-                expected = self._anchor_corners(held_out)
+                expected = self.anchor_corners(held_out)
                 leave_position.append(
                     float(np.linalg.norm(estimated.mean(axis=0) - expected.mean(axis=0)))
                 )
@@ -545,7 +545,7 @@ class PlanarPoseEstimator:
         visible = [tag_id for tag_id in self.active_anchor_ids if tag_id in snapshot["tags"]]
         if len(visible) < 2:
             return None
-        world_xy = np.concatenate([self._anchor_corners(tag_id) for tag_id in visible])
+        world_xy = np.concatenate([self.anchor_corners(tag_id) for tag_id in visible])
         world = np.column_stack([world_xy, np.zeros(len(world_xy), dtype=np.float64)])
         image = np.concatenate([snapshot["tags"][tag_id] for tag_id in visible])
         solved, rvec, _tvec = cv2.solvePnP(

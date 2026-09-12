@@ -10,7 +10,6 @@ from hexapod_tracker.camera_server import (
     INDEX_HTML,
     annotate_tags,
     decode_fourcc,
-    load_capture_profile,
     make_tag_detector,
 )
 from hexapod_tracker.paths import CONFIG_DIR
@@ -70,18 +69,6 @@ def test_camera_grid_drops_pollers_when_cards_go_away():
     assert "polling.clear();" in INDEX_HTML
     assert "polling.delete(Number(article.dataset.index));" in INDEX_HTML
 
-
-def test_saved_lab_capture_profile_keeps_modes_and_calibration_together():
-    profile = load_capture_profile(
-        CONFIG_DIR / "camera_capture_profiles.json", "lab-tracking"
-    )
-
-    assert profile["indices"] == [0, 1, 2]
-    assert profile["native_avfoundation"] == [0]
-    assert profile["rotate_180"] == [1, 2]
-    assert profile["camera_modes"][0] == (1280, 960, 30.0)
-    assert profile["camera_modes"][1] == (1280, 800, 100.0)
-    assert profile["camera_calibration"] == "camera_intrinsics.json"
 
 
 def test_native_snapshots_preserve_full_nv12_planes():
@@ -306,3 +293,80 @@ def test_committed_lab_intrinsics_are_identity_keyed():
         assert spec.get("stable_id") and spec.get("device_name")
         assert len(spec["camera_matrix"]) == 3
         assert spec["image_size"]["width"] > 0
+
+
+def test_rig_change_reason_names_missing_new_or_silent_cameras():
+    from hexapod_tracker.camera_server import rig_change_reason
+
+    assert rig_change_reason({"a", "b"}, {"a", "b"}) is None
+    assert "no longer attached" in rig_change_reason({"a", "b"}, {"a"})
+    assert "new camera" in rig_change_reason({"a"}, {"a", "c"})
+    assert "slot 2 has delivered no frame for 90 s" in rig_change_reason({"a"}, {"a"}, [(2, 90.0)])
+    # A camera that left outranks one that arrived; both are reported by a relaunch anyway.
+    assert "no longer attached" in rig_change_reason({"a"}, {"c"})
+
+
+class _FakeServer:
+    def __init__(self, leases=False):
+        self._leases = leases
+
+    def has_leases(self):
+        return self._leases
+
+
+def _watch(monkeypatch, *, discovered, leases=False, armed=False, pinned=("a",)):
+    from types import SimpleNamespace
+
+    from hexapod_tracker.camera_server import TopologyWatch
+
+    workers = [
+        SimpleNamespace(index=i, stable_id=s, status=SimpleNamespace(state="streaming", frames=10),
+                        frame_age_s=lambda: 0.1)
+        for i, s in enumerate(pinned)
+    ]
+    exits = []
+    watch = TopologyWatch(_FakeServer(leases), workers, exclude=[], calibration_path=None, robot_url="http://robot",
+                          on_change=exits.append, interval_s=0.01, settle_s=0.03, grace_s=0.0,
+                          unreachable_s=0.05, log=lambda _m: None)
+    monkeypatch.setattr(watch, "discover", lambda: set(discovered))
+    monkeypatch.setattr(watch, "robot_armed", lambda: armed)
+    return watch, exits
+
+
+def test_topology_watch_exits_75_after_the_change_settles(monkeypatch):
+    import time
+
+    watch, exits = _watch(monkeypatch, discovered={"a", "b"})
+    watch.start()
+    watch.join(timeout=2.0)
+    assert exits == [75]
+
+
+def test_topology_watch_holds_while_a_lease_or_an_armed_robot_says_so(monkeypatch):
+    import time
+
+    for kwargs in ({"leases": True}, {"armed": True}):
+        watch, exits = _watch(monkeypatch, discovered={"a", "b"}, **kwargs)
+        watch.start()
+        time.sleep(0.3)
+        watch.stop()
+        watch.join(timeout=1.0)
+        assert exits == [], kwargs
+
+
+def test_topology_watch_waits_out_an_unreachable_robot_then_proceeds(monkeypatch):
+    watch, exits = _watch(monkeypatch, discovered={"a", "b"}, armed=None)
+    watch.start()
+    watch.join(timeout=2.0)
+    assert exits == [75]
+
+
+def test_topology_watch_does_nothing_while_the_rig_matches(monkeypatch):
+    import time
+
+    watch, exits = _watch(monkeypatch, discovered={"a"})
+    watch.start()
+    time.sleep(0.2)
+    watch.stop()
+    watch.join(timeout=1.0)
+    assert exits == []

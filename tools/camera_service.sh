@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Run the multi-camera AprilTag server as a launchd job on macOS.
 #
-# Cameras are discovered and pinned by uniqueID at every start rather than
-# recorded in the plist. A uniqueID embeds the USB location, so it changes
-# whenever a camera moves ports -- a stored list goes stale the moment the rig
-# is re-cabled, which is exactly how Robot Lab ended up configured for four
-# cameras that no longer existed.
+# The plist is static: it runs `camera_service.sh foreground`, which discovers
+# the attached cameras and pins each slot by uniqueID at every launch. A
+# uniqueID embeds the USB location, so it changes whenever a camera moves
+# ports; a list recorded in the plist would go stale the moment the rig is
+# re-cabled. The server itself exits (code 75) when the rig changes under it
+# -- a pinned camera leaves, a new one arrives, or an attached camera stops
+# delivering -- and launchd relaunches it here, so re-cabling needs no hands.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,80 +18,52 @@ PORT="${CAMERA_SERVICE_PORT:-8766}"
 HOST="${CAMERA_SERVICE_HOST:-127.0.0.1}"
 ROBOT_URL="${CAMERA_SERVICE_ROBOT_URL:-}"
 EXTRA_ARGS="${CAMERA_SERVICE_EXTRA_ARGS:-}"
-# Per-camera intrinsics, keyed by camera identity (stable_id / device_name),
-# so the file survives the slot renumbering that discovery does at every
-# start. Set to an empty string to run planar-only.
-CALIBRATION="${CAMERA_SERVICE_CALIBRATION-$ROOT/configs/camera_intrinsics_lab_20260912.json}"
-# Comma-separated uniqueIDs to skip. Two cameras on one USB controller
-# cannot both stream, and the loser retries forever, taking bandwidth from
-# the cameras that do work -- so excluding it is better than letting it
-# thrash until the cable moves.
+# Comma-separated uniqueIDs to skip. Two cameras on one USB controller cannot
+# both stream; discovery excludes the loser itself and says so in the log, and
+# this overrides its choice.
 EXCLUDE="${CAMERA_SERVICE_EXCLUDE:-}"
+# Per-camera intrinsics keyed by camera identity (stable_id / device_name), so
+# the file survives slot renumbering. Empty runs planar-only.
+CALIBRATION="${CAMERA_SERVICE_CALIBRATION-$ROOT/configs/camera_intrinsics_lab_20260912.json}"
 UV_BIN="${UV:-$(command -v uv || echo /opt/homebrew/bin/uv)}"
 
 usage() {
   cat <<EOF
 Usage: tools/camera_service.sh <command>
 
-  start     Install the launchd job and start it (idempotent)
-  stop      Stop and unload the job
-  restart   Stop, then start
-  status    launchctl state, port, and per-camera health
-  logs      Tail $LOG
-  cameras   Print the cameras that a start would pin, and exit
-  foreground  Run in this shell with the same arguments
+  start       Write the launchd job from the current environment and start it
+  stop        Stop and unload the job
+  restart     Relaunch the job (rediscovers cameras; keeps the installed settings)
+  status      launchctl state, port, and per-camera health
+  logs        Tail $LOG
+  cameras     Print the cameras a launch would pin, and exit
+  foreground  Discover cameras and run the server in this shell
 
-Env: CAMERA_SERVICE_PORT, CAMERA_SERVICE_HOST, CAMERA_SERVICE_ROBOT_URL,
-     CAMERA_SERVICE_EXTRA_ARGS, CAMERA_SERVICE_LABEL,
-     CAMERA_SERVICE_EXCLUDE=<uniqueID,uniqueID>
-     CAMERA_SERVICE_CALIBRATION=<identity-keyed intrinsics json; "" for none>
-       default: configs/camera_intrinsics_lab_20260912.json
+Env (read by start and baked into the plist):
+  CAMERA_SERVICE_HOST=$HOST  CAMERA_SERVICE_PORT=$PORT
+  CAMERA_SERVICE_ROBOT_URL, CAMERA_SERVICE_EXTRA_ARGS, CAMERA_SERVICE_LABEL,
+  CAMERA_SERVICE_EXCLUDE=<uniqueID,uniqueID>
+  CAMERA_SERVICE_CALIBRATION=<identity-keyed intrinsics json; "" for none>
+    default: configs/camera_intrinsics_lab_20260912.json
 EOF
 }
 
-# Real cameras only: the Studio Display and a Continuity iPhone are not part of
-# the rig and would waste a slot and a worker.
-discover() {
-  cd "$ROOT"
-  CAMERA_SERVICE_EXCLUDE="$EXCLUDE" OPENCV_AVFOUNDATION_SKIP_AUTH=1 "$UV_BIN" run python - <<'PY'
-import sys
-sys.path.insert(0, "src")
-try:
-    from hexapod_tracker.avfoundation_capture import AVFoundationYuvCapture as C
-    devices = C.device_descriptors()
-except Exception as error:  # never emit a half-built argument list
-    print(f"discovery failed: {error}", file=sys.stderr)
-    raise SystemExit(1)
-import os
-
-excluded = {
-    value.strip()
-    for value in os.environ.get("CAMERA_SERVICE_EXCLUDE", "").split(",")
-    if value.strip()
-}
-wanted = [
-    item for item in devices
-    if item["available"] and item["kind"] == "external"
-    and "studio display" not in item["name"].lower()
-    and item["stable_id"] not in excluded
-]
-if not wanted:
-    print("no rig cameras found", file=sys.stderr)
-    raise SystemExit(1)
-for slot, item in enumerate(wanted):
-    print(f"{slot}\t{item['index']}\t{item['stable_id']}\t{item['name']}")
-PY
+rig() {
+  local args=(--exclude "$EXCLUDE")
+  [ -n "$CALIBRATION" ] && args+=(--calibration "$CALIBRATION")
+  (cd "$ROOT" && OPENCV_AVFOUNDATION_SKIP_AUTH=1 "$UV_BIN" run python -m hexapod_tracker.rig "${args[@]}")
 }
 
 build_args() {
-  local slots=() indices=() pins=()
-  while IFS=$'\t' read -r slot index stable_id name; do
+  local slots=() pins=() slot stable_id name
+  while IFS=$'\t' read -r slot stable_id name; do
     [ -z "${slot:-}" ] && continue
-    slots+=("$index")
-    pins+=("--device-id" "${index}:${stable_id}")
-  done < <(discover)
+    slots+=("$slot")
+    pins+=("--device-id" "${slot}:${stable_id}")
+  done < <(rig)
+  [ "${#slots[@]}" -gt 0 ] || { echo "no rig cameras found" >&2; return 1; }
   printf '%s\n' "--indices" "${slots[@]}" "--native-avfoundation" "${slots[@]}" \
-    "${pins[@]}" "--host" "$HOST" "--port" "$PORT"
+    "${pins[@]}" "--host" "$HOST" "--port" "$PORT" "--rig-exclude" "$EXCLUDE"
   [ -n "$ROBOT_URL" ] && printf '%s\n' "--robot-url" "$ROBOT_URL"
   if [ -n "$CALIBRATION" ]; then
     if [ -f "$CALIBRATION" ]; then
@@ -104,20 +78,33 @@ build_args() {
 }
 
 write_plist() {
-  local args=() line
-  while IFS= read -r line; do args+=("$line"); done < <(build_args)
+  local script="$ROOT/tools/camera_service.sh"
   {
     echo '<?xml version="1.0" encoding="UTF-8"?>'
     echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
     echo '<plist version="1.0"><dict>'
     echo "  <key>Label</key><string>${LABEL}</string>"
     echo '  <key>ProgramArguments</key><array>'
-    printf '    <string>%s</string>\n' "$UV_BIN" run hexapod-camera-server
-    printf '    <string>%s</string>\n' "${args[@]}"
+    printf '    <string>%s</string>\n' /bin/bash "$script" foreground
     echo '  </array>'
     echo "  <key>WorkingDirectory</key><string>${ROOT}</string>"
     echo '  <key>EnvironmentVariables</key><dict>'
     echo '    <key>OPENCV_AVFOUNDATION_SKIP_AUTH</key><string>1</string>'
+    for var in CAMERA_SERVICE_HOST CAMERA_SERVICE_PORT CAMERA_SERVICE_ROBOT_URL \
+               CAMERA_SERVICE_EXTRA_ARGS CAMERA_SERVICE_EXCLUDE CAMERA_SERVICE_LABEL \
+               CAMERA_SERVICE_LOG CAMERA_SERVICE_CALIBRATION; do
+      case "$var" in
+        CAMERA_SERVICE_HOST) value="$HOST" ;;
+        CAMERA_SERVICE_PORT) value="$PORT" ;;
+        CAMERA_SERVICE_ROBOT_URL) value="$ROBOT_URL" ;;
+        CAMERA_SERVICE_EXTRA_ARGS) value="$EXTRA_ARGS" ;;
+        CAMERA_SERVICE_EXCLUDE) value="$EXCLUDE" ;;
+        CAMERA_SERVICE_LABEL) value="$LABEL" ;;
+        CAMERA_SERVICE_LOG) value="$LOG" ;;
+        CAMERA_SERVICE_CALIBRATION) value="$CALIBRATION" ;;
+      esac
+      printf '    <key>%s</key><string>%s</string>\n' "$var" "$(printf '%s' "$value" | sed 's/&/\&amp;/g; s/</\&lt;/g')"
+    done
     echo '  </dict>'
     echo '  <key>RunAtLoad</key><true/>'
     echo '  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>'
@@ -128,19 +115,51 @@ write_plist() {
   } > "$PLIST"
 }
 
+loaded() { launchctl print "gui/$(id -u)/${LABEL}" >/dev/null 2>&1; }
+
+bootout_and_wait() {
+  launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
+  local i
+  for i in $(seq 1 50); do
+    loaded || return 0
+    sleep 0.2
+  done
+  echo "warning: ${LABEL} still loaded after bootout" >&2
+}
+
+bootstrap_with_retry() {
+  # launchd answers "Bootstrap failed: 5: Input/output error" when asked to
+  # load a label it is still tearing down; the job is fine a moment later.
+  local i
+  for i in $(seq 1 10); do
+    if launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+}
+
 case "${1:-}" in
-  cameras) discover ;;
+  cameras) rig ;;
   start)
     write_plist
-    launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$PLIST"
-    echo "started ${LABEL} on http://${HOST}:${PORT}/"
+    bootout_and_wait
+    bootstrap_with_retry
+    echo "started ${LABEL} on http://${HOST}:${PORT}/ (plist: ${PLIST})"
     ;;
   stop)
-    launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
+    bootout_and_wait
     echo "stopped ${LABEL}"
     ;;
-  restart) "$0" stop; sleep 2; "$0" start ;;
+  restart)
+    if loaded; then
+      launchctl kickstart -k "gui/$(id -u)/${LABEL}"
+      echo "relaunched ${LABEL}"
+    else
+      "$0" start
+    fi
+    ;;
   status)
     launchctl list | grep -E "PID|${LABEL}" || echo "job not loaded"
     curl -s -m 5 "http://127.0.0.1:${PORT}/api/cameras/health" > /tmp/.camera_health.json \

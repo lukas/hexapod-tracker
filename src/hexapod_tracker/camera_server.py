@@ -18,11 +18,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import socket
 import struct
+import subprocess
+import sys
 import threading
 import time
+import urllib.request
 import uuid
 from dataclasses import asdict, dataclass, field
 from http import HTTPStatus
@@ -1638,6 +1642,10 @@ class CameraHTTPServer(ThreadingHTTPServer):
         lease["released"] = released
         return lease
 
+    def has_leases(self) -> bool:
+        with self._lease_lock:
+            return bool(self._leases)
+
     def revoke_lease(self, stable_id: str) -> bool:
         worker = self._worker_for_stable_id(stable_id)
         if worker is None:
@@ -1914,16 +1922,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--capture-profile",
-        help="named camera setup from --capture-profiles-file",
-    )
-    parser.add_argument(
-        "--capture-profiles-file",
-        type=Path,
-        default=CONFIG_DIR / "camera_capture_profiles.json",
-        help="saved capture modes, backends, rotations, and calibration pairing",
-    )
-    parser.add_argument(
         "--robot-url",
         help=(
             "optional robot HTTP base URL; only read-only GET /api/feedback "
@@ -1959,7 +1957,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--camera-calibration",
         type=Path,
-        default=CONFIG_DIR / "camera_intrinsics.json",
+        default=CONFIG_DIR / "camera_intrinsics_lab_20260912.json",
         help="per-camera intrinsic calibration used for 3-D joint orientation",
     )
     parser.add_argument(
@@ -1984,6 +1982,27 @@ def parse_args() -> argparse.Namespace:
         default=[],
         metavar="INDEX",
         help="capture selected AVFoundation device indices through native 420v/NV12",
+    )
+    parser.add_argument(
+        "--rig-exclude",
+        default="",
+        help=(
+            "comma-separated stable ids the launcher excluded from the rig; the "
+            "topology watch uses the same list so a deliberately excluded camera "
+            "does not read as a new arrival"
+        ),
+    )
+    parser.add_argument(
+        "--no-topology-watch",
+        action="store_true",
+        help=(
+            "do not exit when the attached cameras stop matching the pinned "
+            "slots. By default a pinned server exits with code 75 after the "
+            "rig has changed for 30 s (a pinned camera gone, a new one "
+            "attached, or an attached camera silent for a minute) so launchd "
+            "relaunches it and rediscovers; it holds while a lease is active "
+            "or the robot reports armed"
+        ),
     )
     parser.add_argument(
         "--device-id",
@@ -2026,6 +2045,170 @@ def parse_capture_sizes(values: list[str]) -> dict[int, tuple[int, int]]:
             raise SystemExit(f"--capture-size repeats slot {index}")
         sizes[index] = parsed
     return sizes
+
+
+TOPOLOGY_EXIT_CODE = 75
+
+
+def load_intrinsics_document(path: Path | None) -> dict[str, Any]:
+    """Read an intrinsics file, or run planar-only when there is none."""
+    if path is None:
+        return {"cameras": {}}
+    try:
+        return json.loads(Path(path).read_text())
+    except FileNotFoundError:
+        print(f"intrinsics file not found, running planar-only: {path}", flush=True)
+        return {"cameras": {}}
+
+
+def rig_change_reason(
+    pinned: set[str],
+    discovered: set[str],
+    silent: Sequence[tuple[int, float]] = (),
+) -> str | None:
+    """Why the running slots no longer match the rig, or None if they do.
+
+    ``silent`` lists ``(slot, seconds)`` for pinned cameras that are attached,
+    have delivered frames before, and have delivered none for a while -- the
+    signature of a camera that dropped off the bus and came back with a new
+    registry id, which this process cannot recover from without relaunching.
+    """
+    missing = sorted(pinned - discovered)
+    if missing:
+        return f"pinned camera(s) no longer attached: {missing}"
+    arrived = sorted(discovered - pinned)
+    if arrived:
+        return f"new camera(s) attached: {arrived}"
+    for slot, seconds in silent:
+        return f"slot {slot} has delivered no frame for {seconds:.0f} s while attached"
+    return None
+
+
+class TopologyWatch(threading.Thread):
+    """Exit the server when the attached cameras stop matching its slots.
+
+    Discovery runs in a fresh interpreter: a long-running process's
+    AVFoundation device list has kept an unplugged camera and missed a
+    re-enumerated one. The change has to persist for ``settle_s`` and the
+    watch stays quiet for ``grace_s`` after start. It holds while any lease is
+    active or the robot reports armed; an unreachable robot blocks it only
+    for ``unreachable_s`` (motion without telemetry stops itself within a few
+    samples, see EMERGENCY_HANDLING.md), then the relaunch proceeds.
+    """
+
+    def __init__(
+        self,
+        server: Any,
+        workers: Sequence[Any],
+        *,
+        exclude: Sequence[str],
+        calibration_path: str | None,
+        robot_url: str | None,
+        on_change: Callable[[int], None],
+        interval_s: float = 15.0,
+        settle_s: float = 30.0,
+        grace_s: float = 60.0,
+        silent_s: float = 60.0,
+        unreachable_s: float = 60.0,
+        log: Callable[[str], None] = lambda message: print(message, flush=True),
+    ) -> None:
+        super().__init__(name="topology-watch", daemon=True)
+        self.server = server
+        self.workers = workers
+        self.exclude = list(exclude)
+        self.calibration_path = calibration_path
+        self.robot_url = robot_url
+        self.on_change = on_change
+        self.interval_s = interval_s
+        self.settle_s = settle_s
+        self.grace_s = grace_s
+        self.silent_s = silent_s
+        self.unreachable_s = unreachable_s
+        self.log = log
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:
+        started = time.monotonic()
+        changed_since: float | None = None
+        unreachable_since: float | None = None
+        while not self._stop_event.wait(self.interval_s):
+            now = time.monotonic()
+            if now - started < self.grace_s:
+                continue
+            reason = self.reason()
+            if reason is None:
+                changed_since = None
+                continue
+            if changed_since is None:
+                changed_since = now
+                self.log(f"rig change noticed: {reason}; relaunch in {self.settle_s:.0f} s unless it clears")
+            if now - changed_since < self.settle_s:
+                continue
+            if self.server.has_leases():
+                self.log(f"rig changed ({reason}) but a lease is active; holding")
+                continue
+            armed = self.robot_armed()
+            if armed is True:
+                self.log(f"rig changed ({reason}) but the robot is armed; holding")
+                continue
+            if armed is None:
+                unreachable_since = unreachable_since or now
+                if now - unreachable_since < self.unreachable_s:
+                    self.log(f"rig changed ({reason}) but the robot is unreachable; holding")
+                    continue
+            else:
+                unreachable_since = None
+            self.log(f"rig changed ({reason}); exiting {TOPOLOGY_EXIT_CODE} for launchd to relaunch and re-pin")
+            self.on_change(TOPOLOGY_EXIT_CODE)
+            return
+
+    def reason(self) -> str | None:
+        discovered = self.discover()
+        if discovered is None:
+            return None
+        pinned = {str(worker.stable_id) for worker in self.workers if worker.stable_id}
+        silent = []
+        for worker in self.workers:
+            if not worker.stable_id or worker.status.state == "released" or worker.status.frames == 0:
+                continue
+            age = worker.frame_age_s()
+            if age is not None and age > self.silent_s:
+                silent.append((worker.index, age))
+        return rig_change_reason(pinned, discovered, silent)
+
+    def discover(self) -> set[str] | None:
+        command = [sys.executable, "-m", "hexapod_tracker.rig", "--json", "--exclude", ",".join(self.exclude)]
+        if self.calibration_path:
+            command += ["--calibration", self.calibration_path]
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=45,
+                env={**os.environ, "OPENCV_AVFOUNDATION_SKIP_AUTH": "1"},
+            )
+            if result.returncode not in (0, 1):
+                self.log(f"rig discovery failed ({result.returncode}): {result.stderr.strip()[:200]}")
+                return None
+            payload = json.loads(result.stdout or "{}")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            self.log(f"rig discovery failed: {error}")
+            return None
+        return {str(item["stable_id"]) for item in payload.get("cameras", [])}
+
+    def robot_armed(self) -> bool | None:
+        """True/False from the robot, None when it cannot be reached."""
+        if not self.robot_url:
+            return False
+        try:
+            with urllib.request.urlopen(f"{self.robot_url.rstrip('/')}/api/robot", timeout=3) as response:
+                return bool(json.loads(response.read()).get("armed"))
+        except (OSError, ValueError):
+            return None
 
 
 def resolve_intrinsics_by_identity(
@@ -2161,73 +2344,12 @@ def parse_camera_modes(values: list[str]) -> dict[int, tuple[int, int, float]]:
     return modes
 
 
-def load_capture_profile(path: Path, name: str) -> dict[str, Any]:
-    """Load and validate one saved camera setup."""
-    try:
-        document = json.loads(path.read_text())
-        profile = document["profiles"][name]
-    except FileNotFoundError as error:
-        raise SystemExit(f"capture profile file not found: {path}") from error
-    except json.JSONDecodeError as error:
-        raise SystemExit(f"invalid capture profile JSON in {path}: {error}") from error
-    except KeyError as error:
-        choices = sorted(document.get("profiles", {})) if "document" in locals() else []
-        suffix = f"; available: {', '.join(choices)}" if choices else ""
-        raise SystemExit(f"unknown capture profile {name!r}{suffix}") from error
-
-    try:
-        indices = [int(index) for index in profile["indices"]]
-        raw_modes = profile["camera_modes"]
-        modes = {
-            int(index): (
-                int(spec["width"]),
-                int(spec["height"]),
-                float(spec["fps"]),
-            )
-            for index, spec in raw_modes.items()
-        }
-        rotate_180 = [int(index) for index in profile.get("rotate_180", [])]
-        native = [int(index) for index in profile.get("native_avfoundation", [])]
-    except (KeyError, TypeError, ValueError) as error:
-        raise SystemExit(f"invalid capture profile {name!r} in {path}") from error
-
-    if not indices or set(modes) != set(indices):
-        raise SystemExit(
-            f"capture profile {name!r} must define exactly one camera mode per index"
-        )
-    if any(min(width, height, fps) <= 0 for width, height, fps in modes.values()):
-        raise SystemExit(f"capture profile {name!r} contains a non-positive mode")
-    if not set(rotate_180).issubset(indices) or not set(native).issubset(indices):
-        raise SystemExit(f"capture profile {name!r} references an unknown camera index")
-
-    result = dict(profile)
-    result["indices"] = indices
-    result["camera_modes"] = modes
-    result["rotate_180"] = rotate_180
-    result["native_avfoundation"] = native
-    return result
-
 
 def main() -> None:
     args = parse_args()
     if args.feedback_hz <= 0.0:
         raise SystemExit("--feedback-hz must be positive")
-    profile = None
-    if args.capture_profile:
-        profile = load_capture_profile(args.capture_profiles_file, args.capture_profile)
-        args.indices = profile["indices"]
-        args.rotate_180 = profile["rotate_180"]
-        args.native_avfoundation = profile["native_avfoundation"]
-        args.output_fps = float(profile.get("output_fps", args.output_fps))
-        args.jpeg_quality = int(profile.get("jpeg_quality", args.jpeg_quality))
-        camera_modes = profile["camera_modes"]
-        if profile.get("camera_calibration"):
-            calibration_path = Path(str(profile["camera_calibration"]))
-            if not calibration_path.is_absolute():
-                calibration_path = args.capture_profiles_file.parent / calibration_path
-            args.camera_calibration = calibration_path
-    else:
-        camera_modes = parse_camera_modes(args.camera_mode)
+    camera_modes = parse_camera_modes(args.camera_mode)
     floor_map = json.loads(args.floor_map.read_text())
     capture_sizes = parse_capture_sizes(args.capture_size)
     unknown_capture = sorted(set(capture_sizes) - set(args.indices))
@@ -2271,7 +2393,7 @@ def main() -> None:
     # Intrinsics are attached by camera identity, so the workers (which resolve
     # their pinned device names without opening anything) must exist first.
     camera_calibration = resolve_intrinsics_by_identity(
-        json.loads(args.camera_calibration.read_text()), workers
+        load_intrinsics_document(args.camera_calibration), workers
     )
     apply_intrinsics_capture_sizes(camera_calibration, workers)
     pose_estimator = PlanarPoseEstimator(
@@ -2312,20 +2434,30 @@ def main() -> None:
 
     threading.Thread(target=sweep_leases, name="lease-sweeper", daemon=True).start()
 
+    exit_code = [0]
+
     def request_stop(_signum: int, _frame: object) -> None:
         if not stop_requested.is_set():
             stop_requested.set()
             threading.Thread(target=server.shutdown, daemon=True).start()
 
+    def relaunch(code: int) -> None:
+        exit_code[0] = code
+        request_stop(0, None)
+
+    if not args.no_topology_watch and any(worker.stable_id for worker in workers):
+        TopologyWatch(
+            server,
+            workers,
+            exclude=[value for value in args.rig_exclude.split(",") if value.strip()],
+            calibration_path=str(args.camera_calibration) if args.camera_calibration else None,
+            robot_url=args.robot_url,
+            on_change=relaunch,
+        ).start()
+
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
     print(f"AprilTag camera viewer: http://{args.host}:{args.port}", flush=True)
-    if profile is not None:
-        print(
-            f"Capture profile: {args.capture_profile} — "
-            f"{profile.get('description', 'saved camera setup')}",
-            flush=True,
-        )
     print("Input format requested: MJPG; see /status.json for backend acceptance", flush=True)
     try:
         server.serve_forever(poll_interval=0.2)
@@ -2333,6 +2465,8 @@ def main() -> None:
         server.server_close()
         for worker in workers:
             worker.stop()
+    if exit_code[0]:
+        raise SystemExit(exit_code[0])
 
 
 if __name__ == "__main__":

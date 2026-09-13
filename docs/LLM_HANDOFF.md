@@ -87,51 +87,19 @@ uv run hexapod-camera-server \
   --robot-url http://hexapod.local:8080
 ```
 
-The September 3 three-camera setup is saved as one named profile. Use it so
-capture modes, rotations, and intrinsic calibration remain paired:
-
-```sh
-OPENCV_AVFOUNDATION_SKIP_AUTH=1 uv run hexapod-camera-server \
-  --capture-profile lab-tracking \
-  --host 127.0.0.1 --port 8766 \
-  --robot-url http://192.168.4.39:8080
-```
-
-For that boot, native index 0 is `lukas's iPhone Camera`, while OpenCV indices
-1 and 2 are the OV9281 devices. AVFoundation-native and OpenCV enumeration are
-different namespaces; never assume an index identifies the same device in
-both.
-
-`configs/camera_capture_profiles.json` is the source of truth for a saved
-setup, but both checked-in profiles describe the September 3 layout and no
-longer match the hardware, so `lab-tracking` (iPhone at index 0 plus two
-OV9281s) and `lab-usb-only` (two OV9281s at indexes 1 and 2) both
-mis-describe the rig. Do not pass `--capture-profile` until a profile is
-rewritten for the current cabling. `configs/camera_intrinsics.json` is stale
-for the same reason: its entries are keyed by slot number and assume index 0
-is the iPhone.
-
-Intrinsics now live in `configs/camera_intrinsics_lab_20260912.json`, keyed
-by camera **identity** instead. Each entry names its camera by `stable_id`
-(AVFoundation `uniqueID`) and `device_name`; at start the server matches
-entries to slots by stable id first, then by a device name that fits exactly
-one attached camera (with a warning that the camera changed ports), and drops
-an entry that matches nothing. It never falls back to a slot number, so a
-profile cannot silently attach one camera's lens to another. An entry may
-also carry `capture_size`, which becomes that slot's native mode unless
-`--capture-size` names the slot; a matrix is only valid at the size it was
-fitted for. `tools/camera_service.sh` passes this file by default
-(`CAMERA_SERVICE_CALIBRATION` overrides it; an empty value runs planar-only).
-As of 2026-09-12 only the ELP has an entry; the OV9281 and the 12MP module
-run planar-only until they are fitted.
-
-The `lab-tracking` profile captures the iPhone's full 1920x1440 420v/NV12 source at
-30 fps, processes a 1280x960 color preview, uses both OV9281 cameras at their
-full 1280x800/100 fps mode, publishes 10 fps, rotates USB indices 1 and 2, and
-loads `camera_intrinsics.json`. Full-resolution unscaled iPhone data remains
-available on `/native-frame/0.nv12` (Y followed by interleaved UV) and
-`/native-luma/0.png` (lossless luminance). Continuity Camera supplies decoded
-8-bit video-range NV12, not Bayer sensor RAW or ProRAW.
+In the lab the server is not started by hand: `tools/camera_service.sh`
+discovers the attached cameras through `hexapod_tracker.rig`, pins each slot
+by stable id, and passes `configs/camera_intrinsics_lab_20260912.json`, whose
+entries are keyed by camera identity. Slot-keyed capture profiles and the
+slot-keyed `camera_intrinsics.json` were removed on 2026-09-12 because a slot
+number changes whenever a device joins or leaves; an entry may still pin its
+camera's `capture_size` (the ELP runs at 3840x2160 that way). The server
+matches entries to slots by stable id first, then by a device name that fits
+exactly one attached camera (warning that the camera changed ports), and
+drops an entry that matches nothing rather than fall back to a slot number.
+`hexapod-fit-intrinsics` adds or refreshes an entry from the running server.
+As of 2026-09-12 only the ELP has an entry; the OV9281 and the 12MP module run
+planar-only until they are fitted.
 
 The code default is port `8765`; `8766` is commonly used to avoid colliding
 with an already-running local viewer. Each `CameraWorker` independently opens
@@ -397,40 +365,55 @@ coordinates.
 ### Run the camera server as a launchd job
 
 ```sh
-tools/camera_service.sh start      # installs the plist and starts it
+tools/camera_service.sh cameras    # what a launch would pin, and why anything is excluded
+CAMERA_SERVICE_HOST=:: CAMERA_SERVICE_ROBOT_URL=http://192.168.4.39:8080 \
+  tools/camera_service.sh start    # writes the plist from this environment and starts it
 tools/camera_service.sh status     # launchctl state plus per-camera health
-tools/camera_service.sh cameras    # what a start would pin, without starting
-tools/camera_service.sh restart|stop|logs|foreground
+tools/camera_service.sh restart    # relaunch: rediscovers cameras, keeps the installed settings
+tools/camera_service.sh stop|logs|foreground
 ```
 
-**Cameras are discovered and pinned at every start, not stored in the plist.**
-A `uniqueID` embeds the USB location, so it changes whenever a camera moves
-ports; a recorded list goes stale the moment the rig is re-cabled, which is
-exactly how Robot Lab ended up configured for four cameras that no longer
-existed. Discovery keeps external USB cameras and drops the Studio Display
-and any Continuity iPhone, which are not part of the rig.
+**The plist is static and discovery happens at every launch.** The job runs
+`camera_service.sh foreground`, which calls `python -m hexapod_tracker.rig`
+to enumerate the attached cameras, then pins each slot by `uniqueID`. A
+`uniqueID` embeds the USB location, so it changes whenever a camera moves
+ports; a list recorded in the plist would go stale the moment the rig is
+re-cabled, which is exactly how Robot Lab ended up configured for four
+cameras that no longer existed. Discovery keeps external USB cameras and
+drops the Studio Display and any Continuity iPhone. `start` bakes the
+`CAMERA_SERVICE_*` environment into the plist, so a bare `start` binds
+`127.0.0.1`; the lab uses `CAMERA_SERVICE_HOST=::` for LAN access.
 
-**Slot numbers follow AVFoundation enumeration order at each start**, so a
-camera's slot can change when any device joins or leaves. Never key anything
-persistent by slot; use the stable id (`--device-id`) or the identity-keyed
-intrinsics file. The installed lab plist has been started with
-`CAMERA_SERVICE_HOST=::` so the page is reachable over the LAN; a bare `start`
-would bind `127.0.0.1`. Any hand edit to the plist is lost at the next
-`start`, because the plist is regenerated from discovery.
+**One camera per USB host controller is enforced by discovery.** Two cameras
+on one controller cannot both stream, and the loser retries forever while
+taking bandwidth from the cameras that work (measured: with a doomed fourth
+camera included the two 12MP modules fell to 13.6 and 13.9 fps; without it
+28.1 and 29.3). `rig.py` groups cameras by the controller byte of their
+location and pins one per controller: a camera with an intrinsics entry wins,
+then the lowest stable id, so the choice does not flip with enumeration
+order. The loser is named in the log with the reason; move it to another
+port, or override with `CAMERA_SERVICE_EXCLUDE=<uniqueID,...>`. The two rear
+USB-A ports are one controller (`0x08`); each Type-C port is its own.
 
-The server does not notice cameras that leave or re-enumerate while it runs.
-Observed 2026-09-11: an unplugged pinned camera kept reporting AVFoundation
-"Cannot Use" instead of "not attached", and a camera that dropped off the bus
-and came back with a new registry id opened but delivered no frames until the
-server was restarted, while a fresh process streamed it fine. After any
-cabling change, `tools/camera_service.sh restart`.
+**Slot numbers follow enumeration order at each launch**, so a camera's slot
+can change when any device joins or leaves. Never key anything persistent by
+slot; use the stable id (`--device-id`, the intrinsics file, camera leases).
 
-`CAMERA_SERVICE_EXCLUDE=<uniqueID,...>` skips a camera. That matters when two
-share a USB controller: only one can stream, and the loser retries forever and
-takes bandwidth from the cameras that work. Measured with a doomed fourth
-camera included, the two 12MP modules fell to 13.6 and 13.9 fps; excluding it
-returned them to 28.1 and 29.3. Other knobs: `CAMERA_SERVICE_PORT`, `_HOST`,
-`_ROBOT_URL`, `_EXTRA_ARGS`, `_LABEL`.
+**The server relaunches itself when the rig changes.** A long-running process
+cannot recover from cabling changes: observed 2026-09-11, an unplugged pinned
+camera kept reporting AVFoundation "Cannot Use" instead of "not attached", and
+a camera that dropped off the bus and came back with a new registry id opened
+but delivered no frames until the server was restarted, while a fresh process
+streamed it fine. So a pinned server runs a topology watch: every 15 s it
+re-runs `hexapod_tracker.rig` in a fresh interpreter (the in-process device
+list is what goes stale) and compares the result to its pinned slots. When a
+pinned camera is gone, a new one has arrived, or an attached camera that used
+to deliver frames has been silent for a minute, and that has held for 30 s,
+it exits with code 75; launchd relaunches it (KeepAlive on failure exit,
+10 s throttle) and the new process rediscovers and re-pins. It holds while any
+lease is active or the robot reports armed, and waits 60 s on an unreachable
+robot before proceeding. `--no-topology-watch` disables it; the watch is off
+anyway when no slot is pinned.
 
 ### Verify the camera page in a browser, not with curl
 
@@ -665,8 +648,8 @@ use the same calculation to recover `robot_abs_tibia_v2`'s absolute
 tibia/knee angle. The knee-servo lid itself is on the femur and cannot observe
 its own output; one of that leg's rigid `L*_tibia` yoke tags must be visible.
 
-`configs/camera_intrinsics.json` contains the September 3 provisional profiles
-for the iPhone and both USB cameras. Each was fitted to 40 frames against the
+The September 3 provisional profiles (removed 2026-09-12 with the slot-keyed
+`camera_intrinsics.json`) covered the iPhone and both USB cameras. Each was fitted to 40 frames against the
 floor grid while fixing the principal point, enforcing square pixels/zero
 skew, and holding distortion at zero. Native camera 0 (iPhone Continuity
 Camera, 1280x960) fit `f=1042.096 px` at `2.095 px` RMS; OpenCV camera 1 fit
@@ -713,28 +696,12 @@ joint_frame = robot_abs
 joint_contract = robot_abs_tibia_v2
 ```
 
-The React source and checked-in build live in `web/vision_ui`. The Python
-runtime is `hexapod_tracker.web_server.VisionRuntime`, mounted into another
-HTTP server by `wrap_handler_with_vision(...)` at `/vision` and
-`/api/vision/*`. It owns one active camera at a time, unlike the simple camera
-grid. The UI contains gait-survey controls because the main robot repo supplies
-that adapter. In this standalone repo those routes are unavailable and the
-runtime reports `read_only: true`.
-
-> **Deprecated 2026-09-11.** The calibration studio and the iPhone survey are
-> superseded by `hexapod-calibrate-tags` (`src/hexapod_tracker/tag_calibration.py`),
-> which re-derives the tag layout by moving the robot under the fixed cameras.
-> See `DEPRECATED.md`. The paragraphs below describe the retired tools.
-
-`vision_web` (formerly `hexapod-vision-web`) was the standalone local entry point at `:8898/vision`.
-Its default light Tag survey workflow wrapped `zero_pose_survey`, published
-atomic live progress and a clean labelled camera JPEG, renders the tag geometry
-in SVG, and only creates the reviewed config after the operator confirms the
-unchanged chassis anchor. The final action publishes the survey and config to
-Robot Lab using only its first-class versioned calibration endpoint.
-
-Do not add robot-control HTTP calls here to make the standalone UI's survey
-buttons work. That would break the intentional safety and ownership boundary.
+The browser calibration studio (`web/vision_ui`, `web_server.VisionRuntime`,
+`vision_web`) and the iPhone walk-around survey were superseded by
+`hexapod-calibrate-tags` and deleted on 2026-09-12; see `DEPRECATED.md`. The
+main robot repository's hub no longer mounts a `/vision` page. Do not
+reintroduce robot-control HTTP calls into this repository to make a survey
+button work; that boundary is intentional.
 
 ### Robot Lab reads this server; it does not open the cameras
 
@@ -868,7 +835,7 @@ when mapped floor tags leave the image. `hexapod-track --record3d-device` keeps
 using Record3D and refreshes RGB intrinsics on every frame, avoiding a silent
 switch to a different Continuity Camera crop. See `docs/RGBD_CALIBRATION.md`.
 
-`zero_pose_survey` (formerly `hexapod-zero-survey`, deprecated; use `hexapod-calibrate-tags`) was the moving-phone companion. The production web flow
+`zero_pose_survey` (formerly `hexapod-zero-survey`; removed 2026-09-12, use `hexapod-calibrate-tags`) was the moving-phone companion. The production web flow
 merges `configs/hexapod-1-apriltag-layout.json`, yielding 37 named robot mounts:
 13 horizontal chassis/lid tags and 24 vertical yoke tags (four on each leg).
 The six normally visible mapped floor tags (100–105) jointly align Record3D's
@@ -1035,20 +1002,20 @@ force calibration, and component localization are separate questions.
 - `rgbd_calibration.py`: registered depth sampling, robust plane fit, joint
   RGB-D refinement, and fixed-camera consensus.
 - `rgbd_calibrate.py`: Record3D/offline capture and calibrated-config writer.
-- `tag_survey.py`: ARKit/OpenCV frame alignment, robust per-tag pose consensus,
-  floor-distance reporting, and zero-pose mount/config updates.
 - `tag_calibration.py` (`hexapod-calibrate-tags`): the tag layout calibration
   program: stability check, per-leg motion pass, lid-plane geometry, declared
   gaps, measured leg azimuths and yaw sense written into the layout.
-- `zero_pose_survey.py`: guided live Record3D/offline walk-around CLI (deprecated).
 - `housing_pose.py`: rigid transforms, kinematic frame fusion, and joint-angle
   reconstruction.
 - `foot_tip_tracking.py`: red boot-tip segmentation, assignment, and short
   optical-flow/prediction bridges.
 - `track.py`: still/video/live CLI, read-only feedback client, summaries, and
   annotated output.
-- `web_server.py`: one-camera runtime, calibration reports, React/API mounting,
-  and the optional survey-adapter boundary.
+- `rig.py`: which attached cameras form the rig and which slot each gets;
+  one camera per USB controller; used by the launcher and the server's
+  topology watch.
+- `fit_intrinsics.py` (`hexapod-fit-intrinsics`): provisional focal-length
+  fit from the floor grid for one slot of the running server.
 - `avfoundation_capture.py`: macOS native 420v/luma capture adapter; it degrades
   to unavailable on non-macOS systems.
 - `gait_motion.py`: offline floor-homography displacement analysis.
@@ -1067,14 +1034,12 @@ force calibration, and component localization are separate questions.
   1.4.1+ for the Record3D iOS 1.10+ USB stream. The import stays lazy so
   normal camera tools do not require it.
 - `telemetry_video.py` shells out to `ffmpeg`, which is not a Python package.
-- UI changes require both `make check` and `make web-build`; commit the changed
-  `web/vision_ui/dist` assets.
 - Unit tests use generated tags, synthetic geometry, and fake captures. Add an
   explicit hardware smoke check when changing capture backends or camera-mode
   negotiation.
 
 The package currently assumes an editable/source checkout when locating
-`configs/` and `web/vision_ui/` through `paths.py`. A future wheel-distribution
+`configs/` through `paths.py`. A future wheel-distribution
 effort must package those resources and switch to `importlib.resources`; do
 not assume the present wheel has self-contained defaults.
 
@@ -1089,9 +1054,9 @@ In roughly descending value:
 3. Release the capture device in `POST /api/vision/camera/stop` so stopping a
    camera actually frees it for other processes.
 4. Calibrate each Arducam's intrinsics at every capture mode actually used.
-5. Rewrite `camera_capture_profiles.json` and `camera_intrinsics.json` for the
-   current four-Arducam cabling once the cameras are distributed across USB
-   controllers, and key intrinsics by device `uniqueID` rather than by index.
+5. Fit intrinsics for the OV9281 and the 12MP module with
+   `hexapod-fit-intrinsics` once each sees three non-collinear anchors from a
+   tilted view; both run planar-only until then.
 6. Use one unmoved RGB-D board pose to establish a measured common frame if
    true multi-view 3-D or stereo claims are needed.
 7. Re-survey floor-tag centers if accuracy finer than the current 5 mm prior is

@@ -20,7 +20,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .apriltag_vision import detect_tag_corners
+from .apriltag_vision import TagCorners, detect_tag_corners
 from .housing_pose import RigidTransform
 from .rgbd_calibration import (
     RGBDCalibrationError,
@@ -448,3 +448,48 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def archive_frame(
+    directory: Path,
+    frame: RGBDFrame,
+    detections: Sequence[TagCorners],
+) -> Path:
+    """Save a compact, replayable RGB-D evidence frame that ``_npz_frames`` reads back."""
+    directory.mkdir(parents=True, exist_ok=True)
+    ok, rgb_jpeg = cv2.imencode(
+        ".jpg", frame.rgb_bgr, [cv2.IMWRITE_JPEG_QUALITY, 92]
+    )
+    if not ok:
+        raise OSError("could not encode archived RGB frame")
+    pose = frame.arkit_world_from_opengl_camera
+    pose_values = np.asarray([], dtype=np.float64)
+    if pose is not None:
+        pose_dict = pose.to_dict()
+        pose_values = np.asarray(
+            pose_dict["quaternion_xyzw"] + pose_dict["translation_m"],
+            dtype=np.float64,
+        )
+    path = directory / f"frame-{time.time_ns()}.npz"
+    temporary = path.with_suffix(".tmp.npz")
+    np.savez_compressed(
+        temporary,
+        rgb_jpeg=np.asarray(rgb_jpeg).reshape(-1),
+        depth=np.asarray(frame.depth_m, dtype=np.float32),
+        confidence=(
+            np.asarray([], dtype=np.uint8)
+            if frame.confidence is None else np.asarray(frame.confidence)
+        ),
+        camera_matrix=np.asarray(frame.camera_matrix, dtype=np.float64),
+        image_size_px=np.asarray(
+            [frame.rgb_bgr.shape[1], frame.rgb_bgr.shape[0]], dtype=np.int32
+        ),
+        camera_pose_xyzw_xyz=pose_values,
+        tag_ids=np.asarray([item.tag_id for item in detections], dtype=np.int32),
+        tag_corners_px=np.asarray(
+            [item.corners_px for item in detections], dtype=np.float32
+        ).reshape(-1, 4, 2),
+        captured_unix=np.asarray(time.time(), dtype=np.float64),
+    )
+    temporary.replace(path)
+    return path

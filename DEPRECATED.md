@@ -2,9 +2,10 @@
 
 `hexapod-calibrate-tags` (`src/hexapod_tracker/tag_calibration.py`) replaced
 the handheld iPhone survey and the browser calibration studio. The modules
-below still import, emit a `DeprecationWarning`, and have no console scripts.
-They will be deleted once nothing outside this repository imports them
-(`linux_control/vision_server.py` still star-imports `web_server`).
+below were deleted on 2026-09-12 together with `web/vision_ui` and the
+capture-profile configs, once the robot repository stopped importing
+`web_server` through `linux_control/vision_server.py`. Recover them from git
+history before that date if ever needed.
 
 | module | replaced by |
 | --- | --- |
@@ -19,5 +20,14 @@ They will be deleted once nothing outside this repository imports them
 `relayout.py` is the previous name of `tag_calibration.py` and stays as an
 alias (`hexapod-relayout` runs the same program).
 
+Also removed 2026-09-12: `configs/camera_intrinsics.json` and
+`configs/camera_capture_profiles.json` with the `--capture-profile` option
+(slot-keyed, described the September 3 rig). Intrinsics are now identity-keyed
+in `configs/camera_intrinsics_lab_20260912.json`; `hexapod-fit-intrinsics`
+adds entries. `robot_lab.py` (the Robot Lab publisher used only by the
+studio) went with them; `rgbd_calibrate.archive_frame` kept the frame
+archiver the survey used.
+
 Kept, not deprecated: `apriltag_vision.py`, `housing_pose.py`, `track.py`,
-the RGB-D tools, `layout_audit.py`, `planar_pose.py`, `camera_server.py`.
+the RGB-D tools, `layout_audit.py`, `planar_pose.py`, `camera_server.py`,
+`rig.py`, `fit_intrinsics.py`.

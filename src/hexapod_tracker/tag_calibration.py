@@ -120,35 +120,83 @@ class Log:
 # ----------------------------------------------------------------- capture
 
 class Cameras:
-    """Frames and tag corners from the camera server.
+    """Frames and tag corners from a camera source.
 
-    Corners come from the server's own detector via ``/api/detections.json``
-    when the running server has it (it detects on the full sensor and scales
-    into snapshot coordinates); otherwise they are detected here on the
-    snapshot JPEG. Either way an observation is a majority vote over a few
-    frames, and a camera that gives no frame is skipped for that state.
+    The source is either the old camera server (``http://host:port``) or a
+    ``hexapod-cameras session`` directory (a path): there ``state.json`` carries
+    the same per-camera detections document and ``latest_<role>.jpg`` the frame.
+    Corners come from the source's own detector when it has one (it detects on
+    the full sensor and scales into snapshot coordinates); otherwise they are
+    detected here on the JPEG. Either way an observation is a majority vote
+    over a few frames, and a camera that gives no frame is skipped for that
+    state.
     """
 
     def __init__(self, base: str, indices: list[int]):
         self.base = base.rstrip("/")
+        self.dir: Optional[Path] = None
+        if "://" not in self.base:
+            self.dir = Path(self.base).expanduser()
         self.indices = indices
         self.detector = make_tag_detector()
         self.size: dict[int, tuple[int, int]] = {}
         self.server_detections: Optional[bool] = None   # unknown until first tried
         self.duplicate_ids: dict[int, set[int]] = {}    # camera -> ids decoded twice in one frame
 
-    def snapshot(self, i: int) -> np.ndarray:
-        with urllib.request.urlopen(f"{self.base}/snapshot/{i}.jpg", timeout=6) as r:
-            data = np.frombuffer(r.read(), np.uint8)
-        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    # -- session directory source
+    def state(self) -> dict[str, Any]:
+        assert self.dir is not None
+        return json.loads((self.dir / "state.json").read_text())
+
+    def roles(self) -> dict[str, int]:
+        """role -> camera index in a session directory ({} for a server)."""
+        if self.dir is None:
+            return {}
+        try:
+            return {str(k): int(v) for k, v in (self.state().get("roles") or {}).items()}
+        except (OSError, ValueError):
+            return {}
+
+    def _dir_frame(self, i: int) -> np.ndarray:
+        state = self.state()
+        cam = next((c for c in state.get("cameras", []) if int(c.get("index", -1)) == i), None)
+        if cam is None:
+            raise RuntimeError(f"camera {i}: not in {self.dir / 'state.json'}")
+        path = self.dir / f"latest_{cam.get('role')}.jpg"
+        img = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if img is None:
-            raise RuntimeError(f"camera {i}: bad JPEG")
+            raise RuntimeError(f"camera {i}: no frame at {path}")
+        return img
+
+    def snapshot(self, i: int) -> np.ndarray:
+        if self.dir is not None:
+            img = self._dir_frame(i)
+        else:
+            with urllib.request.urlopen(f"{self.base}/snapshot/{i}.jpg", timeout=6) as r:
+                data = np.frombuffer(r.read(), np.uint8)
+            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            if img is None:
+                raise RuntimeError(f"camera {i}: bad JPEG")
         self.size[i] = (img.shape[1], img.shape[0])
         return img
 
     def _server_corners(self) -> Optional[dict[int, dict[str, Any]]]:
         if self.server_detections is False:
             return None
+        if self.dir is not None:
+            try:
+                doc = self.state()
+            except (OSError, ValueError):
+                return None
+            now = time.time()
+            out = {}
+            for c in doc.get("cameras", []):
+                c = dict(c)
+                if c.get("captured_unix"):
+                    c["frame_age_s"] = max(0.0, now - float(c["captured_unix"]))   # the file's own age, not the writer's
+                out[int(c["index"])] = c
+            self.server_detections = True
+            return out
         try:
             with urllib.request.urlopen(f"{self.base}/api/detections.json", timeout=4) as r:
                 doc = json.loads(r.read().decode())

@@ -25,7 +25,7 @@ import math
 from pathlib import Path
 import sys
 import time
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 import urllib.request
 
 import cv2
@@ -188,15 +188,26 @@ def _fetch(url: str, timeout: float = 15.0) -> bytes:
 
 def collect_observations(server: str, slot: int, frames: int, interval_s: float, estimator: PlanarPoseEstimator,
                          *, log=print) -> tuple[list[tuple[np.ndarray, np.ndarray]], tuple[int, int], set[int]]:
+    """Observations from a running camera server's native luma frames (legacy path)."""
+    def grab() -> np.ndarray:
+        png = _fetch(f"{server}/native-luma/{slot}.png")
+        gray = cv2.imdecode(np.frombuffer(png, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            raise FitError("server returned an undecodable frame")
+        return gray
+    return collect_observations_from(grab, frames, interval_s, estimator, log=log)
+
+
+def collect_observations_from(grab: "Callable[[], np.ndarray]", frames: int, interval_s: float,
+                              estimator: PlanarPoseEstimator, *, log=print, sleep=time.sleep
+                              ) -> tuple[list[tuple[np.ndarray, np.ndarray]], tuple[int, int], set[int]]:
+    """Anchor corner observations from any source of full-resolution gray frames (hexapod-cameras)."""
     detector = make_tag_detector()
     observations: list[tuple[np.ndarray, np.ndarray]] = []
     seen: set[int] = set()
     size: tuple[int, int] | None = None
     for i in range(frames):
-        png = _fetch(f"{server}/native-luma/{slot}.png")
-        gray = cv2.imdecode(np.frombuffer(png, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
-        if gray is None:
-            raise FitError("server returned an undecodable frame")
+        gray = grab()
         size = (gray.shape[1], gray.shape[0])
         corners = {int(k): np.asarray(v, dtype=np.float64).reshape(4, 2) for k, v in detect_tag_corners(gray, detector).items()}
         visible = [tag for tag in estimator.active_anchor_ids if tag in corners]
@@ -206,7 +217,7 @@ def collect_observations(server: str, slot: int, frames: int, interval_s: float,
             image = np.concatenate([corners[tag] for tag in visible])
             observations.append((world, image))
         log(f"frame {i + 1}/{frames}: anchors {visible}")
-        time.sleep(interval_s)
+        sleep(interval_s)
     if size is None:
         raise FitError("no frames fetched")
     return observations, size, seen

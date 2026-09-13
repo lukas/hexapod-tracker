@@ -141,22 +141,37 @@ def check(zero: dict[int, dict[int, np.ndarray]], sizes: dict[int, tuple[int, in
 
 
 def observe(camera_url: str, top: int) -> tuple[dict[int, dict[int, np.ndarray]], dict[int, tuple[int, int]], dict]:
+    """``camera_url`` is the old server's URL or a hexapod-cameras session directory."""
     cams = Cameras(camera_url, [top])
     obs = cams.observe()
     return tags_only(obs), {c: o["size"] for c, o in obs.items()}, obs
 
 
+def resolve_top(camera_url: str, top: str) -> int:
+    """``--top-camera`` may be an index or, for a session directory, a role name such as ``top``."""
+    try:
+        return int(top)
+    except ValueError:
+        roles = Cameras(camera_url, []).roles()
+        if top in roles:
+            return roles[top]
+        raise SystemExit(f"--top-camera {top!r}: no such role in {camera_url} (roles: {sorted(roles)})")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--camera-url", default="http://127.0.0.1:8766")
-    ap.add_argument("--top-camera", default="2")
+    ap.add_argument("--camera-url", default="http://127.0.0.1:8766",
+                    help="old camera server URL, or a hexapod-cameras session directory")
+    ap.add_argument("--camera-dir", default=None, help="hexapod-cameras session directory (overrides --camera-url)")
+    ap.add_argument("--top-camera", default="2", help="camera index, or a role name (e.g. top) with a session directory")
     ap.add_argument("--config-dir", default=str(CONFIG_DIR))
     ap.add_argument("--tol-deg", type=float, default=DEFAULT_TOL_DEG)
     ap.add_argument("--replay", default=None, metavar="DIR", help="use DIR/zero_tags.json instead of the cameras")
     ap.add_argument("--out", default=None, help="write zero_check.json and the annotated top frame here")
     ap.add_argument("--json", action="store_true", help="print only the JSON result")
     a = ap.parse_args(argv)
-    top = int(a.top_camera)
+    source = a.camera_dir or a.camera_url
+    top = resolve_top(source, a.top_camera) if not a.replay else int(a.top_camera) if str(a.top_camera).isdigit() else 0
     layout, _tag_map, floor = load_configs(Path(a.config_dir))
     lines: list[str] = []
     log = lines.append
@@ -165,7 +180,7 @@ def main(argv=None) -> int:
         zero, sizes = load_tags(Path(a.replay).expanduser() / "zero_tags.json")
     else:
         try:
-            zero, sizes, obs = observe(a.camera_url, top)
+            zero, sizes, obs = observe(source, top)
         except Exception as exc:  # noqa: BLE001 - no camera is a measured "cannot see"
             result = {"ok": False, "error": f"camera server: {type(exc).__name__}: {exc}", "top_camera": top}
             print(json.dumps(result, indent=None if a.json else 1))

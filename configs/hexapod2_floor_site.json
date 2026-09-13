@@ -1,0 +1,90 @@
+{
+ "schema_version": 1,
+ "site": "hexapod2 floor grid (lab), 2026-09-11",
+ "robot": "hexapod2",
+ "robot_tag": {
+  "id": 119,
+  "family": "tag36h11",
+  "mount": "top plate centre, tag +x perpendicular to leg 0",
+  "plate_height_mm": {
+   "standing_walk_ready": 135.0,
+   "belly_down": 55.0
+  },
+  "body_tags_not_floor": [
+   107
+  ]
+ },
+ "cameras": {
+  "floor": {
+   "device": "4K U3 Camera",
+   "height_mm": 610.0,
+   "height_source": "operator, 2026-09-11 ('old camera is 2 ft up')",
+   "floor_foot_mm": [
+    -643.0,
+    859.0
+   ],
+   "floor_foot_source": "solved from the overhead camera's fix of the belly-down robot (P + (T-P)/k, k=55/610); frame bottom-centre maps to (-461, 842)",
+   "parallax": "true ground point = apparent - k*(apparent - foot), k = plate_height/camera_height",
+   "view": "across the grid from the -y side; sees all rows; robot plate tag unreadable beyond x~+300 mm and when body pitch > ~10 deg"
+  },
+  "overhead": {
+   "device": "4K U3 Camera",
+   "height_mm": 914.0,
+   "height_source": "operator ('new one is 3 ft up')",
+   "floor_foot": "image centre floor point",
+   "view": "top-down on the arena centre; sees 104/105/106/111/112/118 and the robot when within ~0.6 m of centre"
+  }
+ },
+ "arena_mm": {
+  "x0": -620.0,
+  "x1": 500.0,
+  "y0": -450.0,
+  "y1": 430.0,
+  "centre": [
+   0.0,
+   100.0
+  ],
+  "notes": "x1 500: hexapod-1 parks at x~600; y1 430: the floor camera stands at y~860 and the robot walked under it twice"
+ },
+ "heading_offsets_deg": {
+  "x_offset": -6.0,
+  "y_offset": -83.55,
+  "meaning": "world angle of the RL policy's body +x / +y velocity axes = tag-119 heading + offset (calibrated 2026-09-11 with a +vx / +vy probe of the allheading policy)"
+ },
+ "floor_tags_added_provisional": {
+  "110": {
+   "center_mm": [
+    -304.8,
+    0.0
+   ],
+   "method": "floor-camera homography from the 7 surveyed anchors, grid-snapped (110/111/106/118 within 11-19 mm of a grid site); 107 was a robot body tag and is excluded"
+  },
+  "111": {
+   "center_mm": [
+    -304.8,
+    304.8
+   ],
+   "method": "floor-camera homography from the 7 surveyed anchors, grid-snapped (110/111/106/118 within 11-19 mm of a grid site); 107 was a robot body tag and is excluded"
+  },
+  "106": {
+   "center_mm": [
+    -609.6,
+    609.6
+   ],
+   "method": "floor-camera homography from the 7 surveyed anchors, grid-snapped (110/111/106/118 within 11-19 mm of a grid site); 107 was a robot body tag and is excluded"
+  },
+  "118": {
+   "center_mm": [
+    -609.6,
+    304.8
+   ],
+   "method": "floor-camera homography from the 7 surveyed anchors, grid-snapped (110/111/106/118 within 11-19 mm of a grid site); 107 was a robot body tag and is excluded"
+  }
+ },
+ "localiser_rules": [
+  "fixes need >=5 mapped tags (4 only with rms < 6 mm) spanning >=2 grid rows; single-row sets are collinear and put the robot metres away",
+  "one camera per guarded run; the two cameras' fixes differed by 0.1-0.3 m at view edges without intrinsics",
+  "rms limits: floor camera 40 mm, overhead 60 mm"
+ ],
+ "source": "tmp/walk_session/{loc.py,floorkeeper.py} session 2026-09-11; see rl_docs/RISE_FALL_HEXAPOD2_2026-09-11.md and Robot Lab hexapod2 runs of that day"
+}

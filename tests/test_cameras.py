@@ -310,3 +310,22 @@ def test_cli_assign_show_and_import_work_offline(registry, capsys):
     assert rc == 0 and cameras.load_registry(registry)["cameras"][SID]["intrinsics"]["quality"] == "provisional"
     assert cameras.main(["--registry", str(registry), "show"]) == 0
     assert SID in capsys.readouterr().out
+
+
+def test_a_saved_fit_beats_a_one_anchor_refit(registry):
+    doc = cameras.load_registry(registry)
+    scene = SyntheticScene(chassis=(-100.0, 200.0, -45.0))
+    with _rig(doc, scene) as rig:
+        saved, _ = rig.fit_floor("top", frames=3, interval_s=0.0, sleep=lambda s: None)
+    doc["cameras"][SID]["floor"] = saved
+    # only anchor 103 stays visible, and the camera has been bumped so a 1-tag refit would be wrong
+    scene.hidden = set(FLOOR["active_anchor_ids"]) - {103}
+    with _rig(doc, scene) as rig:
+        obs = rig.observe()
+        assert 103 in obs[0].tags
+        snaps = rig.pose_snapshots(obs)
+        assert 103 not in snaps[0]["tags"] and 0 in snaps[0]["tags"]      # anchor hidden from the estimator, chassis kept
+        poses = rig.poses_doc(obs)
+    assert poses["calibration"]["cameras"]["0"]["status"] == "held"
+    m = poses["markers"]["0"]
+    assert m["status"] == "tracked" and abs(m["position_mm"]["x"] + 100.0) < 6

@@ -64,6 +64,7 @@ SCHEMA_VERSION = 1
 DEFAULT_ROLES = ("top",)
 DEFAULT_PREFERRED_SIZES = ((1920, 1440), (1920, 1080), (1280, 720))
 DEFAULT_PROCESSING_WIDTH = 1280
+MIN_ANCHORS_TO_REFIT = 3     # fewer visible floor anchors than this: keep the saved floor fit
 FFMPEG = os.environ.get("HEXAPOD_FFMPEG", "ffmpeg")
 
 
@@ -457,9 +458,18 @@ class Rig:
             if saved and tuple(saved.get("image_size", ())) != (width, height):
                 self.log(f"{obs.role}: saved floor fit is for {saved.get('image_size')} px but frames are "
                          f"{width}x{height}; refit with `hexapod-cameras calibrate floor --role {obs.role}`")
+                saved = None
+            tags = {tid: c.copy() for tid, c in obs.tags.items()}
+            if saved:
+                # The estimator refits from whatever anchors it sees, and a one- or two-anchor
+                # fit is worse than the saved one (the robot covers most anchors mid-walk).
+                # Hide the anchors then, so it falls back to the saved fit it was seeded with.
+                visible = [t for t in self.estimator.active_anchor_ids if t in tags]
+                if len(visible) < MIN_ANCHORS_TO_REFIT:
+                    for t in visible:
+                        tags.pop(t, None)
             snaps.append({"index": obs.index, "width": width, "height": height,
-                          "frame_age_s": max(0.0, self.clock() - obs.frame.captured_unix),
-                          "tags": {tid: c.copy() for tid, c in obs.tags.items()}})
+                          "frame_age_s": max(0.0, self.clock() - obs.frame.captured_unix), "tags": tags})
         return snaps
 
     def detections_doc(self, observations: Sequence[Observation]) -> dict[str, Any]:

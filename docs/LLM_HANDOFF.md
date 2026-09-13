@@ -602,8 +602,6 @@ The embedded HTML at `/` shows every requested camera. Relevant routes are:
 - `/api/poses`: planar floor-referenced fusion from visible cameras.
 - `/api/pose-state`: the planar camera result together with read-only encoder
   angles and calibrated IMU fields from the robot's `GET /api/feedback` route.
-- `/calibration-status.json`: state produced by an optional external
-  calibration capture directory.
 
 The page's Pose tab presents camera pose, all 18 encoder angles, and IMU tilt.
 Use body-frame roll/pitch only when `body_frame_calibrated` is true; retain the

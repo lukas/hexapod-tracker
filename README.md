@@ -79,7 +79,6 @@ Useful endpoints include:
 - `/snapshot/0.jpg` — current raw frame
 - `/native-luma/0.png` — lossless, full-resolution iPhone luminance plane
 - `/native-frame/0.nv12` — exact full-resolution iPhone NV12 video frame
-- `/calibration-status.json` — calibration capture state
 
 The recommended `lab-tracking` profile asks Continuity Camera for its full
 1920x1440, 30 fps, 8-bit video-range NV12 source. It keeps the browser/color

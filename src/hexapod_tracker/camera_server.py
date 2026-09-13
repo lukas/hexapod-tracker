@@ -878,15 +878,6 @@ INDEX_HTML = """<!doctype html>
   nav { display:flex; gap:8px; margin:0 0 16px; }
   nav button { padding:8px 14px; color:#c8d1d8; background:#1b1f22; border:1px solid #30363b; border-radius:8px; cursor:pointer; }
   nav button[aria-selected="true"] { color:#fff; background:#245c8a; border-color:#3984bd; }
-  #calibration { margin:0 0 16px; padding:14px 16px; background:#1b1f22; border:1px solid #30363b; border-radius:10px; }
-  #calibration-head { display:flex; justify-content:space-between; gap:16px; margin-bottom:9px; }
-  #calibration-message { margin-top:9px; color:#d6dde2; }
-  #calibration-meta { margin-top:5px; color:#aeb8bf; font:12px ui-monospace,monospace; }
-  .progress { height:10px; overflow:hidden; border-radius:999px; background:#30363b; }
-  #calibration-progress { width:0; height:100%; background:#67db83; transition:width .2s ease; }
-  #calibration[data-state="moving"] #calibration-progress,
-  #calibration[data-state="holding"] #calibration-progress { background:#ffba5a; }
-  #calibration[data-state="complete"] { border-color:#397f49; }
   #cameras { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
   article { background:#1b1f22; border:1px solid #30363b; border-radius:10px; overflow:hidden; }
   article h2 { padding:12px 14px 0; }
@@ -912,12 +903,6 @@ INDEX_HTML = """<!doctype html>
   <button type="button" data-tab="pose" aria-selected="false">Pose</button>
 </nav>
 <section id="camera-panel">
-  <section id="calibration" data-state="waiting">
-    <div id="calibration-head"><strong>Stereo calibration</strong><span id="calibration-count">checking…</span></div>
-    <div class="progress"><div id="calibration-progress"></div></div>
-    <div id="calibration-message">Checking automatic capture…</div>
-    <div id="calibration-meta"></div>
-  </section>
   <main id="cameras"></main>
 </section>
 <section id="pose-panel" hidden>
@@ -1176,10 +1161,7 @@ async function updatePose() {
 }
 async function update() {
   try {
-    const [status, calibration] = await Promise.all([
-      fetch('/status.json', {cache:'no-store'}).then(r => r.json()),
-      fetch('/calibration-status.json', {cache:'no-store'}).then(r => r.json()),
-    ]);
+    const status = await fetch('/status.json', {cache:'no-store'}).then(r => r.json());
     if (serverRunId !== null && status.server_run_id !== serverRunId) {
       // The server restarted, so every open stream belongs to a dead process.
       // Dropping the cards makes ensureCameraCard rebuild them.
@@ -1203,18 +1185,6 @@ async function update() {
       tags += c.tag_ids.length;
     }
     document.getElementById('summary').textContent = `${live}/${status.cameras.length} live · ${tags} tags detected`;
-    const saved = calibration.saved || 0;
-    const target = calibration.target || 0;
-    const percent = target ? Math.min(100, 100 * saved / target) : 0;
-    const panel = document.getElementById('calibration');
-    panel.dataset.state = calibration.state || 'waiting';
-    document.getElementById('calibration-count').textContent = `${saved} / ${target} pairs`;
-    document.getElementById('calibration-progress').style.width = `${percent}%`;
-    document.getElementById('calibration-message').textContent = calibration.message || 'Waiting for calibration capture.';
-    const motion = calibration.motion_px == null ? '—' : `${calibration.motion_px.toFixed(1)} px`;
-    document.getElementById('calibration-meta').textContent = calibration.state === 'complete'
-      ? 'automatic collection finished · dataset ready for validation'
-      : `common board tags: ${calibration.common_tags || 0} · motion: ${motion}`;
   } catch (e) {
     document.getElementById('summary').textContent = `status error: ${e}`;
   }
@@ -1383,15 +1353,6 @@ class StreamHandler(BaseHTTPRequestHandler):
             return
         if path in ("/api/pose-state", "/api/pose-state.json"):
             body = json.dumps(self.server.combined_pose_status()).encode()
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if path == "/calibration-status.json":
-            body = json.dumps(self.server.calibration_status()).encode()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
@@ -1569,15 +1530,11 @@ class CameraHTTPServer(ThreadingHTTPServer):
         self,
         address: tuple[str, int],
         workers: list[CameraWorker],
-        calibration_directory: Path | None = None,
-        calibration_target: int = 12,
         pose_estimator: PlanarPoseEstimator | None = None,
         feedback_client: Any | None = None,
         floor_anchor_ids: Sequence[int] = (),
     ):
         self.workers = workers
-        self.calibration_directory = calibration_directory
-        self.calibration_target = calibration_target
         self.pose_estimator = pose_estimator
         self.feedback_client = feedback_client
         self.floor_anchor_ids = {int(value) for value in floor_anchor_ids}
@@ -1843,30 +1800,6 @@ class CameraHTTPServer(ThreadingHTTPServer):
             },
         }
 
-    def calibration_status(self) -> dict[str, Any]:
-        if self.calibration_directory is None:
-            return {
-                "state": "disabled",
-                "saved": 0,
-                "target": 0,
-                "common_tags": 0,
-                "motion_px": None,
-                "message": "Automatic calibration capture is not running.",
-            }
-        status_path = self.calibration_directory / "capture_status.json"
-        try:
-            return json.loads(status_path.read_text())
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            saved = len(list(self.calibration_directory.glob("pair_*_camera0.jpg")))
-            return {
-                "state": "waiting",
-                "saved": saved,
-                "target": self.calibration_target,
-                "common_tags": 0,
-                "motion_px": None,
-                "message": "Move to a new pose, then hold the board steady.",
-            }
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1934,8 +1867,6 @@ def parse_args() -> argparse.Namespace:
         default=3.0,
         help="read-only robot feedback rate (default: 3 Hz)",
     )
-    parser.add_argument("--calibration-directory", type=Path)
-    parser.add_argument("--calibration-target", type=int, default=12)
     parser.add_argument(
         "--floor-map",
         type=Path,
@@ -2414,8 +2345,6 @@ def main() -> None:
     server = CameraHTTPServer(
         (args.host, args.port),
         workers,
-        calibration_directory=args.calibration_directory,
-        calibration_target=args.calibration_target,
         pose_estimator=pose_estimator,
         feedback_client=feedback_client,
         floor_anchor_ids=floor_map.get("active_anchor_ids") or (),

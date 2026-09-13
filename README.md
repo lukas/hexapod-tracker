@@ -43,20 +43,38 @@ robot's legacy `body_pitch_target_deg` field to
 known rear-lean body-frame calibration pose, not a current measurement or a
 live controller target, and it is intentionally not displayed in the UI.
 
-### One server owns the cameras
+### No camera daemon: runs own their cameras (`hexapod-cameras`)
 
-`hexapod-camera-server` is the only camera web server. Its page at `/` shows
-one card per slot; frames, `/status.json`, `/api/cameras/health`, camera
-leases and the fused `/api/poses` document are all served from it, and every
-other tool (Robot Lab, the sysid runner, the calibration programs) reads
-frames over HTTP rather than opening a device. Two processes opening one
-camera fight over its active format and, on a shared USB controller, starve
-each other.
+Since 2026-09-13 there is no always-on camera server. The process that needs
+cameras opens them for the length of one job and releases them:
 
-Slots are numbered by `tools/camera_service.sh` from enumeration order at
-every launch, so a slot number is not an identity. Pin, calibrate and exclude
-cameras by their AVFoundation stable id, which `/status.json` reports per
-slot as `requested_stable_id`.
+```
+uv run hexapod-cameras list                          # attached cameras, roles, calibration status
+uv run hexapod-cameras assign <stable-id|name> --role top [--capture-size 1920x1080]
+uv run hexapod-cameras calibrate floor --role top    # homography from the surveyed floor tags -> registry
+uv run hexapod-cameras calibrate intrinsics --role top
+uv run hexapod-cameras check --role top --out check.jpg   # exit 3 when the anchors drifted (camera bumped)
+uv run hexapod-cameras session --out DIR --roles top # for one run: state.json, latest_top.jpg, vision.jsonl, top.mp4
+```
+
+The registry is one file per machine, `~/.hexapod/cameras.json`
+(`HEXAPOD_CAMERAS_FILE` overrides), keyed by each camera's AVFoundation stable
+id. It holds the role, capture size, intrinsics and the saved floor fit with
+its quality numbers. The stable id follows the USB port, not the device; each
+entry also carries `device_name`, and `hexapod-cameras adopt OLD NEW` moves an
+entry after a replug. Slot numbers are gone: readers ask for a role.
+
+A session writes, atomically, `state.json` (sequence number, per-camera
+detections and the fused poses document in the shapes the old
+`/api/detections.json` and `/api/poses` served), `latest_<role>.jpg`,
+`vision.jsonl`, and `<role>.mp4` with `<role>_timestamps.csv` (the capture
+time of every frame). It ends when its stdin closes, when `DIR/STOP` appears,
+on SIGTERM, or after `--seconds`, so a dead parent never leaves a camera
+claimed. `hexapod-zero-check --camera-dir DIR --top-camera top` and
+`hexapod-calibrate-tags` read a session directory as their camera source.
+
+`hexapod-camera-server` remains in the tree for now but is not run as a
+service; its `tools/camera_service.sh` LaunchAgent was removed.
 
 On macOS, do not assume AVFoundation discovery-list indices match the indices
 used by OpenCV's `VideoCapture`. Treat the live image and reported capture mode

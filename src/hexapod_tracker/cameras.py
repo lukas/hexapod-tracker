@@ -424,9 +424,15 @@ class Rig:
         return self
 
     def close(self) -> None:
+        errors = []
         for cam in self.cameras:
-            cam.release()
+            try:
+                cam.release()
+            except Exception as exc:
+                errors.append(f"{cam.role}: {exc}")
         self.opened = False
+        if errors:
+            raise RuntimeError("; ".join(errors))
 
     def __enter__(self) -> "Rig":
         return self.open()
@@ -579,7 +585,7 @@ class Rig:
 
 
 class VideoRecorder:
-    """Frames -> H.264 mp4 through an ffmpeg pipe, with a CSV of capture times per frame."""
+    """H.264 MP4 flushed in one-second fragments, plus capture times per frame."""
 
     def __init__(self, path: Path, fps: float, size: tuple[int, int], *, ffmpeg: str = FFMPEG,
                  popen: Callable[..., Any] = subprocess.Popen):
@@ -587,28 +593,65 @@ class VideoRecorder:
         self.fps = float(fps)
         self.size = size
         self.frames = 0
-        self._ts = open(self.path.with_name(self.path.stem + "_timestamps.csv"), "w", newline="")
+        self._closed = False
+        self.error: str | None = None
+        self._ts = open(self.path.with_name(self.path.stem + "_timestamps.csv"), "w", newline="", buffering=1)
         self._csv = csv.writer(self._ts)
         self._csv.writerow(["frame", "captured_unix", "seq"])
-        self.proc = popen([ffmpeg, "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
-                           "-s", f"{size[0]}x{size[1]}", "-r", f"{self.fps:g}", "-i", "-",
-                           "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
-                           "-movflags", "+faststart", str(self.path)], stdin=subprocess.PIPE)
+        try:
+            self.proc = popen([ffmpeg, "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
+                               "-s", f"{size[0]}x{size[1]}", "-r", f"{self.fps:g}", "-i", "-",
+                               "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+                               "-tune", "zerolatency", "-g", str(max(1, math.ceil(self.fps))),
+                               "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+                               "-frag_duration", "1000000", "-flush_packets", "1", str(self.path)],
+                              stdin=subprocess.PIPE, start_new_session=True)  # parent SIGTERM can drain the pipe
+        except BaseException:
+            self._ts.close()
+            raise
 
     def write(self, frame: Frame) -> None:
+        if self._closed:
+            raise RuntimeError(self.error or f"recorder is closed: {self.path}")
+        if self.proc.poll() is not None:
+            self.error = f"ffmpeg exited with status {self.proc.returncode}: {self.path}"
+            raise RuntimeError(self.error)
         bgr = frame.bgr
         if (bgr.shape[1], bgr.shape[0]) != self.size:
             bgr = cv2.resize(bgr, self.size)
-        self.proc.stdin.write(np.ascontiguousarray(bgr).tobytes())
+        try:
+            self.proc.stdin.write(np.ascontiguousarray(bgr).tobytes())
+            self.proc.stdin.flush()
+        except OSError as exc:
+            self.error = f"ffmpeg write failed for {self.path}: {exc}"
+            raise RuntimeError(self.error) from exc
         self._csv.writerow([self.frames, f"{frame.captured_unix:.6f}", frame.seq])
         self.frames += 1
 
     def close(self) -> None:
+        if self._closed:
+            if self.error:
+                raise RuntimeError(self.error)
+            return
+        self._closed = True
         try:
-            self.proc.stdin.close()
-            self.proc.wait(timeout=30)
+            try:
+                self.proc.stdin.close()
+            except OSError as exc:
+                self.error = f"ffmpeg pipe failed for {self.path}: {exc}"
+            try:
+                returncode = self.proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                self.error = f"ffmpeg did not finish within 30 seconds: {self.path}"
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+            else:
+                if returncode != 0:
+                    self.error = f"ffmpeg exited with status {returncode}: {self.path}"
         finally:
             self._ts.close()
+        if self.error:
+            raise RuntimeError(self.error)
 
 
 # --------------------------------------------------------------------------- session
@@ -653,20 +696,27 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
     def on_signal(signum: int, _frame: Any) -> None:
         stopping["why"] = f"signal {signum}"
 
+    old_handlers: dict[int, Any] = {}
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
-            signal.signal(sig, on_signal)
+            old_handlers[sig] = signal.signal(sig, on_signal)
         except ValueError:            # not the main thread (tests)
             pass
 
     recorders: dict[str, Any] = {}
     summary: dict[str, Any] = {"out_dir": str(out_dir), "roles": list(roles), "states": 0, "frames": {}, "video": {},
                                "started_unix": clock()}
+    session: dict[str, Any] = {"pid": os.getpid(), "roles": list(roles), "cameras": [],
+                              "started_unix": summary["started_unix"], "status": "recording"}
+    rig: Rig | None = None
+    failure: BaseException | None = None
+    errors: list[str] = []
     period = 1.0 / max(0.5, hz)
-    with Rig(doc, roles, configs=configs, capture_factory=capture_factory, clock=clock, log=log) as rig:
-        write_atomic(out_dir / "session.json", json.dumps({"pid": os.getpid(), "roles": list(roles),
-                                                            "cameras": [c.info() for c in rig.cameras],
-                                                            "started_unix": summary["started_unix"]}, indent=1))
+    try:
+        rig = Rig(doc, roles, configs=configs, capture_factory=capture_factory, clock=clock, log=log)
+        rig.open()
+        session["cameras"] = [c.info() for c in rig.cameras]
+        write_atomic(out_dir / "session.json", json.dumps(session, indent=1))
         t0 = clock()
         next_state = t0
         with open(out_dir / "vision.jsonl", "a") as jsonl:
@@ -716,13 +766,35 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
                 # pace to the video rate; state writes are gated above
                 spent = clock() - now
                 sleep(max(0.0, 1.0 / max(1.0, video_fps if video else hz) - spent))
-        for role, rec in recorders.items():
-            rec.close()
-            summary["video"][role] = {"path": str(rec.path), "frames": rec.frames, "fps": rec.fps}
-    summary["stopped"] = stopping["why"]
-    summary["ended_unix"] = clock()
-    write_atomic(out_dir / "session.json", json.dumps({**json.loads((out_dir / "session.json").read_text()),
-                                                        **summary}, indent=1))
+    except BaseException as exc:
+        failure = exc
+        errors.append(f"{type(exc).__name__}: {exc}")
+    finally:
+        try:
+            for role, rec in recorders.items():
+                finalized = False
+                try:
+                    rec.close()
+                    finalized = True
+                except Exception as exc:
+                    errors.append(f"{role} video finalization: {exc}")
+                summary["video"][role] = {"path": str(rec.path), "frames": rec.frames, "fps": rec.fps,
+                                          "finalized": finalized}
+            if rig is not None:
+                try:
+                    rig.close()
+                except Exception as exc:
+                    errors.append(f"camera cleanup: {exc}")
+            summary.update({"stopped": stopping["why"] or "error", "ended_unix": clock(),
+                            "status": "failed" if errors else "completed", "errors": errors})
+            write_atomic(out_dir / "session.json", json.dumps({**session, **summary}, indent=1))
+        finally:
+            for sig, handler in old_handlers.items():
+                signal.signal(sig, handler)
+    if failure is not None:
+        raise failure
+    if errors:
+        raise RuntimeError("; ".join(errors))
     return summary
 
 

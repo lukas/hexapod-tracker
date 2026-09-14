@@ -7,6 +7,7 @@ recorder is replaced by one that counts frames.
 from __future__ import annotations
 
 import json
+import signal
 from pathlib import Path
 
 import cv2
@@ -272,7 +273,96 @@ def test_session_writes_state_latest_jsonl_and_video_then_releases(registry, tmp
     assert (out / "top.mp4").exists()
     session = json.loads((out / "session.json").read_text())
     assert session["stopped"] == "seconds" and session["cameras"][0]["role"] == "top"
+    assert session["status"] == "completed" and session["errors"] == []
+    assert session["video"]["top"]["finalized"]
     assert captures and captures[0].released
+
+
+@pytest.mark.parametrize("failure_stage", ["write", "capture", "state", "finalize", "release"])
+def test_session_failure_finalizes_other_videos_releases_cameras_and_records_end(
+        registry, tmp_path, monkeypatch, failure_stage):
+    doc = cameras.load_registry(registry)
+    cameras.assign(doc, "0xbbb", device_name="Side camera", role="side")
+    scene = SyntheticScene()
+    captures = []
+    recorders = []
+    clock = {"t": 1000.0}
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+
+    class FailingCapture(FakeCapture):
+        def __init__(self, slot):
+            super().__init__(scene)
+            self.slot, self.reads = slot, 0
+            captures.append(self)
+
+        def read(self):
+            self.reads += 1
+            if failure_stage == "capture" and self.slot == 0 and self.reads == 2:
+                raise RuntimeError("capture failed")
+            return super().read()
+
+        def release(self):
+            super().release()
+            if failure_stage == "release" and self.slot == 0:
+                raise RuntimeError("release failed")
+
+    class FailingRecorder(CountingRecorder):
+        def __init__(self, *args):
+            super().__init__(*args)
+            recorders.append(self)
+
+        def write(self, frame):
+            if failure_stage == "write" and self.path.stem == "top" and self.frames == 1:
+                raise BrokenPipeError("encoder write failed")
+            super().write(frame)
+
+        def close(self):
+            super().close()
+            if failure_stage in ("write", "finalize") and self.path.stem == "top":
+                raise RuntimeError("finalize failed")
+
+    original_state = cameras.Rig.state
+
+    def state(rig, observations):
+        if failure_stage == "state" and rig.state_seq == 1:
+            raise RuntimeError("state failed")
+        return original_state(rig, observations)
+
+    monkeypatch.setattr(cameras.Rig, "state", state)
+    out = tmp_path / "failure"
+    with pytest.raises((RuntimeError, BrokenPipeError), match=f"{failure_stage} failed"):
+        cameras.run_session(doc, out, roles=["top", "side"], seconds=0.5,
+                            capture_factory=lambda slot, *args: FailingCapture(slot),
+                            recorder_factory=FailingRecorder, clock=lambda: clock["t"],
+                            sleep=lambda s: clock.__setitem__("t", clock["t"] + max(s, 0.05)), log=lambda m: None)
+
+    assert len(recorders) == len(captures) == 2
+    assert all(rec.closed for rec in recorders) and all(cap.released for cap in captures)
+    session = json.loads((out / "session.json").read_text())
+    assert session["status"] == "failed" and session["ended_unix"] > session["started_unix"]
+    assert any(f"{failure_stage} failed" in error for error in session["errors"])
+    assert session["video"]["side"]["finalized"]
+    assert session["video"]["top"]["finalized"] == (failure_stage not in ("write", "finalize"))
+    assert session["stopped"] == ("seconds" if failure_stage in ("finalize", "release") else "error")
+    assert all(signal.getsignal(sig) == handler for sig, handler in handlers.items())
+
+
+def test_session_failed_camera_open_releases_partial_rig_and_records_failure(registry, tmp_path):
+    doc = cameras.load_registry(registry)
+    cameras.assign(doc, "0xbbb", device_name="Side camera", role="side")
+    cap = FakeCapture(SyntheticScene())
+
+    def factory(slot, *args):
+        if slot == 1:
+            raise RuntimeError("camera unavailable")
+        return cap
+
+    out = tmp_path / "failed-open"
+    with pytest.raises(RuntimeError, match="camera unavailable"):
+        cameras.run_session(doc, out, roles=["top", "side"], capture_factory=factory, log=lambda m: None)
+    session = json.loads((out / "session.json").read_text())
+    assert cap.released and session["status"] == "failed" and session["ended_unix"]
+    assert session["video"] == {} and "camera unavailable" in session["errors"][0]
 
 
 def test_session_stops_on_stop_file_and_on_closed_stdin(registry, tmp_path):

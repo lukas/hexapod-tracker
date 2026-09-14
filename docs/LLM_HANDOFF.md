@@ -1023,6 +1023,15 @@ force calibration, and component localization are separate questions.
 
 ## Dependencies and validation
 
+Per-run video is written by `cameras.VideoRecorder` as fragmented H.264 MP4,
+with roughly one-second keyframes/fragments and flushed timestamp rows. Keep
+this incremental format: `+faststart` alone only writes the MP4 index at
+shutdown and loses playability when the encoder is killed. `run_session`
+finalizes every recorder and releases every camera even after an exception;
+it persists the failure and end time and propagates the error. The synthetic
+recorder tests kill a real ffmpeg process and decode the preceding fragments
+without calling `close()`. They require ffmpeg with libx264 and no cameras.
+
 - Use `uv`; do not use bare `pip`.
 - AprilTag support requires `opencv-contrib-python`, not `opencv-python`,
   because the detector uses `cv2.aruco`.

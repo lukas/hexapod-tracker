@@ -73,6 +73,15 @@ on SIGTERM, or after `--seconds`, so a dead parent never leaves a camera
 claimed. `hexapod-zero-check --camera-dir DIR --top-camera top` and
 `hexapod-calibrate-tags` read a session directory as their camera source.
 
+Videos use fragmented H.264 MP4: completed fragments are flushed about every
+second of video, so an abruptly killed recorder retains playable footage up
+to the unfinished tail. Timestamp rows are flushed during capture too.
+Normal shutdown drains the encoder. On failure the session still closes all
+recorders and cameras, writes `ended_unix`, `status: failed`, and `errors` to
+`session.json`, and exits unsuccessfully. Each video's `finalized` field says
+whether its encoder closed successfully; a false value can still leave
+playable completed fragments.
+
 `hexapod-camera-server` remains in the tree for now but is not run as a
 service; its `tools/camera_service.sh` LaunchAgent was removed.
 

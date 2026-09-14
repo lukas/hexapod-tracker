@@ -1023,14 +1023,32 @@ force calibration, and component localization are separate questions.
 
 ## Dependencies and validation
 
-Per-run video is written by `cameras.VideoRecorder` as fragmented H.264 MP4,
-with roughly one-second keyframes/fragments and flushed timestamp rows. Keep
-this incremental format: `+faststart` alone only writes the MP4 index at
-shutdown and loses playability when the encoder is killed. `run_session`
+Native per-run video uses `AVCaptureMovieFileOutput` alongside the analysis
+output in the existing capture session. Attach both before starting the
+session and reapply the selected device format afterward; adding a movie
+output can otherwise reset a 4K camera to 1080p. Prepare both camera sessions
+and wait for native-sized frames before starting either recording: starting
+the second camera during the first recording produced a QuickTime edit list
+that omitted an early interval from playback, although its frames were encoded.
+Preparing both first removed that omission. Record native H.264 `.mov`
+with one-second fragments and native timestamps, independently of Python
+tag detection. Stop recording and await its delegate callback while pumping
+the run loop before releasing the session. The MP4/CSV `VideoRecorder`
+remains the fallback for other capture backends. Keep both formats
+incremental: `+faststart` alone does not protect an interrupted file. `run_session`
 finalizes every recorder and releases every camera even after an exception;
 it persists the failure and end time and propagates the error. The synthetic
 recorder tests kill a real ffmpeg process and decode the preceding fragments
 without calling `close()`. They require ffmpeg with libx264 and no cameras.
+
+A stationary two-camera check on 2026-09-14 recorded top 1920x1080 at
+29.307 fps and side 3840x2160 at 29.998 fps while Python analysis managed
+83 frames per camera over 20 seconds. All presented packet timestamps
+increased: intervals were 33.933–35.033 ms (top) and 32.966–34.034 ms (side),
+with no discarded packets; both recordings finalized. Browser playback was
+also verified for native 1080p and 4K movies.
+A separate interruption check with the same fragment settings killed only
+the test recorder and left both partially written movies decodable.
 
 - Use `uv`; do not use bare `pip`.
 - AprilTag support requires `opencv-contrib-python`, not `opencv-python`,

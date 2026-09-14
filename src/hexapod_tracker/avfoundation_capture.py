@@ -14,6 +14,7 @@ import ctypes
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Sequence
 
 import cv2
@@ -23,12 +24,12 @@ import numpy as np
 try:  # These frameworks are intentionally a macOS-only optional dependency.
     import AVFoundation as AV
     import CoreMedia as CM
-    from Foundation import NSDate, NSObject, NSRunLoop
+    from Foundation import NSDate, NSObject, NSRunLoop, NSURL
     import Quartz
     import objc
 except ImportError:  # pragma: no cover - exercised by non-macOS installations
     AV = CM = Quartz = objc = None
-    NSDate = NSObject = NSRunLoop = None
+    NSDate = NSObject = NSRunLoop = NSURL = None
 
 
 def _frameworks_available() -> bool:
@@ -95,6 +96,17 @@ if _frameworks_available():
             except Exception as error:  # never unwind through AVFoundation
                 owner._set_callback_error(str(error))
 
+    class _MovieDelegate(NSObject, protocols=[objc.protocolNamed("AVCaptureFileOutputRecordingDelegate")]):
+        def captureOutput_didStartRecordingToOutputFileAtURL_fromConnections_(self, _output, _url, _connections):
+            if self.capture_owner is not None:
+                self.capture_owner._recording_started.set()
+
+        def captureOutput_didFinishRecordingToOutputFileAtURL_fromConnections_error_(
+                self, _output, _url, _connections, error):
+            if self.capture_owner is not None:
+                self.capture_owner._recording_error = str(error) if error else None
+                self.capture_owner._recording_finished.set()
+
 
 class AVFoundationYuvCapture:
     """Small ``cv2.VideoCapture``-compatible native 420v adapter."""
@@ -137,6 +149,17 @@ class AVFoundationYuvCapture:
         self._delegate: Any | None = None
         self._queue: Any | None = None
         self._released = False
+        self._movie: Any | None = None
+        self._movie_delegate: Any | None = None
+        self._movie_path: Path | None = None
+        self._movie_size: tuple[int, int] | None = None
+        self._movie_rotate_180 = False
+        self._session_ready = threading.Event()
+        self._recording_requested = False
+        self._recording_started = threading.Event()
+        self._recording_finished = threading.Event()
+        self._recording_error: str | None = None
+        self._recording_result: dict[str, Any] | None = None
 
         self.capture_image_size_px: tuple[int, int] | None = None
         self.image_size_px: tuple[int, int] | None = None
@@ -339,6 +362,32 @@ class AVFoundationYuvCapture:
             raise RuntimeError("native 420v video output is unavailable")
         session.addOutput_(output)
 
+        if self._movie_path is not None:
+            movie = AV.AVCaptureMovieFileOutput.alloc().init()
+            movie.setMovieFragmentInterval_(CM.CMTimeMake(1, 1))
+            if not session.canAddOutput_(movie):
+                raise RuntimeError("native movie and analysis outputs cannot share this camera")
+            session.addOutput_(movie)
+            connection = movie.connectionWithMediaType_(AV.AVMediaTypeVideo)
+            width, height = self.capture_image_size_px
+            self._movie_size = (width, height)
+            movie.setOutputSettings_forConnection_({
+                AV.AVVideoCodecKey: AV.AVVideoCodecTypeH264,
+                AV.AVVideoWidthKey: width, AV.AVVideoHeightKey: height,
+                AV.AVVideoEncoderSpecificationKey: {"EnableHardwareAcceleratedVideoEncoder": True},
+                AV.AVVideoCompressionPropertiesKey: {
+                    AV.AVVideoMaxKeyFrameIntervalDurationKey: 1.0,
+                    AV.AVVideoAllowFrameReorderingKey: False,
+                },
+            }, connection)
+            if self._movie_rotate_180:
+                if not connection.isVideoRotationAngleSupported_(180):
+                    raise RuntimeError("native movie output cannot apply the camera's 180-degree rotation")
+                connection.setVideoRotationAngle_(180)
+            self._movie = movie
+            self._movie_delegate = _MovieDelegate.alloc().init()
+            self._movie_delegate.capture_owner = self
+
         queue = _dispatch_queue(f"hexapod.camera.{self.index}".encode("ascii"))
         delegate = _FrameDelegate.alloc().init()
         delegate.capture_owner = self
@@ -360,7 +409,9 @@ class AVFoundationYuvCapture:
         # starved a slower camera sharing the machine. Best-effort: a
         # Continuity Camera can refuse lockForConfiguration once an input owns
         # it, and the pre-session configuration already covers that case.
-        self._configure_device(device, capture_format, required=False)
+        # Recording requires the selected mode rather than silently accepting a fallback.
+        self._configure_device(device, capture_format, required=self._movie is not None)
+        self._session_ready.set()
 
     def _session_loop(self) -> None:
         try:
@@ -395,6 +446,67 @@ class AVFoundationYuvCapture:
             daemon=True,
         )
         self._thread.start()
+
+    def _wait_for_recording(self, event: threading.Event, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while not event.is_set():
+            if self._recording_error or (self.last_error and not self._recording_started.is_set()):
+                raise RuntimeError(self.last_error or self._recording_error)
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"native recording callback timed out: {self._movie_path}")
+            # File-output completion can need the caller's run loop on macOS.
+            NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.05))
+        if self._recording_error:
+            raise RuntimeError(self._recording_error)
+
+    def prepare_recording(self, path: Path, *, rotate_180: bool = False) -> None:
+        """Configure capture before any camera begins recording."""
+        if self._thread is not None:
+            raise RuntimeError("prepare native recording before the first camera read")
+        self._movie_path = Path(path).resolve()
+        self._movie_rotate_180 = rotate_180
+        self._ensure_thread()
+        self._wait_for_recording(self._session_ready, 15.0)
+        # Reconfiguration may leave an older frame pending. Wait until this
+        # camera actually delivers the selected native size before declaring it ready.
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            ok, _frame = self.read()
+            if not ok:
+                raise RuntimeError(self.last_error or "native recording camera produced no frame")
+            if (self.detection_gray.shape[1], self.detection_gray.shape[0]) == self._movie_size:
+                return
+        raise RuntimeError("native recording camera did not settle at the selected resolution")
+
+    def start_recording(self) -> None:
+        """Start the prepared movie; analysis never supplies or paces its video frames."""
+        if self._movie is None or not self._session_ready.is_set():
+            raise RuntimeError("prepare native recording before starting it")
+        self._recording_requested = True
+        self._movie.startRecordingToOutputFileURL_recordingDelegate_(
+            NSURL.fileURLWithPath_(str(self._movie_path)), self._movie_delegate)
+        self._wait_for_recording(self._recording_started, 15.0)
+
+    def stop_recording(self) -> dict[str, Any]:
+        """Wait for the movie to finish while its capture session/run loop still exists."""
+        if self._recording_result is not None:
+            return self._recording_result
+        if self._movie is None or not self._recording_requested:
+            raise RuntimeError(self.last_error or "native recording never started")
+        if not self._recording_finished.is_set():
+            self._movie.stopRecording()
+            self._wait_for_recording(self._recording_finished, 15.0)
+        if self._recording_error:
+            raise RuntimeError(self._recording_error)
+        if not self._recording_started.is_set():
+            raise RuntimeError("native recording never started")
+        self._recording_result = {
+            "path": str(self._movie_path), "fps": self.fps,
+            "duration_s": CM.CMTimeGetSeconds(AV.AVURLAsset.assetWithURL_(
+                NSURL.fileURLWithPath_(str(self._movie_path))).duration()),
+            "size": list(self._movie_size), "finalized": True,
+        }
+        return self._recording_result
 
     def _set_callback_error(self, message: str) -> None:
         self.last_error = f"native frame callback failed: {message}"
@@ -479,6 +591,10 @@ class AVFoundationYuvCapture:
         )
 
     def read(self) -> tuple[bool, np.ndarray | None]:
+        if self._movie is not None:
+            NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.001))
+            if self._recording_finished.is_set():
+                raise RuntimeError(self._recording_error or "native recording stopped unexpectedly")
         if not self.isOpened():
             self.last_error = "native AVFoundation capture is unavailable"
             return False, None
@@ -536,12 +652,20 @@ class AVFoundationYuvCapture:
         }
 
     def release(self) -> None:
-        self._released = True
-        self._stop.set()
-        with self._condition:
-            self._condition.notify_all()
-        if self._thread is not None:
-            self._thread.join(timeout=3.0)
-        self.detection_gray = None
-        self.tracking_gray = None
-        self._last_read_planes = None
+        try:
+            if self._movie is not None and self._recording_requested:
+                self.stop_recording()
+        finally:
+            self._released = True
+            self._stop.set()
+            with self._condition:
+                self._condition.notify_all()
+            if self._thread is not None:
+                self._thread.join(timeout=3.0)
+            self.detection_gray = None
+            self.tracking_gray = None
+            self._last_read_planes = None
+            if self._movie_delegate is not None:
+                self._movie_delegate.capture_owner = None
+            self._movie_delegate = None
+            self._movie = None

@@ -54,7 +54,7 @@ uv run hexapod-cameras assign <stable-id|name> --role top [--capture-size 1920x1
 uv run hexapod-cameras calibrate floor --role top    # homography from the surveyed floor tags -> registry
 uv run hexapod-cameras calibrate intrinsics --role top
 uv run hexapod-cameras check --role top --out check.jpg   # exit 3 when the anchors drifted (camera bumped)
-uv run hexapod-cameras session --out DIR --roles top # for one run: state.json, latest_top.jpg, vision.jsonl, top.mp4
+uv run hexapod-cameras session --out DIR --roles top # for one run: state.json, latest_top.jpg, vision.jsonl, top.mov
 ```
 
 The registry is one file per machine, `~/.hexapod/cameras.json`
@@ -67,16 +67,21 @@ entry after a replug. Slot numbers are gone: readers ask for a role.
 A session writes, atomically, `state.json` (sequence number, per-camera
 detections and the fused poses document in the shapes the old
 `/api/detections.json` and `/api/poses` served), `latest_<role>.jpg`,
-`vision.jsonl`, and `<role>.mp4` with `<role>_timestamps.csv` (the capture
-time of every frame). It ends when its stdin closes, when `DIR/STOP` appears,
+`vision.jsonl`, and native `<role>.mov` video. It ends when its stdin closes, when `DIR/STOP` appears,
 on SIGTERM, or after `--seconds`, so a dead parent never leaves a camera
 claimed. `hexapod-zero-check --camera-dir DIR --top-camera top` and
 `hexapod-calibrate-tags` read a session directory as their camera source.
 
-Videos use fragmented H.264 MP4: completed fragments are flushed about every
-second of video, so an abruptly killed recorder retains playable footage up
-to the unfinished tail. Timestamp rows are flushed during capture too.
-Normal shutdown drains the encoder. On failure the session still closes all
+Native macOS video is recorded by AVFoundation in the same camera session,
+at the camera's full selected resolution and registry frame rate (normally
+30 fps). It uses camera timestamps and continues while tag analysis is busy.
+`--fps` controls analysis polling and the software fallback rate, not native
+video. Slow analysis may skip frames without skipping the recorded footage.
+Native movies have one-second fragments; completed fragments remain playable
+after interruption. Other backends retain fragmented MP4 and timestamp CSVs.
+Native movie timestamps are embedded in the file; no analysis-rate CSV is
+presented as a video-frame index. Normal shutdown waits for file completion.
+On failure the session still closes all
 recorders and cameras, writes `ended_unix`, `status: failed`, and `errors` to
 `session.json`, and exits unsuccessfully. Each video's `finalized` field says
 whether its encoder closed successfully; a false value can still leave

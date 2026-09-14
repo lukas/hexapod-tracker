@@ -365,6 +365,65 @@ def test_session_failed_camera_open_releases_partial_rig_and_records_failure(reg
     assert session["video"] == {} and "camera unavailable" in session["errors"][0]
 
 
+@pytest.mark.parametrize("fail_finish", [False, True])
+def test_native_recording_does_not_use_analysis_frames_or_software_recorder(registry, tmp_path, fail_finish):
+    doc = cameras.load_registry(registry)
+    cameras.assign(doc, "0xbbb", device_name="Side camera", role="side", rotate_180=True)
+    scene = SyntheticScene()
+    captures = []
+    clock = {"t": 1000.0}
+
+    class NativeCapture(FakeCapture):
+        def __init__(self):
+            super().__init__(scene)
+            self.movie = None
+            self.started = False
+            self.stopped = False
+            captures.append(self)
+
+        def prepare_recording(self, path, *, rotate_180):
+            self.movie, self.rotation = path, rotate_180
+
+        def start_recording(self):
+            assert all(cap.movie is not None for cap in captures)
+            self.started = True
+            self.movie.write_bytes(b"native movie")
+
+        def read(self):
+            assert all(cap.started for cap in captures)
+            return super().read()
+
+        def stop_recording(self):
+            self.stopped = True
+            if fail_finish and self.movie.stem == "top":
+                raise RuntimeError("native disk write failed")
+            return {"path": str(self.movie), "fps": 30.0, "duration_s": 0.5, "finalized": True}
+
+    out = tmp_path / "native"
+
+    def run():
+        return cameras.run_session(doc, out, roles=["top", "side"], seconds=0.5, video_fps=5.0,
+                                   capture_factory=lambda *a: NativeCapture(),
+                                   recorder_factory=lambda *a: pytest.fail("native video entered software encoder"),
+                                   clock=lambda: clock["t"],
+                                   sleep=lambda s: clock.__setitem__("t", clock["t"] + max(s, 0.05)),
+                                   log=lambda m: None)
+
+    if fail_finish:
+        with pytest.raises(RuntimeError, match="native disk write failed"):
+            run()
+    else:
+        run()
+    session = json.loads((out / "session.json").read_text())
+    assert all(cap.stopped and cap.released for cap in captures)
+    assert [cap.rotation for cap in captures] == [False, True]
+    assert session["status"] == ("failed" if fail_finish else "completed")
+    assert session["video"]["side"]["fps"] == 30 and session["video"]["side"]["finalized"]
+    assert "frames" not in session["video"]["side"]  # analysis reads do not count native video frames
+    assert (out / "top.mov").exists() and not (out / "top.mp4").exists()
+    assert not (out / "top_timestamps.csv").exists()
+
+
 def test_session_stops_on_stop_file_and_on_closed_stdin(registry, tmp_path):
     doc = cameras.load_registry(registry)
     scene = SyntheticScene()

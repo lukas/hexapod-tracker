@@ -22,8 +22,9 @@ Three things live here:
   is the process a run starts. For the life of the run it writes, into
   ``DIR``: ``state.json`` (atomically replaced; sequence number, detections,
   poses), ``latest_<role>.jpg``, ``vision.jsonl`` (one line per state), and
-  ``<role>.mp4`` with ``<role>_timestamps.csv`` (the capture time of every
-  frame). It ends when its stdin closes, when ``DIR/STOP`` appears, on
+  native ``<role>.mov`` (full capture resolution/rate and camera timestamps).
+  Other capture backends use ``<role>.mp4`` with ``<role>_timestamps.csv``.
+  It ends when its stdin closes, when ``DIR/STOP`` appears, on
   SIGTERM, or after ``--seconds``. A dead parent therefore never leaves a
   camera claimed, which is what the always-on server kept doing.
 
@@ -685,7 +686,7 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
                 clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
                 recorder_factory: Callable[..., Any] = VideoRecorder, configs: Path = CONFIG_DIR,
                 log: Callable[[str], None] = print) -> dict[str, Any]:
-    """Own the cameras for one run; write state.json / latest_<role>.jpg / vision.jsonl / <role>.mp4."""
+    """Own cameras for one run; native movie capture proceeds independently of analysis."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stop_path = out_dir / "STOP"
@@ -704,6 +705,7 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
             pass
 
     recorders: dict[str, Any] = {}
+    native_recorders: dict[str, Any] = {}
     summary: dict[str, Any] = {"out_dir": str(out_dir), "roles": list(roles), "states": 0, "frames": {}, "video": {},
                                "started_unix": clock()}
     session: dict[str, Any] = {"pid": os.getpid(), "roles": list(roles), "cameras": [],
@@ -715,6 +717,14 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
     try:
         rig = Rig(doc, roles, configs=configs, capture_factory=capture_factory, clock=clock, log=log)
         rig.open()
+        if video:
+            for cam in rig.cameras:
+                if hasattr(cam.capture, "prepare_recording"):
+                    native_recorders[cam.role] = cam.capture
+                    cam.capture.prepare_recording(out_dir / f"{cam.role}.mov",
+                                                  rotate_180=bool(cam.entry.get("rotate_180")))
+            for capture in native_recorders.values():
+                capture.start_recording()
         session["cameras"] = [c.info() for c in rig.cameras]
         write_atomic(out_dir / "session.json", json.dumps(session, indent=1))
         t0 = clock()
@@ -736,7 +746,7 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
                     if obs.frame is None:
                         continue
                     summary["frames"][obs.role] = summary["frames"].get(obs.role, 0) + 1
-                    if video:
+                    if video and obs.role not in native_recorders:
                         rec = recorders.get(obs.role)
                         if rec is None:
                             rec = recorders[obs.role] = recorder_factory(out_dir / f"{obs.role}.mp4", video_fps,
@@ -771,6 +781,12 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
         errors.append(f"{type(exc).__name__}: {exc}")
     finally:
         try:
+            for role, capture in native_recorders.items():
+                try:
+                    summary["video"][role] = capture.stop_recording()
+                except Exception as exc:
+                    errors.append(f"{role} video finalization: {exc}")
+                    summary["video"][role] = {"path": str(out_dir / f"{role}.mov"), "finalized": False}
             for role, rec in recorders.items():
                 finalized = False
                 try:
@@ -1026,10 +1042,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("out")
     s.set_defaults(fn=cmd_snapshot)
 
-    s = sub.add_parser("record", help="record a role to <dir>/<role>.mp4 for --seconds")
+    s = sub.add_parser("record", help="record a role for --seconds (native .mov, fallback .mp4)")
     s.add_argument("--role", default="top")
     s.add_argument("--seconds", type=float, default=10.0)
-    s.add_argument("--fps", type=float, default=10.0)
+    s.add_argument("--fps", type=float, default=10.0,
+                   help="analysis polling / fallback video rate; native video uses the camera registry rate")
     s.add_argument("--hz", type=float, default=2.0, help="state.json rate")
     s.add_argument("out", help="output directory")
     s.set_defaults(fn=cmd_record)
@@ -1060,7 +1077,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--out", required=True)
     s.add_argument("--roles", default=",".join(DEFAULT_ROLES))
     s.add_argument("--hz", type=float, default=5.0, help="state.json / vision.jsonl rate")
-    s.add_argument("--fps", type=float, default=10.0, help="video frame rate")
+    s.add_argument("--fps", type=float, default=10.0,
+                   help="analysis polling / fallback video rate; native video uses the camera registry rate")
     s.add_argument("--seconds", type=float, default=None)
     s.add_argument("--no-video", action="store_true")
     s.add_argument("--no-stdin", action="store_true", help="do not stop when stdin closes")

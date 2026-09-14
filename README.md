@@ -206,3 +206,15 @@ The main hexapod repository includes this project as the
 `hexapod_walker/prototype_sts3215/hexapod-tracker` Git submodule. Compatibility
 entry points at the historical paths import this package, while robot-specific
 gait-survey orchestration remains in the main repository.
+
+## Current Robot Lab floor grid
+
+The latest nominal floor map and decoded image evidence are in
+[FLOOR_GRID_REFERENCE.md](docs/FLOOR_GRID_REFERENCE.md) and
+[floor_grid_reference.json](configs/floor_grid_reference.json).
+Vision exposes the JSON at `GET /api/vision/floor-grid-reference`.
+Read its unknown-size and tag-101-frame constraints before calibration.
+
+Published Robot Lab evidence (record `1d6f24966e36`):
+[JSON](https://robot-lab.cwd1f0-new-cluster.coreweave.app/runs/1d6f24966e36/floor_grid_reference.json)
+and [documentation](https://robot-lab.cwd1f0-new-cluster.coreweave.app/runs/1d6f24966e36/FLOOR_GRID_REFERENCE.md).

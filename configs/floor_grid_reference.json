@@ -1,0 +1,557 @@
+{
+  "schema_version": 1,
+  "reference_id": "robot-lab-floor-grid-IMG_3837",
+  "recorded_date": "2026-09-11",
+  "family": "tag36h11",
+  "spacing_m": 0.3048,
+  "coordinate_status": "inferred_nominal_grid_not_surveyed",
+  "provisional": true,
+  "reference_image": {
+    "filename": "IMG_3837.jpeg",
+    "width_px": 1152,
+    "height_px": 1536,
+    "decoder": "OpenCV ArucoDetector DICT_APRILTAG_36h11",
+    "evidence": "User-supplied actual image decoding; original image not bundled or independently re-decoded here"
+  },
+  "coordinate_frame": {
+    "origin": "center of floor tag 101",
+    "positive_x": "toward tag 103 along increasing columns",
+    "positive_y": "away from camera, opposite increasing rows",
+    "positive_z": "up from floor",
+    "handedness": "right",
+    "position_formula": "X = column * 0.3048; Y = -row * 0.3048; Z = 0 (meters)"
+  },
+  "grid_rows": [
+    [
+      101,
+      100,
+      103
+    ],
+    [
+      null,
+      null,
+      102
+    ],
+    [
+      105,
+      112,
+      104
+    ],
+    [
+      null,
+      111,
+      110
+    ],
+    [
+      106,
+      118,
+      115
+    ],
+    [
+      116,
+      null,
+      null
+    ]
+  ],
+  "floor_tag_centers_m": {
+    "100": [
+      0.3048,
+      0,
+      0
+    ],
+    "101": [
+      0,
+      0,
+      0
+    ],
+    "102": [
+      0.6096,
+      -0.3048,
+      0
+    ],
+    "103": [
+      0.6096,
+      0,
+      0
+    ],
+    "104": [
+      0.6096,
+      -0.6096,
+      0
+    ],
+    "105": [
+      0,
+      -0.6096,
+      0
+    ],
+    "106": [
+      0,
+      -1.2192,
+      0
+    ],
+    "110": [
+      0.6096,
+      -0.9144,
+      0
+    ],
+    "111": [
+      0.3048,
+      -0.9144,
+      0
+    ],
+    "112": [
+      0.3048,
+      -0.6096,
+      0
+    ],
+    "115": [
+      0.6096,
+      -1.2192,
+      0
+    ],
+    "116": [
+      0,
+      -1.524,
+      0
+    ],
+    "118": [
+      0.3048,
+      -1.2192,
+      0
+    ]
+  },
+  "floor_tag_observations": {
+    "100": {
+      "row": 0,
+      "column": 1,
+      "image_center_uv_px": [
+        555,
+        42
+      ],
+      "nominal_yaw_deg": 0,
+      "estimated_yaw_deg": 0.5,
+      "canonical_corners_uv_px": [
+        [
+          544,
+          36
+        ],
+        [
+          566,
+          35
+        ],
+        [
+          566,
+          48
+        ],
+        [
+          544,
+          49
+        ]
+      ]
+    },
+    "101": {
+      "row": 0,
+      "column": 0,
+      "image_center_uv_px": [
+        297,
+        51
+      ],
+      "nominal_yaw_deg": 0,
+      "estimated_yaw_deg": 0.4,
+      "canonical_corners_uv_px": [
+        [
+          286,
+          45
+        ],
+        [
+          309,
+          44
+        ],
+        [
+          307,
+          57
+        ],
+        [
+          285,
+          58
+        ]
+      ]
+    },
+    "102": {
+      "row": 1,
+      "column": 2,
+      "image_center_uv_px": [
+        840,
+        208
+      ],
+      "nominal_yaw_deg": 0,
+      "estimated_yaw_deg": 0.3,
+      "canonical_corners_uv_px": [
+        [
+          826,
+          200
+        ],
+        [
+          851,
+          199
+        ],
+        [
+          853,
+          215
+        ],
+        [
+          829,
+          216
+        ]
+      ]
+    },
+    "103": {
+      "row": 0,
+      "column": 2,
+      "image_center_uv_px": [
+        811,
+        32
+      ],
+      "nominal_yaw_deg": 0,
+      "estimated_yaw_deg": 0.4,
+      "canonical_corners_uv_px": [
+        [
+          798,
+          25
+        ],
+        [
+          821,
+          24
+        ],
+        [
+          823,
+          38
+        ],
+        [
+          801,
+          39
+        ]
+      ]
+    },
+    "104": {
+      "row": 2,
+      "column": 2,
+      "image_center_uv_px": [
+        876,
+        422
+      ],
+      "nominal_yaw_deg": 0,
+      "estimated_yaw_deg": 0.2,
+      "canonical_corners_uv_px": [
+        [
+          861,
+          413
+        ],
+        [
+          888,
+          412
+        ],
+        [
+          891,
+          432
+        ],
+        [
+          864,
+          433
+        ]
+      ]
+    },
+    "105": {
+      "row": 2,
+      "column": 0,
+      "image_center_uv_px": [
+        261,
+        449
+      ],
+      "nominal_yaw_deg": 0,
+      "estimated_yaw_deg": -3.9,
+      "canonical_corners_uv_px": [
+        [
+          249,
+          439
+        ],
+        [
+          276,
+          439
+        ],
+        [
+          273,
+          460
+        ],
+        [
+          247,
+          459
+        ]
+      ]
+    },
+    "106": {
+      "row": 4,
+      "column": 0,
+      "image_center_uv_px": [
+        197,
+        1018
+      ],
+      "nominal_yaw_deg": 0,
+      "estimated_yaw_deg": 0.2,
+      "canonical_corners_uv_px": [
+        [
+          182,
+          1002
+        ],
+        [
+          216,
+          1001
+        ],
+        [
+          212,
+          1033
+        ],
+        [
+          178,
+          1034
+        ]
+      ]
+    },
+    "110": {
+      "row": 3,
+      "column": 2,
+      "image_center_uv_px": [
+        920,
+        682
+      ],
+      "nominal_yaw_deg": 0,
+      "estimated_yaw_deg": 0.2,
+      "canonical_corners_uv_px": [
+        [
+          903,
+          670
+        ],
+        [
+          933,
+          669
+        ],
+        [
+          937,
+          694
+        ],
+        [
+          907,
+          695
+        ]
+      ]
+    },
+    "111": {
+      "row": 3,
+      "column": 1,
+      "image_center_uv_px": [
+        580,
+        690
+      ],
+      "nominal_yaw_deg": 0,
+      "estimated_yaw_deg": 1.4,
+      "canonical_corners_uv_px": [
+        [
+          565,
+          678
+        ],
+        [
+          594,
+          677
+        ],
+        [
+          595,
+          701
+        ],
+        [
+          566,
+          703
+        ]
+      ]
+    },
+    "112": {
+      "row": 2,
+      "column": 1,
+      "image_center_uv_px": [
+        568,
+        435
+      ],
+      "nominal_yaw_deg": 0,
+      "estimated_yaw_deg": 1.7,
+      "canonical_corners_uv_px": [
+        [
+          555,
+          426
+        ],
+        [
+          581,
+          425
+        ],
+        [
+          582,
+          444
+        ],
+        [
+          555,
+          446
+        ]
+      ]
+    },
+    "115": {
+      "row": 4,
+      "column": 2,
+      "image_center_uv_px": [
+        970,
+        1008
+      ],
+      "nominal_yaw_deg": 0,
+      "estimated_yaw_deg": -0.7,
+      "canonical_corners_uv_px": [
+        [
+          950,
+          992
+        ],
+        [
+          984,
+          992
+        ],
+        [
+          990,
+          1024
+        ],
+        [
+          956,
+          1025
+        ]
+      ]
+    },
+    "116": {
+      "row": 5,
+      "column": 0,
+      "image_center_uv_px": [
+        142,
+        1443
+      ],
+      "nominal_yaw_deg": 0,
+      "estimated_yaw_deg": -1.7,
+      "canonical_corners_uv_px": [
+        [
+          126,
+          1422
+        ],
+        [
+          164,
+          1422
+        ],
+        [
+          157,
+          1465
+        ],
+        [
+          120,
+          1464
+        ]
+      ]
+    },
+    "118": {
+      "row": 4,
+      "column": 1,
+      "image_center_uv_px": [
+        583,
+        1013
+      ],
+      "nominal_yaw_deg": 0,
+      "estimated_yaw_deg": -0.7,
+      "canonical_corners_uv_px": [
+        [
+          566,
+          997
+        ],
+        [
+          599,
+          997
+        ],
+        [
+          600,
+          1028
+        ],
+        [
+          566,
+          1029
+        ]
+      ]
+    }
+  },
+  "robot_tag_ids_detected": [
+    3,
+    10,
+    59,
+    61,
+    113
+  ],
+  "robot_tag_image_centers_uv_px": {
+    "3": [
+      41,
+      190
+    ],
+    "10": [
+      125,
+      179
+    ],
+    "59": [
+      96,
+      106
+    ],
+    "61": [
+      142,
+      221
+    ],
+    "113": [
+      56,
+      83
+    ]
+  },
+  "tag_black_border_side_length_m": null,
+  "camera_intrinsics": null,
+  "robot_tag_mount_transforms": null,
+  "corner_convention": {
+    "order": [
+      "top-left",
+      "top-right",
+      "bottom-right",
+      "bottom-left"
+    ],
+    "identity_aware": true,
+    "detector": "OpenCV ArucoDetector canonical bitmap corners, not image-position sorted",
+    "tag_axes": {
+      "positive_x": "canonical left to right",
+      "positive_y": "canonical bottom to top",
+      "positive_z": "out of printed face"
+    },
+    "nominal_roll_deg": 0,
+    "nominal_pitch_deg": 0,
+    "nominal_yaw_deg": 0,
+    "positive_yaw": "local +x toward world +Y about +Z",
+    "local_corners_for_measured_side_s": [
+      "[-s/2, +s/2, 0]",
+      "[+s/2, +s/2, 0]",
+      "[+s/2, -s/2, 0]",
+      "[-s/2, -s/2, 0]"
+    ],
+    "world_transform": "p_world = center_world + Rz(yaw) * p_local"
+  },
+  "notes": [
+    "Spacing is user-stated one foot, assumed center-to-center; positions and row/column assignments are inferred, not surveyed.",
+    "Only the 13 listed floor IDs are fixed references. The five robot IDs move. This image is not a complete inventory; null grid cells have no visible decoded ID.",
+    "Image centers are rounded averages of four detected corners from top-left image origin, u right, v down; they are locating aids, not calibrated center projections.",
+    "All decoded floor tags have canonical top toward +Y and canonical right toward +X; none has a nominal 90/180/270 degree rotation.",
+    "Estimated yaw comes from image-to-floor homography fitted to nominal centers. Low resolution, integer corners, lens distortion, placement and grid inference limit accuracy; decimals are not accuracy claims. Use nominal zero yaw for idealized layout; estimates only initialize later calibration.",
+    "Grid spacing is not physical tag size. Do not generate metric tag corners without measuring black-border side length.",
+    "A floor homography applies only on the floor plane; elevated robot tags incur height-dependent errors. Full 3D pose requires camera calibration and additional constraints (known sizes, mounts or multiple views).",
+    "This reference supersedes older photographed floor inventories for current layout evidence, but is not an executable pose config or a completed calibration. Older tag-104-origin transforms and tag sizes cannot be silently reused."
+  ]
+}

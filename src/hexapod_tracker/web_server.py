@@ -1377,6 +1377,7 @@ def wrap_handler_with_vision(
                 self._vision_json(HTTPStatus.OK, {
                     "ok": True,
                     "service": "hexapod-vision",
+                    "floor_grid_reference_url": "/api/vision/floor-grid-reference",
                     "joint_frame": FRAME_ROBOT_ABS,
                     "joint_contract": JOINT_CONTRACT,
                     "read_only": not runtime.motion_control_available,
@@ -1385,6 +1386,12 @@ def wrap_handler_with_vision(
                         if runtime.motion_control_available else "none"
                     ),
                 })
+            elif path == "/api/vision/floor-grid-reference":
+                self._vision_send_bytes(
+                    HTTPStatus.OK,
+                    (CONFIG_DIR / "floor_grid_reference.json").read_bytes(),
+                    "application/json; charset=utf-8",
+                )
             elif path == "/api/vision/state":
                 self._vision_json(HTTPStatus.OK, runtime.public_state())
             elif path == "/api/vision/frame.mjpg":

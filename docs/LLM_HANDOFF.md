@@ -1,5 +1,15 @@
 # LLM handoff: what this repository is doing
 
+## Current floor reference (2026-09-11)
+
+Read [FLOOR_GRID_REFERENCE.md](FLOOR_GRID_REFERENCE.md) and
+`configs/floor_grid_reference.json` for the latest user-supplied IMG_3837 floor
+grid: 13 floor IDs, tag-101 origin, 0.3048 m nominal spacing, unknown tag size.
+Vision exposes it at `/api/vision/floor-grid-reference`. The older floor-map,
+tag-size and tag-104-origin descriptions below concern legacy runtime configs;
+they do not supersede this new physical-layout evidence. This is a nominal
+reference, not an applied or surveyed camera calibration.
+
 Read this before changing the tracker. This file records the architecture,
 physical assumptions, evidence, and repository boundary that are easy to miss
 by reading one module in isolation.

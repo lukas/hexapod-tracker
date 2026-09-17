@@ -441,11 +441,18 @@ class Rig:
         raise KeyError(role)
 
     # -- observing
-    def observe(self) -> list[Observation]:
+    def observe(self, detect: bool = True) -> list[Observation]:
+        """Grab one frame per camera; run tag detection on it unless ``detect`` is
+        False (a video-only frame between state writes carries no tags)."""
         out: list[Observation] = []
         for cam in self.cameras:
             frame = cam.grab()
-            out.append(cam.detect(frame) if frame is not None else Observation(cam.role, cam.index, None))
+            if frame is None:
+                out.append(Observation(cam.role, cam.index, None))
+            elif detect:
+                out.append(cam.detect(frame))
+            else:
+                out.append(Observation(cam.role, cam.index, frame, detect_seq=cam.detect_seq))
         return out
 
     def pose_snapshots(self, observations: Sequence[Observation]) -> list[dict[str, Any]]:
@@ -681,7 +688,11 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
                 if _stdin_closed(stdin):
                     stopping["why"] = "stdin closed"
                     break
-                observations = rig.observe()
+                # Detect tags only when a state is due: full-frame detection on every
+                # camera every frame held a two-camera session to ~7 fps (2026-09-17);
+                # the frames in between are video only.
+                state_due = now >= next_state
+                observations = rig.observe(detect=state_due)
                 for obs in observations:
                     if obs.frame is None:
                         continue
@@ -692,7 +703,7 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
                             rec = recorders[obs.role] = recorder_factory(out_dir / f"{obs.role}.mp4", video_fps,
                                                                         (obs.frame.width, obs.frame.height))
                         rec.write(obs.frame)
-                if now >= next_state:
+                if state_due:
                     next_state = now + period
                     state = rig.state(observations)
                     write_atomic(out_dir / "state.json", json.dumps(state))

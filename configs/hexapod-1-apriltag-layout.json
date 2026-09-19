@@ -181,6 +181,138 @@
      ]
     },
     "yaw_deg": -90.915
+   },
+   {
+    "id": 110,
+    "grid": [
+     -1,
+     0
+    ],
+    "world_from_tag": {
+     "translation_m": [
+      -0.3052,
+      -0.001,
+      0.0
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      -0.718527,
+      0.6954991
+     ]
+    },
+    "yaw_deg": -91.866,
+    "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 2 cameras (laptop-cam0, laptop-cam1); nominal grid site [-1, 0], measured 1 mm from it"
+   },
+   {
+    "id": 111,
+    "grid": [
+     -1,
+     1
+    ],
+    "world_from_tag": {
+     "translation_m": [
+      -0.2992,
+      0.3012,
+      0.0
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      -0.7188001,
+      0.6952169
+     ]
+    },
+    "yaw_deg": -91.911,
+    "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 4 cameras (studio-side2, studio-top, laptop-cam0, laptop-cam1); nominal grid site [-1, 1], measured 7 mm from it"
+   },
+   {
+    "id": 115,
+    "grid": [
+     -2,
+     0
+    ],
+    "world_from_tag": {
+     "translation_m": [
+      -0.6106,
+      0.0023,
+      0.0
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      -0.7160096,
+      0.6980904
+     ]
+    },
+    "yaw_deg": -91.452,
+    "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 2 cameras (laptop-cam0, laptop-cam1); nominal grid site [-2, 0], measured 3 mm from it"
+   },
+   {
+    "id": 118,
+    "grid": [
+     -2,
+     1
+    ],
+    "world_from_tag": {
+     "translation_m": [
+      -0.6055,
+      0.3066,
+      0.0
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      -0.7116767,
+      0.7025071
+     ]
+    },
+    "yaw_deg": -90.743,
+    "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 3 cameras (studio-side2, laptop-cam0, laptop-cam1); nominal grid site [-2, 1], measured 4 mm from it"
+   },
+   {
+    "id": 106,
+    "grid": [
+     -2,
+     2
+    ],
+    "world_from_tag": {
+     "translation_m": [
+      -0.5966,
+      0.6147,
+      0.0
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      -0.7109591,
+      0.7032334
+     ]
+    },
+    "yaw_deg": -90.626,
+    "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 2 cameras (laptop-cam0, laptop-cam1); nominal grid site [-2, 2], measured 14 mm from it"
+   },
+   {
+    "id": 116,
+    "grid": [
+     -3,
+     2
+    ],
+    "world_from_tag": {
+     "translation_m": [
+      -0.9025,
+      0.6186,
+      0.0
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      -0.7128344,
+      0.7013324
+     ]
+    },
+    "yaw_deg": -90.932,
+    "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 1 cameras (laptop-cam1); nominal grid site [-3, 2], measured 15 mm from it"
    }
   ],
   "position_uncertainty_m": 0.005,

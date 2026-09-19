@@ -1,39 +1,299 @@
 {
-  "schema_version": 1,
-  "family": "tag36h11",
-  "units": "millimeters",
-  "tag_black_square_size": 27.2,
-  "active_anchor_ids": [100, 101, 102, 103, 104, 105, 112],
-  "measurement_convention": "Coordinates are tag centers. Adjacent occupied grid sites are 304.8 mm (one foot) apart as specified by the operator.",
-  "coordinate_frame": {
-    "origin": "center of tag 104",
-    "positive_x": "from tag 104 toward tag 102 and tag 103",
-    "positive_y": "from tag 104 toward tag 112 and tag 105",
-    "positive_z": "up from the floor",
-    "yaw": "right-handed rotation about +Z from +X to the tag +X axis (OpenCV corner 0 toward corner 1)"
+ "schema_version": 1,
+ "family": "tag36h11",
+ "units": "millimeters",
+ "tag_black_square_size": 27.2,
+ "active_anchor_ids": [
+  100,
+  101,
+  102,
+  103,
+  104,
+  105,
+  106,
+  110,
+  111,
+  112,
+  115,
+  116,
+  118
+ ],
+ "measurement_convention": "Coordinates are tag centers. Adjacent occupied grid sites are 304.8 mm (one foot) apart as specified by the operator.",
+ "coordinate_frame": {
+  "origin": "center of tag 104",
+  "positive_x": "from tag 104 toward tag 102 and tag 103",
+  "positive_y": "from tag 104 toward tag 112 and tag 105",
+  "positive_z": "up from the floor",
+  "yaw": "right-handed rotation about +Z from +X to the tag +X axis (OpenCV corner 0 toward corner 1)"
+ },
+ "grid_spacing": 304.8,
+ "tags": [
+  {
+   "id": 104,
+   "grid": [
+    0,
+    0
+   ],
+   "center": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "yaw_degrees": -89.814,
+   "center_uncertainty_mm": 5.0,
+   "yaw_uncertainty_degrees": 1.5
   },
-  "grid_spacing": 304.8,
-  "tags": [
-    {"id": 104, "grid": [0, 0], "center": [0.0, 0.0, 0.0], "yaw_degrees": -89.814, "center_uncertainty_mm": 5.0, "yaw_uncertainty_degrees": 1.5},
-    {"id": 102, "grid": [1, 0], "center": [304.8, 0.0, 0.0], "yaw_degrees": -90.447, "center_uncertainty_mm": 5.0, "yaw_uncertainty_degrees": 1.5},
-    {"id": 103, "grid": [2, 0], "center": [609.6, 0.0, 0.0], "yaw_degrees": -88.981, "center_uncertainty_mm": 5.0, "yaw_uncertainty_degrees": 1.5},
-    {"id": 112, "grid": [0, 1], "center": [0.0, 304.8, 0.0], "yaw_degrees": -90.655, "center_uncertainty_mm": 5.0, "yaw_uncertainty_degrees": 1.5},
-    {"id": 100, "grid": [2, 1], "center": [609.6, 304.8, 0.0], "yaw_degrees": -89.206, "center_uncertainty_mm": 5.0, "yaw_uncertainty_degrees": 1.5},
-    {"id": 105, "grid": [0, 2], "center": [0.0, 609.6, 0.0], "yaw_degrees": -90.798, "center_uncertainty_mm": 5.0, "yaw_uncertainty_degrees": 1.5},
-    {"id": 101, "grid": [2, 2], "center": [609.6, 609.6, 0.0], "yaw_degrees": -90.915, "center_uncertainty_mm": 5.0, "yaw_uncertainty_degrees": 1.5}
+  {
+   "id": 102,
+   "grid": [
+    1,
+    0
+   ],
+   "center": [
+    304.8,
+    0.0,
+    0.0
+   ],
+   "yaw_degrees": -90.447,
+   "center_uncertainty_mm": 5.0,
+   "yaw_uncertainty_degrees": 1.5
+  },
+  {
+   "id": 103,
+   "grid": [
+    2,
+    0
+   ],
+   "center": [
+    609.6,
+    0.0,
+    0.0
+   ],
+   "yaw_degrees": -88.981,
+   "center_uncertainty_mm": 5.0,
+   "yaw_uncertainty_degrees": 1.5
+  },
+  {
+   "id": 112,
+   "grid": [
+    0,
+    1
+   ],
+   "center": [
+    0.0,
+    304.8,
+    0.0
+   ],
+   "yaw_degrees": -90.655,
+   "center_uncertainty_mm": 5.0,
+   "yaw_uncertainty_degrees": 1.5
+  },
+  {
+   "id": 100,
+   "grid": [
+    2,
+    1
+   ],
+   "center": [
+    609.6,
+    304.8,
+    0.0
+   ],
+   "yaw_degrees": -89.206,
+   "center_uncertainty_mm": 5.0,
+   "yaw_uncertainty_degrees": 1.5
+  },
+  {
+   "id": 105,
+   "grid": [
+    0,
+    2
+   ],
+   "center": [
+    0.0,
+    609.6,
+    0.0
+   ],
+   "yaw_degrees": -90.798,
+   "center_uncertainty_mm": 5.0,
+   "yaw_uncertainty_degrees": 1.5
+  },
+  {
+   "id": 101,
+   "grid": [
+    2,
+    2
+   ],
+   "center": [
+    609.6,
+    609.6,
+    0.0
+   ],
+   "yaw_degrees": -90.915,
+   "center_uncertainty_mm": 5.0,
+   "yaw_uncertainty_degrees": 1.5
+  },
+  {
+   "id": 110,
+   "grid": [
+    -1,
+    0
+   ],
+   "center": [
+    -305.2,
+    -1.0,
+    0.0
+   ],
+   "yaw_degrees": -91.866,
+   "center_uncertainty_mm": 5.0,
+   "yaw_uncertainty_degrees": 2.0,
+   "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 2 cameras (laptop-cam0, laptop-cam1); nominal grid site [-1, 0], measured 1 mm from it",
+   "grid_offset_mm": [
+    -0.4,
+    -1.0
+   ]
+  },
+  {
+   "id": 111,
+   "grid": [
+    -1,
+    1
+   ],
+   "center": [
+    -299.2,
+    301.2,
+    0.0
+   ],
+   "yaw_degrees": -91.911,
+   "center_uncertainty_mm": 5.0,
+   "yaw_uncertainty_degrees": 2.0,
+   "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 4 cameras (studio-side2, studio-top, laptop-cam0, laptop-cam1); nominal grid site [-1, 1], measured 7 mm from it",
+   "grid_offset_mm": [
+    5.6,
+    -3.6
+   ]
+  },
+  {
+   "id": 115,
+   "grid": [
+    -2,
+    0
+   ],
+   "center": [
+    -610.6,
+    2.3,
+    0.0
+   ],
+   "yaw_degrees": -91.452,
+   "center_uncertainty_mm": 5.0,
+   "yaw_uncertainty_degrees": 2.0,
+   "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 2 cameras (laptop-cam0, laptop-cam1); nominal grid site [-2, 0], measured 3 mm from it",
+   "grid_offset_mm": [
+    -1.0,
+    2.3
+   ]
+  },
+  {
+   "id": 118,
+   "grid": [
+    -2,
+    1
+   ],
+   "center": [
+    -605.5,
+    306.6,
+    0.0
+   ],
+   "yaw_degrees": -90.743,
+   "center_uncertainty_mm": 5.0,
+   "yaw_uncertainty_degrees": 2.0,
+   "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 3 cameras (studio-side2, laptop-cam0, laptop-cam1); nominal grid site [-2, 1], measured 4 mm from it",
+   "grid_offset_mm": [
+    4.1,
+    1.8
+   ]
+  },
+  {
+   "id": 106,
+   "grid": [
+    -2,
+    2
+   ],
+   "center": [
+    -596.6,
+    614.7,
+    0.0
+   ],
+   "yaw_degrees": -90.626,
+   "center_uncertainty_mm": 5.0,
+   "yaw_uncertainty_degrees": 2.0,
+   "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 2 cameras (laptop-cam0, laptop-cam1); nominal grid site [-2, 2], measured 14 mm from it",
+   "grid_offset_mm": [
+    13.0,
+    5.1
+   ]
+  },
+  {
+   "id": 116,
+   "grid": [
+    -3,
+    2
+   ],
+   "center": [
+    -902.5,
+    618.6,
+    0.0
+   ],
+   "yaw_degrees": -90.932,
+   "center_uncertainty_mm": 5.0,
+   "yaw_uncertainty_degrees": 2.0,
+   "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 1 cameras (laptop-cam1); nominal grid site [-3, 2], measured 15 mm from it",
+   "grid_offset_mm": [
+    11.9,
+    9.0
+   ]
+  }
+ ],
+ "provisional": false,
+ "source": {
+  "captured": "2026-09-03",
+  "operator_confirmed": "2026-09-05",
+  "images": [
+   "IMG_3744.jpeg",
+   "IMG_3745.jpeg",
+   "IMG_3746.jpeg",
+   "IMG_3747.jpeg",
+   "IMG_3748.jpeg",
+   "IMG_3749.jpeg",
+   "IMG_3750.jpeg",
+   "IMG_3751.jpeg"
   ],
-  "provisional": false,
-  "source": {
-    "captured": "2026-09-03",
-    "operator_confirmed": "2026-09-05",
-    "images": ["IMG_3744.jpeg", "IMG_3745.jpeg", "IMG_3746.jpeg", "IMG_3747.jpeg", "IMG_3748.jpeg", "IMG_3749.jpeg", "IMG_3750.jpeg", "IMG_3751.jpeg"],
-    "floor_fit_images": ["IMG_3744.jpeg", "IMG_3745.jpeg"],
-    "floor_grid_fit_rms_mm": [1.405, 1.558]
-  },
-  "notes": [
-    "All seven floor IDs decoded in both overhead images.",
-    "Yaw is the circular mean of two independent planar rectifications; their per-tag disagreement was 0.46 degrees or less.",
-    "The rectified black-square sizes were 26.78 to 27.13 mm, consistent with the generated 27.2 mm design.",
-    "The operator confirmed that adjacent floor-grid sites were placed one foot (304.8 mm) apart. The 5 mm center uncertainty remains to cover tape-placement and recollection error."
+  "floor_fit_images": [
+   "IMG_3744.jpeg",
+   "IMG_3745.jpeg"
+  ],
+  "floor_grid_fit_rms_mm": [
+   1.405,
+   1.558
   ]
+ },
+ "notes": [
+  "All seven floor IDs decoded in both overhead images.",
+  "Yaw is the circular mean of two independent planar rectifications; their per-tag disagreement was 0.46 degrees or less.",
+  "The rectified black-square sizes were 26.78 to 27.13 mm, consistent with the generated 27.2 mm design.",
+  "The operator confirmed that adjacent floor-grid sites were placed one foot (304.8 mm) apart. The 5 mm center uncertainty remains to cover tape-placement and recollection error.",
+  "2026-09-19: tags 106/110/111/115/116/118 added as anchors at grid sites (-2,2), (-1,0), (-1,1), (-2,0), (-3,2), (-2,1); operator confirmed they are taped at grid points. Camera survey against the seven photographed anchors: with a pinhole model the tags appeared 2-10 cm off toward +x, growing with distance (the 2026-09-12 '20 px' mismatch); with one radial-distortion term per camera (k1 about -0.33 for the ELP modules) the total reprojection rms fell from 7.5 to 1.4 px and the offsets to 1-24 mm. Lesson: these lenses need k1 when anchors span the frame; a pinhole fit of 13 anchors is worse than one of 7 close together.",
+  "2026-09-19: tags [106, 110, 111, 115, 116, 118] positions solved by joint camera survey (fixed: [100, 101, 102, 103, 104, 105, 112]); total reprojection rms 1.31 px over 5 cameras.",
+  "2026-09-19: tags [106, 110, 111, 115, 116, 118] positions solved by joint camera survey (fixed: [100, 101, 102, 103, 104, 105, 112]); total reprojection rms 1.30 px over 5 cameras."
+ ],
+ "reference_anchor_ids": [
+  100,
+  101,
+  102,
+  103,
+  104,
+  105,
+  112
+ ],
+ "reference_note": "reference_anchor_ids were photographed and measured by hand (2026-09-03/05); every other anchor was placed by camera survey against them and is re-measured by 'Floor tags moved or added' on the Robot Lab page."
 }

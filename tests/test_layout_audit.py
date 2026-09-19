@@ -26,7 +26,7 @@ def test_hexapod_1_layout_matches_consumer_configs():
     # Every mount is either carried by a tag or declared as a gap; 37 is the
     # full complement (1 chassis + 12 lids + 24 yoke faces).
     assert len(ids) + len(layout.get("unresolved_mounts", [])) == 37
-    assert len(layout["floor"]["tags"]) == 7
+    assert len(layout["floor"]["tags"]) == 13   # 7 photographed + 6 camera-surveyed grid tags (2026-09-19)
 
 
 def _minimal_layout(**overrides):

@@ -119,6 +119,7 @@ def new_entry(device_name: str, *, role: str | None = None) -> dict[str, Any]:
         "fps": 30.0,
         "processing_width": DEFAULT_PROCESSING_WIDTH,
         "rotate_180": False,
+        "rotate": 0,                   # 0 / 90 / 180 / 270 degrees clockwise applied to every frame (a camera mounted sideways)
         "intrinsics": None,
         "floor": None,
         "notes": "",
@@ -153,7 +154,7 @@ def resolve(doc: dict[str, Any], spec: str) -> str:
 
 def assign(doc: dict[str, Any], stable_id: str, *, device_name: str | None = None, role: str | None = None,
            capture_size: tuple[int, int] | None = None, fps: float | None = None,
-           rotate_180: bool | None = None, notes: str | None = None) -> dict[str, Any]:
+           rotate_180: bool | None = None, notes: str | None = None, rotate: int | None = None) -> dict[str, Any]:
     cameras = doc.setdefault("cameras", {})
     entry = cameras.get(stable_id) or new_entry(device_name or "")
     if device_name:
@@ -169,6 +170,10 @@ def assign(doc: dict[str, Any], stable_id: str, *, device_name: str | None = Non
         entry["fps"] = float(fps)
     if rotate_180 is not None:
         entry["rotate_180"] = bool(rotate_180)
+    if rotate is not None:
+        if int(rotate) % 90:
+            raise ValueError("rotate must be 0, 90, 180 or 270")
+        entry["rotate"] = int(rotate) % 360
     if notes is not None:
         entry["notes"] = notes
     cameras[stable_id] = entry
@@ -305,6 +310,14 @@ def apply_uvc_controls(stable_id: str, controls: dict[str, Any], *, runner: Call
     return changed
 
 
+def frame_rotation(entry: dict[str, Any]):
+    """OpenCV rotate code for a registry entry: ``rotate`` (0/90/180/270, clockwise) or the older ``rotate_180``."""
+    deg = int(entry.get("rotate") or 0) % 360
+    if entry.get("rotate_180") and deg == 0:
+        deg = 180
+    return {0: None, 90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}[deg]
+
+
 class Camera:
     """One opened camera: frames plus tag detection, released on close."""
 
@@ -348,13 +361,14 @@ class Camera:
             if wait:
                 self.error = getattr(self.capture, "last_error", None) or "no frame"
             return None
-        if self.entry.get("rotate_180"):
-            bgr = cv2.rotate(bgr, cv2.ROTATE_180)
+        rot = frame_rotation(self.entry)
+        if rot is not None:
+            bgr = cv2.rotate(bgr, rot)
         gray = getattr(self.capture, "detection_gray", None)
-        if gray is None or getattr(gray, "ndim", 0) != 2 or gray.shape[1] < bgr.shape[1]:
+        if gray is None or getattr(gray, "ndim", 0) != 2 or max(gray.shape) < max(bgr.shape[:2]):
             gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        elif self.entry.get("rotate_180"):
-            gray = cv2.rotate(gray, cv2.ROTATE_180)
+        elif rot is not None:
+            gray = cv2.rotate(gray, rot)
         self.seq += 1
         self.error = None
         self.last = Frame(bgr, gray, self._clock(), self.seq)
@@ -1059,7 +1073,7 @@ def cmd_assign(args: argparse.Namespace, doc: dict[str, Any]) -> int:
     name = devices.get(sid, {}).get("name") or doc.get("cameras", {}).get(sid, {}).get("device_name") or ""
     size = tuple(int(v) for v in args.capture_size.lower().split("x")) if args.capture_size else None
     assign(doc, sid, device_name=name, role=args.role, capture_size=size, fps=args.fps, rotate_180=args.rotate_180,
-           notes=args.notes)
+           notes=args.notes, rotate=args.rotate)
     save_registry(doc, args.registry)
     print(json.dumps({sid: doc["cameras"][sid]}, indent=1))
     return 0
@@ -1206,6 +1220,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--capture-size", help="WxH to pin, e.g. 1920x1080")
     s.add_argument("--fps", type=float)
     s.add_argument("--rotate-180", action="store_true", default=None)
+    s.add_argument("--rotate", type=int, default=None, choices=(0, 90, 180, 270),
+                   help="rotate every frame clockwise by this many degrees (a camera mounted sideways); replaces --rotate-180")
     s.add_argument("--notes")
     s.add_argument("--offline", action="store_true", help="do not enumerate devices (edit the registry only)")
     s.set_defaults(fn=cmd_assign)

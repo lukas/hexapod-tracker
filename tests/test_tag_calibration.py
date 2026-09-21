@@ -275,3 +275,24 @@ def test_main_replay_writes_report_without_touching_configs(tmp_path):
     layout = json.loads((out / "layout.json").read_text())
     assert validate_layout(layout, json.loads((cfg / "floor_tag_map.json").read_text()),
                            json.loads((out / "hexapod_tag_map.json").read_text())) == []
+
+
+def test_moved_ignores_body_rock_shared_by_the_static_majority():
+    # 2026-09-21: lifting one leg rocked the belly-down robot; every tag shifted ~9 px and body / neighbour tags
+    # were attributed to the lifted leg.  Only the tag that moves beyond the shared shift counts.
+    from hexapod_tracker import tag_calibration as tc
+    a = {tid: _sq(100 + 60 * tid, 200) for tid in range(8)}
+    b = {tid: _sq(100 + 60 * tid + 9.0, 200 + 4.0) for tid in range(8)}      # the whole body rocked 9.8 px
+    b[3] = _sq(100 + 60 * 3 + 9.0 + 45.0, 200 + 4.0)                          # one leg tag really moved
+    mv, st = tc.moved(a, b)
+    assert mv == {3}
+    assert st == {0, 1, 2, 4, 5, 6, 7}
+
+
+def test_moved_without_rock_still_uses_the_pixel_floor():
+    from hexapod_tracker import tag_calibration as tc
+    a = {tid: _sq(100 + 60 * tid, 200) for tid in range(6)}
+    b = {tid: _sq(100 + 60 * tid, 200) for tid in range(6)}
+    b[2] = _sq(100 + 60 * 2 + 8.0, 200)          # 8 px > MOVE_PX_FLOOR 6, nothing else moved
+    mv, st = tc.moved(a, b)
+    assert mv == {2} and 2 not in st

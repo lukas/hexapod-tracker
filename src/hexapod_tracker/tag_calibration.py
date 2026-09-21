@@ -90,6 +90,8 @@ MOVE_EDGE_FRAC = 0.25
 MOVE_PX_FLOOR = 6.0
 MOVE_DEG = 6.0
 MOVE_SCALE_FRAC = 0.08
+BODY_NOISE_MULT = 3.0        # a tag must shift this many times the static tags' residual scatter to count as moved
+BODY_MIN_TAGS = 6            # body-rock compensation needs this many tags in view (5 static legs + body vs 1 moving leg)
 # The commanded joint must travel at least this far for a step to count.
 MIN_TRAVEL_DEG = 8.0
 
@@ -291,163 +293,6 @@ def load_tags(path: Path) -> tuple[dict[int, dict[int, np.ndarray]], dict[int, t
     return tags, sizes
 
 
-# ------------------------------------------------------------------- robot
-
-class Robot:
-    def __init__(self, base: str, dry: bool = False):
-        self.base = base.rstrip("/")
-        self.dry = dry
-
-    def _json(self, path: str, body: Optional[dict] = None, method: str = "GET") -> dict:
-        data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(self.base + path, data=data, method=method,
-                                     headers={"Content-Type": "application/json"} if data else {})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read().decode())
-
-    def pose(self) -> list[float]:
-        """Present joint angles from /api/feedback. Never GET /api/pose here: that
-        read releases servo torque (observed 2026-09-11), which aborts a glide in
-        progress and lets an unsupported leg sag."""
-        last: Optional[list[float]] = None
-        for _ in range(4):
-            joints = self._json("/api/feedback").get("joints") or []
-            if len(joints) == 18 and all(isinstance(j, dict) and j.get("deg") is not None for j in joints):
-                last = [float(j["deg"]) for j in joints]
-                return last
-            time.sleep(0.2)                         # one servo missed its slot; read again
-        if last is None:
-            raise RuntimeError("feedback never returned 18 joint angles")
-        return last
-
-    def move(self, q: list[float], *, seconds: float = MOVE_S, torque: int = TORQUE) -> dict:
-        """Command a pose and wait until every joint is there or has stopped."""
-        if self.dry:
-            return {"ok": True, "dry": True, "short": []}
-        res = self._json("/api/pose", {"q_deg": [round(v, 2) for v in q], "seconds": seconds,
-                                       "torque": torque, "label": "tag-calibration"}, "POST")
-        if not res.get("ok"):
-            raise RuntimeError(f"pose refused: {res}")
-        # The servo profile caps joint speed near 30 deg/s, so a long glide outlasts
-        # `seconds`. Wait until every joint is within 3 deg or has stopped moving.
-        deadline = time.monotonic() + max(seconds, 1.0) + 10.0
-        last = None
-        time.sleep(seconds)
-        while time.monotonic() < deadline:
-            present = self.pose()
-            if max(abs(present[j] - q[j]) for j in range(18)) < 3.0:
-                break
-            if last is not None and max(abs(present[j] - last[j]) for j in range(18)) < 0.5:
-                break                                   # stopped short: blocked or at a limit
-            last = present
-            time.sleep(0.4)
-        time.sleep(SETTLE_S)
-        present = self.pose()
-        return {**{k: v for k, v in res.items() if k in ("ok", "label", "worst_delta_deg", "peak_a")},
-                "reached": [round(v, 1) for v in present],
-                "short": [(j, round(present[j] - q[j], 1)) for j in range(18) if abs(present[j] - q[j]) > 5.0]}
-
-    def relax(self) -> None:
-        if self.dry:
-            return
-        req = urllib.request.Request(self.base + "/cmd", data=b"RELAX", method="POST")
-        with urllib.request.urlopen(req, timeout=10) as r:
-            r.read()
-
-
-# ------------------------------------------------------------- motion logic
-
-def center(corners: np.ndarray) -> np.ndarray:
-    return corners.mean(axis=0)
-
-
-def edge_px(corners: np.ndarray) -> float:
-    return float(np.mean([np.linalg.norm(corners[k] - corners[(k + 1) % 4]) for k in range(4)]))
-
-
-def angle_img(corners: np.ndarray) -> float:
-    v = corners[1] - corners[0]
-    return math.degrees(math.atan2(v[1], v[0]))
-
-
-def turn_deg(ca: np.ndarray, cb: np.ndarray) -> float:
-    """In-plane turn of a tag between two states, degrees in image coordinates.
-
-    Image y points down, so a positive value is clockwise on screen, which for
-    a camera looking down at the robot is clockwise as seen from above."""
-    return (angle_img(cb) - angle_img(ca) + 180.0) % 360.0 - 180.0
-
-
-def moved(a: dict[int, np.ndarray], b: dict[int, np.ndarray]) -> tuple[set[int], set[int]]:
-    """Tags seen whole in both a and b that moved / stayed, by centre shift or in-plane turn.
-
-    A tag whose apparent size changed a lot between the two states was
-    partly hidden in one of them; its corners are not evidence either way."""
-    mv, st = set(), set()
-    for tid in a.keys() & b.keys():
-        ca, cb = a[tid], b[tid]
-        ratio = edge_px(cb) / (edge_px(ca) + 1e-9)
-        if not 0.75 < ratio < 1.33:
-            continue
-        shift = float(np.linalg.norm(center(ca) - center(cb)))
-        turn = abs(turn_deg(ca, cb))
-        thr = max(MOVE_PX_FLOOR, MOVE_EDGE_FRAC * edge_px(ca))
-        # A lid lifted toward a top camera may barely shift or turn but grows;
-        # autofocus and frame noise change a median-of-3 size by well under this.
-        grew = abs(ratio - 1.0) > MOVE_SCALE_FRAC and edge_px(ca) > 12.0
-        (mv if shift > thr or turn > MOVE_DEG or grew else st).add(tid)
-    return mv, st
-
-
-def moved_antisymmetric(base: dict[int, np.ndarray], plus: dict[int, np.ndarray],
-                        minus: dict[int, np.ndarray]) -> tuple[set[int], set[int]]:
-    """For a +/- joint swing about a vertical axis: a tag on the moving link turns one
-    way then the other. Occlusion flicker does not."""
-    mv, st = set(), set()
-    for tid in base.keys() & plus.keys() & minus.keys():
-        cb, cp, cm = base[tid], plus[tid], minus[tid]
-        if not (0.75 < edge_px(cp) / (edge_px(cb) + 1e-9) < 1.33 and 0.75 < edge_px(cm) / (edge_px(cb) + 1e-9) < 1.33):
-            continue
-        tp, tm = turn_deg(cb, cp), turn_deg(cb, cm)
-        sp = float(np.linalg.norm(center(cp) - center(cb))); sm = float(np.linalg.norm(center(cm) - center(cb)))
-        thr = max(MOVE_PX_FLOOR, MOVE_EDGE_FRAC * edge_px(cb))
-        turned = abs(tp) > MOVE_DEG and abs(tm) > MOVE_DEG and (tp > 0) != (tm > 0)
-        shifted = sp > thr and sm > thr and float(np.dot(center(cp) - center(cb), center(cm) - center(cb))) < 0
-        (mv if turned or shifted else st).add(tid)
-    return mv, st
-
-
-def merge_votes(per_camera: list[tuple[set[int], set[int]]]) -> tuple[set[int], set[int], set[int]]:
-    """Union over cameras; a tag both moved and stayed in different cameras is a conflict."""
-    mv = set().union(*(m for m, _ in per_camera)) if per_camera else set()
-    st = set().union(*(s for _, s in per_camera)) if per_camera else set()
-    # Motion seen anywhere is evidence; "stayed" can be a small move under the
-    # threshold in a far camera. Moved wins, and the disagreement is reported.
-    return mv, st - mv, mv & st
-
-
-def partition_leg(zero: dict, lifted: dict, yawed: list[dict], knee: dict) -> dict[str, Any]:
-    """Assign tags of one leg to coxa/femur/tibia from the three moves."""
-    cams = zero.keys() & lifted.keys() & knee.keys()
-    for y in yawed:
-        cams &= y.keys()
-    hip_mv, _, hip_conf = merge_votes([moved(zero[c]["tags"], lifted[c]["tags"]) for c in cams])
-    if len(yawed) >= 2:
-        yaw_votes = [moved_antisymmetric(lifted[c]["tags"], yawed[0][c]["tags"], yawed[1][c]["tags"]) for c in cams]
-    else:
-        yaw_votes = [moved(lifted[c]["tags"], yawed[0][c]["tags"]) for c in cams]
-    yaw_mv, _, yaw_conf = merge_votes(yaw_votes)
-    knee_mv, _, knee_conf = merge_votes([moved(lifted[c]["tags"], knee[c]["tags"]) for c in cams])
-    tibia = knee_mv
-    femur = hip_mv - tibia
-    coxa = yaw_mv - femur - tibia
-    # A tag that turned with the knee but not with the hip is contradictory.
-    contradictions = sorted((tibia - hip_mv) | (femur & coxa))
-    return {"coxa": sorted(coxa), "femur": sorted(femur), "tibia": sorted(tibia),
-            "conflicts": sorted(hip_conf | yaw_conf | knee_conf), "contradictions": contradictions,
-            "moved_hip": sorted(hip_mv), "moved_yaw": sorted(yaw_mv), "moved_knee": sorted(knee_mv)}
-
-
 def yaw_sense_from_swing(lifted: dict, plus: dict, coxa_tags: list[int], top: int) -> Optional[str]:
     """Which way the coxa turned, seen from above, for a positive yaw command."""
     if top not in lifted or top not in plus:
@@ -622,20 +467,47 @@ def turn_deg(ca: np.ndarray, cb: np.ndarray) -> float:
     return (angle_img(cb) - angle_img(ca) + 180.0) % 360.0 - 180.0
 
 
+def body_motion(a: dict[int, np.ndarray], b: dict[int, np.ndarray]) -> tuple[np.ndarray, float, float]:
+    """The rigid image motion shared by the static majority of tags between two states.
+
+    Lifting one leg of a robot lying on its belly rocks the whole body, so every
+    tag shifts a few pixels (2026-09-21 on hexapod1: body and neighbour-leg tags
+    were attributed to the lifted leg).  With one leg moving out of six plus the
+    body, most tags are static: take the tags whose shift is at or below the
+    median, and return the median shift vector and median turn over them, plus
+    the median absolute deviation of their residual shift (the noise floor).
+    Fewer than BODY_MIN_TAGS common tags: no reference (zeros); a whole yawing leg
+    can be three of four visible tags, and then there is no static majority to trust."""
+    common = [t for t in a.keys() & b.keys() if 0.75 < edge_px(b[t]) / (edge_px(a[t]) + 1e-9) < 1.33]
+    if len(common) < BODY_MIN_TAGS:
+        return np.zeros(2), 0.0, 0.0
+    shifts = {t: center(b[t]) - center(a[t]) for t in common}
+    turns = {t: turn_deg(a[t], b[t]) for t in common}
+    mags = np.array([float(np.linalg.norm(v)) for v in shifts.values()])
+    static = [t for t in common if float(np.linalg.norm(shifts[t])) <= float(np.median(mags))]
+    ref = np.median(np.stack([shifts[t] for t in static]), axis=0)
+    ref_turn = float(np.median([turns[t] for t in static]))
+    mad = float(np.median([np.linalg.norm(shifts[t] - ref) for t in static]))
+    return ref, ref_turn, mad
+
+
 def moved(a: dict[int, np.ndarray], b: dict[int, np.ndarray]) -> tuple[set[int], set[int]]:
-    """Tags seen whole in both a and b that moved / stayed, by centre shift or in-plane turn.
+    """Tags seen whole in both a and b that moved / stayed, by centre shift or in-plane turn,
+    after subtracting the body's own motion (``body_motion``).
 
     A tag whose apparent size changed a lot between the two states was
     partly hidden in one of them; its corners are not evidence either way."""
     mv, st = set(), set()
+    ref, ref_turn, mad = body_motion(a, b)
     for tid in a.keys() & b.keys():
         ca, cb = a[tid], b[tid]
         ratio = edge_px(cb) / (edge_px(ca) + 1e-9)
         if not 0.75 < ratio < 1.33:
             continue
-        shift = float(np.linalg.norm(center(ca) - center(cb)))
-        turn = abs(turn_deg(ca, cb))
-        thr = max(MOVE_PX_FLOOR, MOVE_EDGE_FRAC * edge_px(ca))
+        shift = float(np.linalg.norm((center(cb) - center(ca)) - ref))
+        turn = abs(turn_deg(ca, cb) - ref_turn)
+        # noise floor: the static majority's own scatter, so a rocking body never clears the bar
+        thr = max(MOVE_PX_FLOOR, MOVE_EDGE_FRAC * edge_px(ca), BODY_NOISE_MULT * mad)
         # A lid lifted toward a top camera may barely shift or turn but grows;
         # autofocus and frame noise change a median-of-3 size by well under this.
         grew = abs(ratio - 1.0) > MOVE_SCALE_FRAC and edge_px(ca) > 12.0
@@ -648,11 +520,13 @@ def moved_antisymmetric(base: dict[int, np.ndarray], plus: dict[int, np.ndarray]
     """For a +/- joint swing about a vertical axis: a tag on the moving link turns one
     way then the other. Occlusion flicker does not."""
     mv, st = set(), set()
+    _, ref_p, _ = body_motion(base, plus)
+    _, ref_m, _ = body_motion(base, minus)
     for tid in base.keys() & plus.keys() & minus.keys():
         cb, cp, cm = base[tid], plus[tid], minus[tid]
         if not (0.75 < edge_px(cp) / (edge_px(cb) + 1e-9) < 1.33 and 0.75 < edge_px(cm) / (edge_px(cb) + 1e-9) < 1.33):
             continue
-        tp, tm = turn_deg(cb, cp), turn_deg(cb, cm)
+        tp, tm = turn_deg(cb, cp) - ref_p, turn_deg(cb, cm) - ref_m       # body rock removed
         sp = float(np.linalg.norm(center(cp) - center(cb))); sm = float(np.linalg.norm(center(cm) - center(cb)))
         thr = max(MOVE_PX_FLOOR, MOVE_EDGE_FRAC * edge_px(cb))
         turned = abs(tp) > MOVE_DEG and abs(tm) > MOVE_DEG and (tp > 0) != (tm > 0)
@@ -685,9 +559,11 @@ def partition_leg(zero: dict, lifted: dict, yawed: list[dict], knee: dict) -> di
     coxa = yaw_mv - femur - tibia
     # A tag that turned with the knee but not with the hip is contradictory.
     contradictions = sorted((tibia - hip_mv) | (femur & coxa))
+    rock = {int(c): round(float(np.linalg.norm(body_motion(zero[c]["tags"], lifted[c]["tags"])[0])), 1) for c in cams}
     return {"coxa": sorted(coxa), "femur": sorted(femur), "tibia": sorted(tibia),
             "conflicts": sorted(hip_conf | yaw_conf | knee_conf), "contradictions": contradictions,
-            "moved_hip": sorted(hip_mv), "moved_yaw": sorted(yaw_mv), "moved_knee": sorted(knee_mv)}
+            "moved_hip": sorted(hip_mv), "moved_yaw": sorted(yaw_mv), "moved_knee": sorted(knee_mv),
+            "body_rock_px": rock}
 
 
 # ---------------------------------------------------------------- geometry
@@ -1298,23 +1174,33 @@ def motion_pass(robot: Robot, cams: Cameras, out: Path, log: Callable[[str], Non
     yaw_senses: dict[int, Optional[str]] = {}
     for leg in legs:
         j0, j1, j2 = 3 * leg, 3 * leg + 1, 3 * leg + 2
-        # Fresh baseline for this leg: command zero (torque held) and look again, so a
-        # joint that sagged while limp between legs is not read as motion.
-        robot.move([0.0] * 18)
-        zero_leg = cams.observe()
-        q = [0.0] * 18
-        q[j1] = HIP_LIFT
-        shorts = []
-        r = robot.move(q); shorts.append(("hip", r.get("short"))); lifted = cams.observe()
-        yawed = []
-        for yaw in (YAW_SWING, -YAW_SWING):
-            q[j0] = yaw
-            r = robot.move(q); shorts.append((f"yaw{yaw:+.0f}", r.get("short"))); yawed.append(cams.observe())
-        q[j0] = 0.0
-        q[j2] = KNEE_LIFT
-        r = robot.move(q); shorts.append(("knee", r.get("short"))); knee = cams.observe()
-        robot.move([0.0] * 18)
+        try:
+            # Fresh baseline for this leg: command zero (torque held) and look again, so a
+            # joint that sagged while limp between legs is not read as motion.
+            robot.move([0.0] * 18)
+            zero_leg = cams.observe()
+            q = [0.0] * 18
+            q[j1] = HIP_LIFT
+            shorts = []
+            r = robot.move(q); shorts.append(("hip", r.get("short"))); lifted = cams.observe()
+            yawed = []
+            for yaw in (YAW_SWING, -YAW_SWING):
+                q[j0] = yaw
+                r = robot.move(q); shorts.append((f"yaw{yaw:+.0f}", r.get("short"))); yawed.append(cams.observe())
+            q[j0] = 0.0
+            q[j2] = KNEE_LIFT
+            r = robot.move(q); shorts.append(("knee", r.get("short"))); knee = cams.observe()
+            robot.move([0.0] * 18)
+        except (RuntimeError, OSError, urllib.error.URLError) as exc:
+            # the robot stopped answering (2026-09-21: every servo dropped off the bus mid-pass): keep what
+            # the earlier legs gave, say so, and let the report be written
+            log(f"leg {leg}: ABORTED, robot stopped answering ({exc}); remaining legs skipped")
+            leg_reports[leg] = {"coxa": [], "femur": [], "tibia": [], "conflicts": [], "contradictions": [],
+                                "moved_hip": [], "moved_yaw": [], "moved_knee": [], "error": str(exc)}
+            break
         part = partition_leg(zero_leg, lifted, yawed, knee)
+        if any(v > MOVE_PX_FLOOR for v in part["body_rock_px"].values()):
+            log(f"leg {leg}: body rocked {part['body_rock_px']} px per camera (compensated)")
         part["joints_short_of_target"] = [(s_, sh) for s_, sh in shorts if sh]
         if part["joints_short_of_target"]:
             log(f"leg {leg}: joints short of target {part['joints_short_of_target']}")
@@ -1489,6 +1375,7 @@ def run(args) -> int:
             motion = motion_pass(robot, cams, out, log, top=top, anchors=anchors, legs=legs, claude=not args.no_claude)
             report.update(legs=motion["legs"], claude_cost_usd=motion["claude_cost_usd"],
                           yaw_sense_votes=motion["yaw_sense_votes"])
+            (out / "report.json").write_text(json.dumps({**report, "log": log.lines, "provisional": True}, indent=1, default=str))
             votes = votes_from_reports([motion])
             if motion["yaw_sense"]:
                 yaw_sense, yaw_source = motion["yaw_sense"], f"measured by the {report['generated'][:10]} motion pass"

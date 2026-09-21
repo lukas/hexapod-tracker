@@ -86,8 +86,14 @@ def enhance_for_tag_detection(gray: np.ndarray) -> np.ndarray:
 def detect_tag_corners_with_duplicates(
     gray: np.ndarray,
     detector: cv2.aruco.ArucoDetector,
+    *,
+    enhance: bool = True,
 ) -> tuple[dict[int, np.ndarray], list[int]]:
     """Fuse native-resolution and 2x detections, preferring native corners.
+
+    ``enhance=False`` runs the native pass only: a quarter of the cost, and on a
+    camera whose tags are over ~20 px it finds the same ids with the same corners
+    (measured on the top camera 2026-09-20: identical down to a 22 px anchor).
 
     An id decoded at two places in the same image (a spare tag lying in view,
     a printed sheet in a parts bag) is ambiguous: neither copy is returned and
@@ -95,7 +101,8 @@ def detect_tag_corners_with_duplicates(
     """
     detections: dict[int, np.ndarray] = {}
     ambiguous: set[int] = set()
-    for image, scale in ((gray, 1.0), (enhance_for_tag_detection(gray), 2.0)):
+    passes = ((gray, 1.0), (enhance_for_tag_detection(gray), 2.0)) if enhance else ((gray, 1.0),)
+    for image, scale in passes:
         corners, ids, _rejected = detector.detectMarkers(image)
         if ids is None:
             continue

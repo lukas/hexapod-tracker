@@ -478,11 +478,18 @@ class AVFoundationYuvCapture:
             y_for_color, uv_for_color, cv2.COLOR_YUV2BGR_NV12
         )
 
-    def read(self) -> tuple[bool, np.ndarray | None]:
+    def read(self, wait: bool = True) -> tuple[bool, np.ndarray | None]:
+        """Next unseen frame. ``wait=False`` returns ``(False, None)`` at once when no new frame
+        has arrived since the last read, without touching ``last_error`` (an auxiliary camera
+        polled between another camera's frames)."""
         if not self.isOpened():
             self.last_error = "native AVFoundation capture is unavailable"
             return False, None
         self._ensure_thread()
+        if not wait:
+            with self._condition:
+                if self._sequence <= self._read_sequence or self._latest_planes is None:
+                    return False, None
         deadline = time.monotonic() + self.frame_timeout_s
         with self._condition:
             while (

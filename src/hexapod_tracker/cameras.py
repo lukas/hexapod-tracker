@@ -7,7 +7,11 @@ Three things live here:
   and what we know about it: its role (``top``, ``side``, ...), the capture
   size and frame rate to open it at, its intrinsics, and its saved floor fit
   (homography from the floor AprilTags, with the numbers that say how good
-  the fit was). Cameras are keyed by their AVFoundation ``uniqueID`` (the
+  the fit was), and optionally ``uvc``: UVC controls to push through
+  ``uvc-util`` every time the camera is opened (``{"auto-focus": false,
+  "focus-abs": 496}`` pins a ceiling camera's lens on the floor; the firmware
+  default is autofocus, which hunts and refocuses on whoever stands under
+  it). Cameras are keyed by their AVFoundation ``uniqueID`` (the
   "stable id"), never by a slot number. That id follows the USB port, not the
   device, so every entry also carries ``device_name`` and ``adopt`` moves an
   entry to a new id when a camera is replugged elsewhere.
@@ -18,8 +22,10 @@ Three things live here:
   HTTP server served (``/api/detections.json`` and ``/api/poses``), so
   everything that parsed those keeps working.
 
-* **A session** -- ``hexapod-cameras session --out DIR --roles top --video``
-  is the process a run starts. For the life of the run it writes, into
+* **A session** -- ``hexapod-cameras session --out DIR --roles top,side --hz 20 --aux-hz 2``
+  is the process a run starts. One *primary* camera (``--primary``, default ``top``) paces it:
+  a state per primary frame up to ``--hz``; the other cameras are polled without waiting,
+  recorded, and detected ``--aux-hz`` times a second. For the life of the run it writes, into
   ``DIR``: ``state.json`` (atomically replaced; sequence number, detections,
   poses), ``latest_<role>.jpg``, ``vision.jsonl`` (one line per state), and
   ``<role>.mp4`` with ``<role>_timestamps.csv`` (the capture time of every
@@ -43,6 +49,7 @@ import select
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,6 +71,8 @@ SCHEMA_VERSION = 1
 DEFAULT_ROLES = ("top",)
 DEFAULT_PREFERRED_SIZES = ((1920, 1440), (1920, 1080), (1280, 720))
 DEFAULT_PROCESSING_WIDTH = 1280
+UVC_UTIL_ENV = "HEXAPOD_UVC_UTIL"
+DEFAULT_UVC_UTIL = Path.home() / ".hexapod" / "bin" / "uvc-util"     # built from github.com/jtfrey/uvc-util
 MIN_ANCHORS_TO_REFIT = 3     # fewer visible floor anchors than this: keep the saved floor fit
 FFMPEG = os.environ.get("HEXAPOD_FFMPEG", "ffmpeg")
 
@@ -245,12 +254,63 @@ def default_capture_factory(slot: int, stable_id: str, entry: dict[str, Any]) ->
     )
 
 
+
+# --------------------------------------------------------------------------- UVC controls (focus etc.)
+
+def uvc_location_id(stable_id: str) -> str | None:
+    """AVFoundation's uniqueID for a UVC camera is ``locationID << 32 | vendor << 16 | product``
+    (``0x110000032e40362`` -> location ``0x01100000``), which is how uvc-util selects a device."""
+    try:
+        return f"0x{int(str(stable_id), 16) >> 32:08x}"
+    except ValueError:
+        return None
+
+
+def apply_uvc_controls(stable_id: str, controls: dict[str, Any], *, runner: Callable[..., Any] = subprocess.run,
+                       util: str | os.PathLike[str] | None = None, log: Callable[[str], None] = print,
+                       sleep: Callable[[float], None] = time.sleep) -> dict[str, str]:
+    """Push the registry entry's ``uvc`` controls to the camera through uvc-util.
+
+    Reads each control first and only sets what differs; ``auto-focus`` goes first so
+    the firmware does not move the lens after we placed it; waits a second for the lens
+    to travel only when ``focus-abs`` actually changed. Never raises: without the tool
+    the camera still opens, just with whatever the firmware chose. Returns what changed."""
+    if not controls:
+        return {}
+    location = uvc_location_id(stable_id)
+    if location is None:
+        log(f"uvc: {stable_id!r} is not a UVC unique id; controls not applied")
+        return {}
+    tool = Path(util or os.environ.get(UVC_UTIL_ENV) or DEFAULT_UVC_UTIL).expanduser()
+    if not tool.exists():
+        log(f"uvc: {tool} not found; controls {sorted(controls)} not applied")
+        return {}
+    changed: dict[str, str] = {}
+    for name in sorted(controls, key=lambda k: (k != "auto-focus", k)):
+        want = controls[name]
+        want_s = ("true" if want else "false") if isinstance(want, bool) else str(want)
+        try:
+            got = runner([str(tool), "-L", location, "-o", name], capture_output=True, text=True, timeout=10)
+            if got.returncode == 0 and (got.stdout or "").strip() == want_s:
+                continue
+            res = runner([str(tool), "-L", location, "-s", f"{name}={want_s}"], capture_output=True, text=True, timeout=10)
+            if res.returncode != 0:
+                log(f"uvc: could not set {name}={want_s} on {location}: {(res.stderr or res.stdout or '').strip()[:200]}")
+                continue
+            changed[name] = want_s
+        except (OSError, subprocess.SubprocessError) as e:
+            log(f"uvc: {name} on {location}: {e}")
+    if "focus-abs" in changed:
+        sleep(1.0)
+    return changed
+
+
 class Camera:
     """One opened camera: frames plus tag detection, released on close."""
 
     def __init__(self, role: str, index: int, stable_id: str, entry: dict[str, Any], *,
                  capture_factory: Callable[[int, str, dict[str, Any]], Any] = default_capture_factory,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, log: Callable[[str], None] = print):
         self.role, self.index, self.stable_id, self.entry = role, index, stable_id, entry
         self._factory = capture_factory
         self._clock = clock
@@ -260,17 +320,33 @@ class Camera:
         self.detect_seq = 0
         self.last: Frame | None = None
         self.error: str | None = None
+        self.uvc_changed: dict[str, str] = {}
+        self._log = log
+        self._fused_ids: set[int] = set()      # what the last full (native + 2x) pass found, and when
+        self._fused_t = -math.inf
+        self._native_misses = 0                # consecutive fast detections that had to fall back: 3+ and we skip the native pass
 
     def open(self) -> None:
         self.capture = self._factory(self.index, self.stable_id, self.entry)
         if not self.capture.isOpened():
             self.error = getattr(self.capture, "last_error", None) or "camera did not open"
             raise RuntimeError(f"{self.role} ({self.entry.get('device_name')} {self.stable_id}): {self.error}")
+        if self.entry.get("uvc"):
+            self.uvc_changed = apply_uvc_controls(self.stable_id, dict(self.entry["uvc"]), log=self._log)
 
-    def grab(self) -> Frame | None:
-        ok, bgr = self.capture.read()
+    def grab(self, wait: bool = True) -> Frame | None:
+        """Next frame. ``wait=False`` polls: None when no new frame has arrived yet, and that is
+        not an error (captures without a non-blocking read just block, as before)."""
+        if wait:
+            ok, bgr = self.capture.read()
+        else:
+            try:
+                ok, bgr = self.capture.read(wait=False)
+            except TypeError:
+                ok, bgr = self.capture.read()
         if not ok or bgr is None:
-            self.error = getattr(self.capture, "last_error", None) or "no frame"
+            if wait:
+                self.error = getattr(self.capture, "last_error", None) or "no frame"
             return None
         if self.entry.get("rotate_180"):
             bgr = cv2.rotate(bgr, cv2.ROTATE_180)
@@ -284,8 +360,28 @@ class Camera:
         self.last = Frame(bgr, gray, self._clock(), self.seq)
         return self.last
 
-    def detect(self, frame: Frame) -> Observation:
-        corners, duplicates = detect_tag_corners_with_duplicates(frame.gray, self.detector)
+    def detect(self, frame: Frame, *, fast: bool = False, full_every_s: float = 1.0) -> Observation:
+        """Tags in the frame. ``fast`` runs the native pass only (a quarter of the cost; the primary
+        camera of a session) and falls back to the full native + 2x pass when the native pass lost an
+        id the last full pass had (a 22 px chassis tag from the ceiling decodes only upscaled), and
+        once every ``full_every_s`` anyway so newly visible small tags are picked up."""
+        if fast and self._native_misses >= 3 and self._clock() - self._fused_t < full_every_s:
+            # this camera's tags need the 2x pass (the ceiling's 22 px chassis tag): do not pay for a
+            # native pass that will come up short; try native again once a second
+            corners, duplicates = detect_tag_corners_with_duplicates(frame.gray, self.detector)
+            self._fused_ids = set(corners)
+        else:
+            corners, duplicates = detect_tag_corners_with_duplicates(frame.gray, self.detector, enhance=not fast)
+            if fast:
+                now = self._clock()
+                missing = bool(self._fused_ids - set(corners))
+                if now - self._fused_t >= full_every_s or missing:
+                    native_ids = set(corners)
+                    corners, duplicates = detect_tag_corners_with_duplicates(frame.gray, self.detector)
+                    self._fused_ids, self._fused_t = set(corners), now
+                    self._native_misses = self._native_misses + 1 if (self._fused_ids - native_ids) else 0
+            else:
+                self._fused_ids, self._fused_t = set(corners), self._clock()
         scale = frame.width / frame.gray.shape[1]
         if scale != 1.0:
             corners = {tid: c * scale for tid, c in corners.items()}
@@ -397,7 +493,7 @@ class Rig:
         if missing:
             raise KeyError(f"no camera has role {missing}; run `hexapod-cameras list` then `assign`")
         self.cameras = [Camera(role, i, by_role[role], doc["cameras"][by_role[role]], capture_factory=capture_factory,
-                               clock=clock) for i, role in enumerate(self.roles)]
+                               clock=clock, log=log) for i, role in enumerate(self.roles)]
         self.configs = load_configs(doc, configs)
         self.estimator = PlanarPoseEstimator(self.configs["floor_map"], self.configs["part_map"],
                                              self.configs["robot_layout"], calibration_for_slots(self.cameras))
@@ -618,6 +714,59 @@ class VideoRecorder:
             self._ts.close()
 
 
+class Worker:
+    """One background thread running coalesced jobs: ``submit(key, fn)`` keeps only the
+    newest job per key, so a slow job (a 4K aux detection, a video frame going into ffmpeg)
+    never queues up behind itself; it just skips frames. ``inline=True`` runs jobs at once
+    on the caller's thread (tests, and anything that wants determinism)."""
+
+    def __init__(self, name: str, *, inline: bool = False, log: Callable[[str], None] = print):
+        self.name, self.inline, self.log = name, inline, log
+        self._jobs: dict[Any, Callable[[], None]] = {}
+        self._cv = threading.Condition()
+        self._stop = False
+        self.ran = 0
+        self._thread: threading.Thread | None = None
+        if not inline:
+            self._thread = threading.Thread(target=self._run, name=f"cameras-{name}", daemon=True)
+            self._thread.start()
+
+    def submit(self, key: Any, fn: Callable[[], None]) -> None:
+        if self.inline:
+            self._call(fn)
+            return
+        with self._cv:
+            self._jobs[key] = fn
+            self._cv.notify()
+
+    def _call(self, fn: Callable[[], None]) -> None:
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001  -- one bad frame must not end the session
+            self.log(f"{self.name}: {type(e).__name__}: {e}")
+        self.ran += 1
+
+    def _run(self) -> None:
+        while True:
+            with self._cv:
+                while not self._jobs and not self._stop:
+                    self._cv.wait()
+                if not self._jobs:
+                    return
+                key = next(iter(self._jobs))
+                fn = self._jobs.pop(key)
+            self._call(fn)
+
+    def close(self) -> None:
+        """Finish what is queued, then stop."""
+        with self._cv:
+            self._stop = True
+            self._cv.notify_all()
+        if self._thread is not None:
+            self._thread.join(timeout=30)
+
+
+
 # --------------------------------------------------------------------------- session
 
 
@@ -643,13 +792,38 @@ def _stdin_closed(stdin: Any) -> bool:
         return True
 
 
-def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DEFAULT_ROLES, hz: float = 5.0,
+def pick_primary(roles: Sequence[str], primary: str | None = None) -> str:
+    """The camera a session paces itself on: the one asked for, else ``top``, else the first."""
+    if primary and primary in roles:
+        return primary
+    return "top" if "top" in roles else roles[0]
+
+
+def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DEFAULT_ROLES, hz: float = 20.0,
+                aux_hz: float = 2.0, primary: str | None = None, jpeg_hz: float = 1.0,
                 video: bool = True, video_fps: float = 10.0, seconds: float | None = None, stdin: Any = None,
-                stop_file: bool = True, capture_factory: Callable[..., Any] = default_capture_factory,
+                stop_file: bool = True, background: bool = True, capture_factory: Callable[..., Any] = default_capture_factory,
                 clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
                 recorder_factory: Callable[..., Any] = VideoRecorder, configs: Path = CONFIG_DIR,
                 log: Callable[[str], None] = print) -> dict[str, Any]:
-    """Own the cameras for one run; write state.json / latest_<role>.jpg / vision.jsonl / <role>.mp4."""
+    """Own the cameras for one run; write state.json / latest_<role>.jpg / vision.jsonl / <role>.mp4.
+
+    One camera, the *primary*, sets the pace: every state waits for its next frame (a
+    blocking grab), detects on it natively (no 2x pass) and writes state.json + a
+    vision.jsonl line, up to ``hz`` times a second. The other cameras are *auxiliary*:
+    polled without waiting, recorded, and detected only ``aux_hz`` times a second each,
+    staggered so two of them never detect in the same state. Their entry in the state
+    carries the tags of their last *detected* frame with that frame's age, so a consumer
+    can tell a fresh detection from one that is half a second old. Video frames are
+    written at most ``video_fps`` per second per camera (capped by ``hz``), the
+    ``latest_<role>.jpg`` previews at ``jpeg_hz``. The primary can be changed while running:
+    write ``{"primary": "<role>"}`` to ``DIR/control.json`` (the loop watches its mtime) and the
+    next state is paced by that camera; the old primary becomes auxiliary at once. Every switch
+    is listed in session.json ``primary_switches``. Aux detection, video frames and previews
+    run on two background workers (``background=False`` runs them inline), so the loop thread
+    only ever waits for the primary's frame and detects on it. Before 2026-09-20 every camera was
+    grabbed in turn (each grab waiting for that camera's next frame) and detected with
+    the 2x pass at every state, which held three cameras to 4 states a second."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stop_path = out_dir / "STOP"
@@ -667,15 +841,84 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
             pass
 
     recorders: dict[str, Any] = {}
-    summary: dict[str, Any] = {"out_dir": str(out_dir), "roles": list(roles), "states": 0, "frames": {}, "video": {},
+    primary_role = pick_primary(list(roles), primary)
+    summary: dict[str, Any] = {"out_dir": str(out_dir), "roles": list(roles), "primary": primary_role, "hz": hz,
+                               "aux_hz": aux_hz, "states": 0, "frames": {}, "detections": {}, "video": {},
                                "started_unix": clock()}
     period = 1.0 / max(0.5, hz)
+    aux_period = 1.0 / max(0.1, aux_hz)
+    video_period = 1.0 / max(1.0, video_fps)
+    jpeg_period = 1.0 / max(0.1, jpeg_hz)
     with Rig(doc, roles, configs=configs, capture_factory=capture_factory, clock=clock, log=log) as rig:
-        write_atomic(out_dir / "session.json", json.dumps({"pid": os.getpid(), "roles": list(roles),
+        write_atomic(out_dir / "session.json", json.dumps({"pid": os.getpid(), "roles": list(roles), "primary": primary_role,
+                                                            "hz": hz, "aux_hz": aux_hz, "video_fps": video_fps,
                                                             "cameras": [c.info() for c in rig.cameras],
                                                             "started_unix": summary["started_unix"]}, indent=1))
+        prim = rig.camera(primary_role)
+        aux = [c for c in rig.cameras if c is not prim]
+        detect_worker = Worker("aux-detect", inline=not background, log=log)
+        io_worker = Worker("video", inline=not background, log=log)
         t0 = clock()
         next_state = t0
+        next_detect = {c.role: t0 + aux_period * i / max(1, len(aux)) for i, c in enumerate(aux)}   # staggered
+        last_obs: dict[str, Observation] = {c.role: Observation(c.role, c.index, None) for c in rig.cameras}
+        newest: dict[str, Frame] = {}
+        last_video: dict[str, float] = {}
+        last_jpeg: dict[str, float] = {}
+        control_path = out_dir / "control.json"
+        control_seen: list[float | None] = [None]
+        summary["primary_switches"] = []
+
+        def apply_control(now: float) -> None:
+            """Re-point the pacing at another camera when control.json names one."""
+            nonlocal prim, aux
+            try:
+                m = control_path.stat().st_mtime
+            except OSError:
+                return
+            if m == control_seen[0]:
+                return
+            control_seen[0] = m
+            try:
+                want = json.loads(control_path.read_text()).get("primary")
+            except (OSError, ValueError):
+                return
+            if not want or want == prim.role:
+                return
+            if want not in [c.role for c in rig.cameras]:
+                log(f"control.json asks for primary {want!r}, not one of {[c.role for c in rig.cameras]}; ignored")
+                return
+            old = prim
+            prim = rig.camera(want)
+            aux = [c for c in rig.cameras if c is not prim]
+            next_detect[old.role] = now
+            next_detect.pop(prim.role, None)
+            summary["primary_switches"].append({"t": now, "from": old.role, "to": prim.role})
+            log(f"primary: {old.role} -> {prim.role}")
+
+        def record(cam: Camera, frame: Frame, now: float) -> None:
+            summary["frames"][cam.role] = summary["frames"].get(cam.role, 0) + 1
+            newest[cam.role] = frame
+            # a frame 3/4 of a video period after the last one counts: 20 fps frames gated at 15 fps
+            # then keep every frame instead of every other one (10 fps)
+            if video and now - last_video.get(cam.role, -math.inf) >= 0.75 * video_period - 1e-6:
+                rec = recorders.get(cam.role)
+                if rec is None:
+                    rec = recorders[cam.role] = recorder_factory(out_dir / f"{cam.role}.mp4", video_fps, (frame.width, frame.height))
+                io_worker.submit(("video", cam.role), lambda rec=rec, frame=frame: rec.write(frame))
+                last_video[cam.role] = now
+
+        def detect_aux(cam: Camera, frame: Frame) -> None:
+            last_obs[cam.role] = cam.detect(frame)
+            summary["detections"][cam.role] = summary["detections"].get(cam.role, 0) + 1
+
+        def write_jpeg(role: str, frame: Frame) -> None:
+            ok, jpg = cv2.imencode(".jpg", frame.bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+            if ok:
+                tmp = out_dir / f"latest_{role}.jpg.tmp"
+                tmp.write_bytes(jpg.tobytes())
+                os.replace(tmp, out_dir / f"latest_{role}.jpg")
+
         with open(out_dir / "vision.jsonl", "a") as jsonl:
             while stopping["why"] is None:
                 now = clock()
@@ -688,45 +931,63 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
                 if _stdin_closed(stdin):
                     stopping["why"] = "stdin closed"
                     break
-                # Detect tags only when a state is due: full-frame detection on every
-                # camera every frame held a two-camera session to ~7 fps (2026-09-17);
-                # the frames in between are video only.
-                state_due = now >= next_state
-                observations = rig.observe(detect=state_due)
-                for obs in observations:
-                    if obs.frame is None:
+                apply_control(now)
+                before = now
+                frame = prim.grab()                       # blocks for the primary's next frame: this is the pace
+                now = clock()
+                if frame is None:
+                    sleep(0.05)
+                    continue
+                record(prim, frame, now)
+                if now < next_state - 0.25 * period:
+                    # Too early for a state: this frame is video only. A frame up to a quarter
+                    # period early still counts, so a camera running at about ``hz`` gives a
+                    # state per frame; sleeping instead would land every state on a later frame
+                    # (30 fps frames + a 50 ms sleep = 15 Hz).
+                    if now - before < 1e-3:               # the frame was already waiting (or a fake): do not spin
+                        sleep(next_state - now)
+                    continue
+                last_obs[prim.role] = prim.detect(frame, fast=True)
+                summary["detections"][prim.role] = summary["detections"].get(prim.role, 0) + 1
+                for cam in aux:
+                    # Poll an aux camera only when something wants its frame: converting a
+                    # frame nobody uses costs the loop thread 2-8 ms each.
+                    if (now - last_video.get(cam.role, -math.inf) < video_period - 1e-6 and now < next_detect[cam.role]
+                            and now - last_jpeg.get(cam.role, -math.inf) < jpeg_period - 1e-6):
                         continue
-                    summary["frames"][obs.role] = summary["frames"].get(obs.role, 0) + 1
-                    if video:
-                        rec = recorders.get(obs.role)
-                        if rec is None:
-                            rec = recorders[obs.role] = recorder_factory(out_dir / f"{obs.role}.mp4", video_fps,
-                                                                        (obs.frame.width, obs.frame.height))
-                        rec.write(obs.frame)
-                if state_due:
+                    f = cam.grab(wait=False)
+                    if f is None:
+                        continue
+                    record(cam, f, now)
+                    if now >= next_detect[cam.role]:
+                        detect_worker.submit(("detect", cam.role), lambda cam=cam, f=f: detect_aux(cam, f))
+                        next_detect[cam.role] = now + aux_period
+                observations = [last_obs[c.role] for c in rig.cameras]
+                state = rig.state(observations)
+                state["primary"] = prim.role
+                write_atomic(out_dir / "state.json", json.dumps(state))
+                for role, f in newest.items():
+                    if now - last_jpeg.get(role, -math.inf) >= jpeg_period - 1e-6:
+                        io_worker.submit(("jpeg", role), lambda role=role, f=f: write_jpeg(role, f))
+                        last_jpeg[role] = now
+                markers = state["poses"].get("markers") or {}
+                jsonl.write(json.dumps({
+                    "seq": state["seq"], "capture_unix": state["generated_at_unix_s"],
+                    "tags": {c["role"]: sorted(int(t) for t in c["tags"]) for c in state["cameras"]},
+                    "detect_age_s": {c["role"]: (round(c["frame_age_s"], 3) if c.get("frame_age_s") is not None else None)
+                                     for c in state["cameras"]},
+                    "markers": {k: {"status": m.get("status"), "position_mm": m.get("position_mm"),
+                                    "yaw": (m.get("rotation_degrees") or {}).get("yaw")}
+                                for k, m in markers.items() if m.get("status") == "tracked"},
+                }) + "\n")
+                jsonl.flush()
+                summary["states"] = state["seq"]
+                next_state += period
+                if next_state < now:                      # fell behind: do not try to catch up in a burst
                     next_state = now + period
-                    state = rig.state(observations)
-                    write_atomic(out_dir / "state.json", json.dumps(state))
-                    for obs in observations:
-                        if obs.frame is not None:
-                            ok, jpg = cv2.imencode(".jpg", obs.frame.bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-                            if ok:
-                                tmp = out_dir / f"latest_{obs.role}.jpg.tmp"
-                                tmp.write_bytes(jpg.tobytes())
-                                os.replace(tmp, out_dir / f"latest_{obs.role}.jpg")
-                    markers = state["poses"].get("markers") or {}
-                    jsonl.write(json.dumps({
-                        "seq": state["seq"], "capture_unix": state["generated_at_unix_s"],
-                        "tags": {c["role"]: sorted(int(t) for t in c["tags"]) for c in state["cameras"]},
-                        "markers": {k: {"status": m.get("status"), "position_mm": m.get("position_mm"),
-                                        "yaw": (m.get("rotation_degrees") or {}).get("yaw")}
-                                    for k, m in markers.items() if m.get("status") == "tracked"},
-                    }) + "\n")
-                    jsonl.flush()
-                    summary["states"] = state["seq"]
-                # pace to the video rate; state writes are gated above
-                spent = clock() - now
-                sleep(max(0.0, 1.0 / max(1.0, video_fps if video else hz) - spent))
+        summary["primary"] = prim.role         # the current one; the switches list has the history
+        detect_worker.close()
+        io_worker.close()                      # every queued frame is in ffmpeg before the pipes close
         for role, rec in recorders.items():
             rec.close()
             summary["video"][role] = {"path": str(rec.path), "frames": rec.frames, "fps": rec.fps}
@@ -923,7 +1184,8 @@ def cmd_check(args: argparse.Namespace, doc: dict[str, Any]) -> int:
 
 def cmd_session(args: argparse.Namespace, doc: dict[str, Any]) -> int:
     roles = [r.strip() for r in args.roles.split(",") if r.strip()]
-    summary = run_session(doc, Path(args.out), roles=roles, hz=args.hz, video=not args.no_video, video_fps=args.fps,
+    summary = run_session(doc, Path(args.out), roles=roles, hz=args.hz, aux_hz=args.aux_hz, primary=args.primary,
+                          video=not args.no_video, video_fps=args.fps,
                           seconds=args.seconds, stdin=(None if args.no_stdin else sys.stdin), stop_file=True)
     print(json.dumps(summary, indent=1))
     return 0
@@ -998,8 +1260,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("session", help="own the cameras for one run and write state/video into --out")
     s.add_argument("--out", required=True)
     s.add_argument("--roles", default=",".join(DEFAULT_ROLES))
-    s.add_argument("--hz", type=float, default=5.0, help="state.json / vision.jsonl rate")
-    s.add_argument("--fps", type=float, default=10.0, help="video frame rate")
+    s.add_argument("--hz", type=float, default=20.0, help="state.json / vision.jsonl rate, paced by the primary camera's frames")
+    s.add_argument("--aux-hz", type=float, default=2.0, help="tag detection rate of every camera but the primary")
+    s.add_argument("--primary", default=None, help="the camera that sets the pace (default: top if present, else the first role)")
+    s.add_argument("--fps", type=float, default=10.0, help="video frame rate (at most; capped by --hz)")
     s.add_argument("--seconds", type=float, default=None)
     s.add_argument("--no-video", action="store_true")
     s.add_argument("--no-stdin", action="store_true", help="do not stop when stdin closes")

@@ -130,6 +130,7 @@ class AVFoundationYuvCapture:
         self._thread: threading.Thread | None = None
         self._sequence = 0
         self._read_sequence = 0
+        self._latest_time = 0.0          # time.time() when the newest frame arrived (callback thread)
         self._latest_planes: tuple[np.ndarray, np.ndarray] | None = None
         self._last_read_planes: tuple[np.ndarray, np.ndarray] | None = None
         self._session: Any | None = None
@@ -445,6 +446,7 @@ class AVFoundationYuvCapture:
 
         with self._condition:
             self._latest_planes = (y, uv)
+            self._latest_time = time.time()
             self.capture_image_size_px = (width, height)
             self._sequence += 1
             self._condition.notify_all()
@@ -513,6 +515,30 @@ class AVFoundationYuvCapture:
             self._last_read_planes = (y, uv)
         self.last_error = None
         return True, self._frame_from_planes(y, uv)
+
+    def wait_frame(
+        self, after_seq: int, timeout_s: float = 0.5
+    ) -> tuple[int, float, tuple[np.ndarray, np.ndarray]] | None:
+        """Block until a frame newer than ``after_seq`` exists; return
+        ``(seq, arrival_unix, (y, uv))`` or None on timeout / release.
+
+        A second, independent consumer for the SAME capture (2026-09-23: the
+        native-rate video recorder).  Unlike ``read()`` it never advances
+        ``_read_sequence`` and never touches ``detection_gray`` /
+        ``tracking_gray``, so the detection loop keeps every frame it would
+        have had.  Callers that fall behind simply get the newest frame; the
+        skipped sequence numbers show the drop.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._condition:
+            while self._sequence <= after_seq and not self._released:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return None
+                self._condition.wait(remaining)
+            if self._released or self._latest_planes is None:
+                return None
+            return self._sequence, self._latest_time, self._latest_planes
 
     def native_planes(self) -> tuple[np.ndarray, np.ndarray] | None:
         """Return the full-resolution Y and interleaved UV planes last read.

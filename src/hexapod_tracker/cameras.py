@@ -695,11 +695,33 @@ class Rig:
 # --------------------------------------------------------------------------- video
 
 
+# H.264 encoder for the session videos.  2026-09-23: three parallel software x264 encodes (one of them 4K
+# portrait) were the slow job that coalesced video down to 5-10 fps; the Mac's hardware encoder
+# (VideoToolbox, present in ffmpeg 9) costs the CPU almost nothing.  Override with HEXAPOD_VIDEO_CODEC.
+VIDEO_CODEC = os.environ.get("HEXAPOD_VIDEO_CODEC") or ("h264_videotoolbox" if sys.platform == "darwin" else "libx264")
+
+
+def _encoder_args(codec: str) -> list[str]:
+    if codec == "libx264":
+        return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
+    if codec.endswith("_videotoolbox"):
+        return ["-c:v", codec, "-q:v", "60", "-realtime", "1"]
+    return ["-c:v", codec]
+
+
+def _rotation_filter(entry: dict[str, Any]) -> list[str]:
+    """ffmpeg -vf equivalent of frame_rotation(entry): the registry's clockwise ``rotate`` degrees."""
+    deg = int(entry.get("rotate") or 0) % 360
+    if entry.get("rotate_180") and deg == 0:
+        deg = 180
+    return {0: [], 90: ["-vf", "transpose=1"], 180: ["-vf", "transpose=1,transpose=1"], 270: ["-vf", "transpose=2"]}[deg]
+
+
 class VideoRecorder:
     """Frames -> H.264 mp4 through an ffmpeg pipe, with a CSV of capture times per frame."""
 
     def __init__(self, path: Path, fps: float, size: tuple[int, int], *, ffmpeg: str = FFMPEG,
-                 popen: Callable[..., Any] = subprocess.Popen):
+                 popen: Callable[..., Any] = subprocess.Popen, codec: str = VIDEO_CODEC):
         self.path = Path(path)
         self.fps = float(fps)
         self.size = size
@@ -709,7 +731,7 @@ class VideoRecorder:
         self._csv.writerow(["frame", "captured_unix", "seq"])
         self.proc = popen([ffmpeg, "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
                            "-s", f"{size[0]}x{size[1]}", "-r", f"{self.fps:g}", "-i", "-",
-                           "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+                           *_encoder_args(codec), "-pix_fmt", "yuv420p",
                            "-movflags", "+faststart", str(self.path)], stdin=subprocess.PIPE)
 
     def write(self, frame: Frame) -> None:
@@ -726,6 +748,103 @@ class VideoRecorder:
             self.proc.wait(timeout=30)
         finally:
             self._ts.close()
+
+
+class NativeVideoRecorder:
+    """Every frame the camera delivers -> H.264 mp4, fed as raw NV12 planes (no cv2 work in Python).
+
+    2026-09-23 (Lukas: "when tracking the hexapod for an experiment I need one video to be like
+    20 Hz"): the loop-gated ``VideoRecorder`` can never beat the detection loop (12-17 Hz with the
+    top camera pacing, 6 Hz with the ceiling), and coalescing dropped it to 5-10 fps.  This one is
+    fed straight from the capture callback's planes at the camera's own rate; rotation happens in
+    ffmpeg (``transpose``), so the loop thread only pays for a pipe write.
+    """
+
+    def __init__(self, path: Path, fps: float, size: tuple[int, int], *, entry: dict[str, Any] | None = None,
+                 ffmpeg: str = FFMPEG, popen: Callable[..., Any] = subprocess.Popen, codec: str = VIDEO_CODEC):
+        self.path = Path(path)
+        self.fps = float(fps)
+        self.size = size                    # native (unrotated) width, height
+        self.frames = 0
+        self.native = True
+        self._ts = open(self.path.with_name(self.path.stem + "_timestamps.csv"), "w", newline="")
+        self._csv = csv.writer(self._ts)
+        self._csv.writerow(["frame", "captured_unix", "seq"])
+        self.proc = popen([ffmpeg, "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
+                           "-s", f"{size[0]}x{size[1]}", "-r", f"{self.fps:g}", "-i", "-",
+                           *_rotation_filter(entry or {}), *_encoder_args(codec), "-pix_fmt", "yuv420p",
+                           "-movflags", "+faststart", str(self.path)], stdin=subprocess.PIPE)
+
+    def write_planes(self, y: np.ndarray, uv: np.ndarray, captured_unix: float, seq: int) -> None:
+        self.proc.stdin.write(np.ascontiguousarray(y).tobytes())
+        self.proc.stdin.write(np.ascontiguousarray(uv).tobytes())
+        self._csv.writerow([self.frames, f"{captured_unix:.6f}", seq])
+        self.frames += 1
+
+    def close(self) -> None:
+        try:
+            self.proc.stdin.close()
+            self.proc.wait(timeout=30)
+        finally:
+            self._ts.close()
+
+
+class NativeRecordThread:
+    """Feeds a ``NativeVideoRecorder`` from ``capture.wait_frame`` on its own thread.
+
+    Waits in half-second slices so ``stop()`` is seen promptly; a slow write just means the next
+    wait returns a newer frame (the CSV's seq column shows the skip).  The recorder is created on
+    the first frame, once the native size is known.
+    """
+
+    def __init__(self, cam: Camera, path: Path, *, recorder_factory: Callable[..., Any] = NativeVideoRecorder,
+                 log: Callable[[str], None] = print):
+        self.cam, self.path, self._factory, self._log = cam, Path(path), recorder_factory, log
+        self.recorder: Any = None
+        self.error: str | None = None
+        self.started_unix: float | None = None
+        self.last_unix: float | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name=f"native-record-{cam.role}", daemon=True)
+
+    @staticmethod
+    def supported(cam: Camera) -> bool:
+        return callable(getattr(cam.capture, "wait_frame", None))
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        seq = 0
+        fps = float(self.cam.entry.get("fps") or getattr(self.cam.capture, "fps", 0) or 30.0)
+        try:
+            while not self._stop.is_set():
+                got = self.cam.capture.wait_frame(seq, 0.5)
+                if got is None:
+                    continue
+                seq, t, (y, uv) = got
+                if self.recorder is None:
+                    self.recorder = self._factory(self.path, fps, (int(y.shape[1]), int(y.shape[0])), entry=self.cam.entry)
+                    self.started_unix = t
+                self.recorder.write_planes(y, uv, t, seq)
+                self.last_unix = t
+        except Exception as e:  # noqa: BLE001 -- a broken pipe must not take the session down
+            self.error = str(e)
+            self._log(f"native recording of {self.cam.role} stopped: {e}")
+
+    def stop(self) -> dict[str, Any]:
+        self._stop.set()
+        self._thread.join(timeout=5.0)
+        out: dict[str, Any] = {"path": str(self.path), "native": True, "frames": 0, "fps": None, "error": self.error}
+        if self.recorder is not None:
+            try:
+                self.recorder.close()
+            except Exception as e:  # noqa: BLE001
+                out["error"] = out["error"] or str(e)
+            out["frames"] = self.recorder.frames
+            if self.started_unix is not None and self.last_unix is not None and self.last_unix > self.started_unix:
+                out["fps"] = round((self.recorder.frames - 1) / (self.last_unix - self.started_unix), 2)
+        return out
 
 
 class Worker:
@@ -819,7 +938,8 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
                 stop_file: bool = True, background: bool = True, capture_factory: Callable[..., Any] = default_capture_factory,
                 clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
                 recorder_factory: Callable[..., Any] = VideoRecorder, configs: Path = CONFIG_DIR,
-                log: Callable[[str], None] = print) -> dict[str, Any]:
+                log: Callable[[str], None] = print, native_record: Sequence[str] = (),
+                native_recorder_factory: Callable[..., Any] = NativeVideoRecorder) -> dict[str, Any]:
     """Own the cameras for one run; write state.json / latest_<role>.jpg / vision.jsonl / <role>.mp4.
 
     One camera, the *primary*, sets the pace: every state waits for its next frame (a
@@ -837,7 +957,12 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
     run on two background workers (``background=False`` runs them inline), so the loop thread
     only ever waits for the primary's frame and detects on it. Before 2026-09-20 every camera was
     grabbed in turn (each grab waiting for that camera's next frame) and detected with
-    the 2x pass at every state, which held three cameras to 4 states a second."""
+    the 2x pass at every state, which held three cameras to 4 states a second.
+
+    ``native_record``: roles (``"primary"``, ``"all"`` or role names) whose video is written at the camera's own frame
+    rate from the capture thread (``NativeRecordThread``), independent of the state loop and of
+    ``video_fps``; a camera whose capture cannot do that (no ``wait_frame``) falls back to the gated
+    path with a log line."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stop_path = out_dir / "STOP"
@@ -870,6 +995,27 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
                                                             "started_unix": summary["started_unix"]}, indent=1))
         prim = rig.camera(primary_role)
         aux = [c for c in rig.cameras if c is not prim]
+        native_roles: set[str] = set()
+        for r in native_record:
+            if r == "all":
+                native_roles.update(c.role for c in rig.cameras)
+            else:
+                native_roles.add(primary_role if r == "primary" else r)
+        native_threads: dict[str, NativeRecordThread] = {}
+        for role in sorted(native_roles):
+            if role not in [c.role for c in rig.cameras]:
+                log(f"native-record: {role!r} is not one of {[c.role for c in rig.cameras]}; ignored")
+                continue
+            cam = rig.camera(role)
+            if not video:
+                break
+            if not NativeRecordThread.supported(cam):
+                log(f"native-record: {role}'s capture has no wait_frame; recording it at the gated {video_fps:g} fps instead")
+                native_roles.discard(role)
+                continue
+            native_threads[role] = NativeRecordThread(cam, out_dir / f"{role}.mp4", recorder_factory=native_recorder_factory, log=log)
+            native_threads[role].start()
+        native_roles = set(native_threads)
         detect_worker = Worker("aux-detect", inline=not background, log=log)
         io_worker = Worker("video", inline=not background, log=log)
         t0 = clock()
@@ -915,7 +1061,7 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
             newest[cam.role] = frame
             # a frame 3/4 of a video period after the last one counts: 20 fps frames gated at 15 fps
             # then keep every frame instead of every other one (10 fps)
-            if video and now - last_video.get(cam.role, -math.inf) >= 0.75 * video_period - 1e-6:
+            if video and cam.role not in native_roles and now - last_video.get(cam.role, -math.inf) >= 0.75 * video_period - 1e-6:
                 rec = recorders.get(cam.role)
                 if rec is None:
                     rec = recorders[cam.role] = recorder_factory(out_dir / f"{cam.role}.mp4", video_fps, (frame.width, frame.height))
@@ -966,7 +1112,8 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
                 for cam in aux:
                     # Poll an aux camera only when something wants its frame: converting a
                     # frame nobody uses costs the loop thread 2-8 ms each.
-                    if (now - last_video.get(cam.role, -math.inf) < video_period - 1e-6 and now < next_detect[cam.role]
+                    video_due = video and cam.role not in native_roles and now - last_video.get(cam.role, -math.inf) >= video_period - 1e-6
+                    if (not video_due and now < next_detect[cam.role]
                             and now - last_jpeg.get(cam.role, -math.inf) < jpeg_period - 1e-6):
                         continue
                     f = cam.grab(wait=False)
@@ -1000,6 +1147,8 @@ def run_session(doc: dict[str, Any], out_dir: Path, *, roles: Sequence[str] = DE
                 if next_state < now:                      # fell behind: do not try to catch up in a burst
                     next_state = now + period
         summary["primary"] = prim.role         # the current one; the switches list has the history
+        for role, th in native_threads.items():
+            summary["video"][role] = th.stop()  # joins the thread, closes the pipe (30 s wait), measured fps
         detect_worker.close()
         io_worker.close()                      # every queued frame is in ffmpeg before the pipes close
         for role, rec in recorders.items():
@@ -1198,8 +1347,9 @@ def cmd_check(args: argparse.Namespace, doc: dict[str, Any]) -> int:
 
 def cmd_session(args: argparse.Namespace, doc: dict[str, Any]) -> int:
     roles = [r.strip() for r in args.roles.split(",") if r.strip()]
+    native = [r.strip() for r in (args.native_record or "").split(",") if r.strip()]
     summary = run_session(doc, Path(args.out), roles=roles, hz=args.hz, aux_hz=args.aux_hz, primary=args.primary,
-                          video=not args.no_video, video_fps=args.fps,
+                          video=not args.no_video, video_fps=args.fps, native_record=native,
                           seconds=args.seconds, stdin=(None if args.no_stdin else sys.stdin), stop_file=True)
     print(json.dumps(summary, indent=1))
     return 0
@@ -1280,6 +1430,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--aux-hz", type=float, default=2.0, help="tag detection rate of every camera but the primary")
     s.add_argument("--primary", default=None, help="the camera that sets the pace (default: top if present, else the first role)")
     s.add_argument("--fps", type=float, default=10.0, help="video frame rate (at most; capped by --hz)")
+    s.add_argument("--native-record", default="", metavar="ROLES",
+                   help="comma list of roles, 'primary' or 'all', recorded at the camera's own frame rate, "
+                        "independent of --hz/--fps; with 'all' the state loop never converts a frame just for video "
+                        "(2026-09-23: three gated 15 fps streams cost the loop 10 Hz)")
     s.add_argument("--seconds", type=float, default=None)
     s.add_argument("--no-video", action="store_true")
     s.add_argument("--no-stdin", action="store_true", help="do not stop when stdin closes")

@@ -6,7 +6,9 @@ recorder is replaced by one that counts frames.
 """
 from __future__ import annotations
 
+import io
 import json
+import time
 from pathlib import Path
 
 import cv2
@@ -541,3 +543,161 @@ def test_control_json_switches_the_primary_while_the_session_runs(tmp_path):
     assert json.loads((out / "state.json").read_text())["primary"] == "side"
     session = json.loads((out / "session.json").read_text())
     assert session["primary"] == "side" and session["primary_switches"] == summary["primary_switches"]
+
+
+# --- native-rate recording (2026-09-23) -------------------------------------------------------------
+
+class FakeNativeCapture(FakeCapture):
+    """A capture whose frames can also be waited for without consuming them (AVFoundation's wait_frame)."""
+
+    def __init__(self, scene, total=30, clock=None):
+        super().__init__(scene)
+        self.total, self._clock = total, clock or time.time
+        self.seq = 0
+        self.read_calls = 0
+        self.fps = 30.0
+
+    def read(self, wait=True):
+        self.read_calls += 1
+        return True, self.scene.render()
+
+    def wait_frame(self, after_seq, timeout_s=0.5):
+        if self.seq >= self.total:
+            time.sleep(0.005)
+            return None
+        self.seq += 1
+        y = np.full((720, 1280), 128, dtype=np.uint8)
+        uv = np.full((360, 640, 2), 128, dtype=np.uint8)
+        return self.seq, self._clock() + self.seq / self.fps, (y, uv)
+
+
+class CountingNativeRecorder:
+    made: list["CountingNativeRecorder"] = []
+
+    def __init__(self, path, fps, size, *, entry=None):
+        self.path, self.fps, self.size, self.entry, self.frames, self.closed = Path(path), fps, size, entry, 0, False
+        self.seqs = []
+        CountingNativeRecorder.made.append(self)
+
+    def write_planes(self, y, uv, captured_unix, seq):
+        assert y.shape == (self.size[1], self.size[0]) and uv.shape == (self.size[1] // 2, self.size[0] // 2, 2)
+        self.frames += 1
+        self.seqs.append(seq)
+
+    def close(self):
+        self.closed = True
+        self.path.write_bytes(b"fake mp4")
+
+
+def test_native_record_thread_takes_every_frame_and_never_consumes_reads(tmp_path):
+    scene = SyntheticScene()
+    cap = FakeNativeCapture(scene, total=25)
+    cam = cameras.Camera("top", 0, SID, {**cameras.new_entry("fake"), "fps": 30.0}, capture_factory=lambda *a: cap)
+    cam.open()
+    CountingNativeRecorder.made.clear()
+    th = cameras.NativeRecordThread(cam, tmp_path / "top.mp4", recorder_factory=CountingNativeRecorder, log=lambda m: None)
+    assert cameras.NativeRecordThread.supported(cam)
+    th.start()
+    deadline = time.time() + 5.0
+    while (not CountingNativeRecorder.made or CountingNativeRecorder.made[0].frames < 25) and time.time() < deadline:
+        time.sleep(0.01)
+    out = th.stop()
+    rec = CountingNativeRecorder.made[0]
+    assert rec.frames == 25 and rec.seqs == list(range(1, 26)) and rec.closed
+    assert out["native"] is True and out["frames"] == 25 and out["error"] is None
+    assert 25 <= out["fps"] <= 35                      # measured from the frames' own arrival stamps
+    assert cap.read_calls == 0                          # the recorder never touched the detection path
+    assert rec.size == (1280, 720) and rec.fps == 30.0
+
+
+def test_session_native_record_bypasses_the_gated_video_path(registry, tmp_path):
+    doc = cameras.load_registry(registry)
+    scene = SyntheticScene(chassis=(150.0, 150.0, 10.0))
+    CountingRecorder.made.clear(); CountingNativeRecorder.made.clear()
+    clock = {"t": 1000.0}
+    cap = FakeNativeCapture(scene, total=10_000, clock=lambda: clock["t"])
+    out = tmp_path / "run"
+    summary = cameras.run_session(doc, out, roles=["top"], hz=5.0, video=True, video_fps=10.0, seconds=1.0,
+                                  capture_factory=lambda *a: cap, recorder_factory=CountingRecorder,
+                                  native_recorder_factory=CountingNativeRecorder, native_record=["primary"],
+                                  clock=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + max(s, 0.05)),
+                                  log=lambda m: None)
+    assert summary["states"] >= 4                                        # the loop still paced and detected
+    assert not [r for r in CountingRecorder.made if r.path.name == "top.mp4"]   # no gated writer for the native role
+    assert CountingNativeRecorder.made and CountingNativeRecorder.made[0].closed
+    v = summary["video"]["top"]
+    assert v["native"] is True and v["frames"] > summary["states"]        # more video frames than states
+    assert v["frames"] == CountingNativeRecorder.made[0].frames
+    session = json.loads((out / "session.json").read_text())
+    assert session["video"]["top"]["native"] is True
+
+
+def test_session_native_record_falls_back_when_the_capture_cannot_wait(registry, tmp_path):
+    doc = cameras.load_registry(registry)
+    scene = SyntheticScene(chassis=(150.0, 150.0, 10.0))
+    CountingRecorder.made.clear(); CountingNativeRecorder.made.clear()
+    clock = {"t": 1000.0}
+    logs = []
+    summary = cameras.run_session(doc, tmp_path / "run", roles=["top"], hz=5.0, video=True, video_fps=10.0, seconds=1.0,
+                                  capture_factory=lambda *a: FakeCapture(scene), recorder_factory=CountingRecorder,
+                                  native_recorder_factory=CountingNativeRecorder, native_record=["top"],
+                                  clock=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + max(s, 0.05)),
+                                  log=logs.append)
+    assert any("no wait_frame" in m for m in logs)
+    assert CountingRecorder.made and not CountingNativeRecorder.made
+    assert "native" not in summary["video"]["top"] and summary["video"]["top"]["frames"] > 0
+
+
+def test_native_recorder_feeds_ffmpeg_nv12_with_rotation_and_hardware_encoder(tmp_path):
+    calls = []
+
+    class P:
+        def __init__(self):
+            self.stdin = io.BytesIO()
+
+        def wait(self, timeout=None):
+            return 0
+
+    def popen(cmd, stdin=None):
+        calls.append(cmd)
+        return P()
+
+    rec = cameras.NativeVideoRecorder(tmp_path / "ceiling.mp4", 15.0, (1440, 2560), entry={"rotate": 90},
+                                      popen=popen, codec="h264_videotoolbox")
+    y = np.zeros((2560, 1440), dtype=np.uint8); uv = np.zeros((1280, 720, 2), dtype=np.uint8)
+    rec.write_planes(y, uv, 1234.5, 7)
+    rec.close()
+    cmd = calls[0]
+    assert "nv12" in cmd and "1440x2560" in cmd and "transpose=1" in cmd and "h264_videotoolbox" in cmd
+    assert "libx264" not in cmd and "-r" in cmd and cmd[cmd.index("-r") + 1] == "15"
+    rows = (tmp_path / "ceiling_timestamps.csv").read_text().splitlines()
+    assert rows[0] == "frame,captured_unix,seq" and rows[1] == "0,1234.500000,7"
+    assert cameras._encoder_args("libx264")[:2] == ["-c:v", "libx264"]
+    assert cameras._rotation_filter({"rotate": 270}) == ["-vf", "transpose=2"] and cameras._rotation_filter({}) == []
+
+
+def test_native_recording_keeps_aux_frames_off_the_loop_thread(tmp_path):
+    """With every camera recorded natively the loop must not convert aux frames for video: it grabs an aux
+    frame only when a detection (aux_hz) or a preview (jpeg_hz) is due, not every state (2026-09-23: three
+    gated 15 fps streams held a 3-camera session to 6 states/s)."""
+    doc = _two_camera_registry(tmp_path)
+    scene = SyntheticScene(chassis=(150.0, 150.0, 10.0))
+    clock = {"t": 1000.0}
+    caps = {}
+
+    def factory(slot, sid, entry):
+        caps[entry["role"]] = cap = FakeNativeCapture(scene, total=10_000, clock=lambda: clock["t"])
+        return cap
+
+    CountingRecorder.made.clear(); CountingNativeRecorder.made.clear()
+    summary = cameras.run_session(doc, tmp_path / "run", roles=["top", "side"], hz=20.0, aux_hz=2.0, primary="top",
+                                  video=True, video_fps=15.0, seconds=2.0, background=False, capture_factory=factory,
+                                  recorder_factory=CountingRecorder, native_recorder_factory=CountingNativeRecorder,
+                                  native_record=["all"], clock=lambda: clock["t"],
+                                  sleep=lambda s: clock.__setitem__("t", clock["t"] + max(s, 0.001)), log=lambda m: None)
+    assert 35 <= summary["states"] <= 41
+    assert not CountingRecorder.made                                  # no gated writers at all
+    assert {r.path.name for r in CountingNativeRecorder.made} == {"top.mp4", "side.mp4"}
+    # the aux camera was read for its ~4 detections and ~2 previews, not once per state
+    assert caps["side"].read_calls <= 10 < summary["states"]
+    assert summary["video"]["side"]["native"] is True and summary["video"]["top"]["native"] is True

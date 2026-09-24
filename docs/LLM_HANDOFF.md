@@ -7,13 +7,15 @@ by reading one module in isolation.
 ## The short version
 
 `hexapod-tracker` is the camera and AprilTag subsystem extracted from
-[`lukas/hexapod`](https://github.com/lukas/hexapod). It has three related uses:
+[`lukas/hexapod`](https://github.com/lukas/hexapod). It has four related uses:
 
 1. A simple multi-camera webpage for seeing USB feeds and tag detections.
 2. A calibrated single-camera pipeline for 6-D body/link pose, joint
    diagnostics, red foot-tip tracking, and optional read-only encoder
    comparison.
 3. Offline gait analysis and annotated telemetry-video generation.
+4. Optional iPhone LiDAR-assisted calibration of a fixed RGB camera against a
+   generated, dimensioned AprilTag board.
 
 The package is observation software. It must not acquire authority to move the
 robot. The standalone web runtime deliberately installs
@@ -28,7 +30,7 @@ make check
 git status --short --branch
 ```
 
-`make check` currently runs 39 synthetic/off-robot Python tests and the React
+`make check` currently runs 46 synthetic/off-robot Python tests and the React
 type-check. It does not prove that a particular camera index, intrinsic
 calibration, tag placement, or physical measurement is valid.
 
@@ -130,6 +132,22 @@ runtime reports `read_only: true`.
 Do not add robot-control HTTP calls here to make the standalone UI's survey
 buttons work. That would break the intentional safety and ownership boundary.
 
+### iPhone RGB-D calibration path
+
+`hexapod-calibration-board` creates the printable board/map and
+`hexapod-rgbd-calibrate` consumes registered Record3D RGB, depth, confidence,
+and per-frame intrinsics. RGB tag corners initialize the existing mapped-floor
+PnP solve. A robust LiDAR plane then constrains distance, roll, and pitch in a
+joint least-squares refinement. Multiple stationary observations are averaged
+after translation/rotation outlier rejection.
+
+The output tracker config has separate `marker_size_m` (robot tags) and
+`floor_marker_size_m` (calibration tags), plus a
+`fixed_camera_world_reference`. `AprilTagPoseTracker` uses that fixed transform
+when mapped floor tags leave the image. `hexapod-track --record3d-device` keeps
+using Record3D and refreshes RGB intrinsics on every frame, avoiding a silent
+switch to a different Continuity Camera crop. See `docs/RGBD_CALIBRATION.md`.
+
 ## Data flow
 
 ```text
@@ -140,6 +158,11 @@ camera/image/video
   -> robot_abs yaw/hip diagnostics
   -> red foot-tip projection + unsigned knee evidence
   -> JSON/JSONL, annotated media, and web state
+
+optional registered iPhone RGB + depth + confidence
+  -> mapped board-tag corners + robust depth plane
+  -> fixed world_from_camera and measured RGB intrinsics
+  -> same AprilTagPoseTracker world frame after the board leaves view
 
 optional GET /api/feedback
   -> encoder comparison only
@@ -216,7 +239,11 @@ force calibration, and component localization are separate questions.
 - `camera_server.py`: simple multi-camera MJPEG site and planar pose API.
 - `planar_pose.py`: per-camera homographies and cross-camera planar fusion.
 - `apriltag_vision.py`: calibrated tag detection, PnP/world pose, temporal
-  tracking, and combined frame diagnostics.
+  tracking, fixed-camera reference fallback, and combined frame diagnostics.
+- `calibration_board.py`: exact-size printable tag36h11 grid and matching map.
+- `rgbd_calibration.py`: registered depth sampling, robust plane fit, joint
+  RGB-D refinement, and fixed-camera consensus.
+- `rgbd_calibrate.py`: Record3D/offline capture and calibrated-config writer.
 - `housing_pose.py`: rigid transforms, kinematic frame fusion, and joint-angle
   reconstruction.
 - `foot_tip_tracking.py`: red boot-tip segmentation, assignment, and short
@@ -238,6 +265,10 @@ force calibration, and component localization are separate questions.
 - AprilTag support requires `opencv-contrib-python`, not `opencv-python`,
   because the detector uses `cv2.aruco`.
 - Native Mac capture needs the PyObjC AVFoundation framework.
+- iPhone depth is optional. On macOS, Record3D has no wheel; use
+  `uv run --with cmake uv sync --extra dev --extra rgbd` to build Record3D
+  1.4.1+ for the Record3D iOS 1.10+ USB stream. The import stays lazy so
+  normal camera tools do not require it.
 - `telemetry_video.py` shells out to `ffmpeg`, which is not a Python package.
 - UI changes require both `make check` and `make web-build`; commit the changed
   `web/vision_ui/dist` assets.
@@ -254,16 +285,18 @@ not assume the present wheel has self-contained defaults.
 
 In roughly descending value:
 
-1. Calibrate each Arducam's intrinsics at every capture mode actually used.
-2. Establish a measured common world/extrinsic calibration if true multi-view
-   3-D or stereo claims are needed.
-3. Replace provisional floor coordinates/yaws with a surveyed map and eliminate
+1. Run a physical iPhone RGB-D smoke test and record observed residual/spread
+   thresholds; synthetic tests cannot validate real RGB-depth registration.
+2. Calibrate each Arducam's intrinsics at every capture mode actually used.
+3. Use one unmoved RGB-D board pose to establish a measured common frame if
+   true multi-view 3-D or stereo claims are needed.
+4. Replace provisional floor coordinates/yaws with a surveyed map and eliminate
    duplicate tag IDs.
-4. Measure tag-to-joint-axis mount transforms or add component-local markers
+5. Measure tag-to-joint-axis mount transforms or add component-local markers
    before trying to localize flex within an assembly.
-5. Add recorded-camera regression clips with expected tag/pose summaries. Keep
+6. Add recorded-camera regression clips with expected tag/pose summaries. Keep
    large media out of Git and document how to retrieve it.
-6. Make package resources wheel-safe if this project will be installed outside
+7. Make package resources wheel-safe if this project will be installed outside
    a source checkout.
 
 Before reporting a result, state separately: tag coverage, calibration quality,

@@ -282,8 +282,10 @@ matrix to portrait/landscape and the common 16:9 Continuity Camera crop while
 keeping the optical center explicit. Replace `camera_matrix` and
 `distortion_coefficients` with a checkerboard calibration of the actual video
 mode for accurate metric height and tilt. The three mapped floor tags then
-solve the camera extrinsics in every frame; if none is visible, output is
-explicitly camera-relative instead of pretending it is in floor/world axes.
+solve the camera extrinsics in every frame. If none is visible, output is
+camera-relative unless the config contains a measured
+`fixed_camera_world_reference`; the iPhone RGB-D workflow can provide that
+fixed reference for a rigidly mounted phone.
 
 The physical black squares (excluding the white quiet zone) were measured as
 27 mm on 2026-08-31. That value is recorded in `marker_size_m`, and the

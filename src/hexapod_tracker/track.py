@@ -17,11 +17,49 @@ from urllib.request import Request, urlopen
 
 import cv2
 
-from .apriltag_vision import AprilTagPoseTracker
+from .apriltag_vision import AprilTagPoseTracker, CameraCalibration
 from .housing_pose import JOINT_NAMES
+from .rgbd_calibrate import Record3DReader
 
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
+
+
+class Record3DTrackingCapture:
+    """OpenCV-like RGB capture that keeps Record3D intrinsics current."""
+
+    def __init__(
+        self,
+        device_index: int,
+        tracker: AprilTagPoseTracker,
+        *,
+        reader: Any | None = None,
+    ) -> None:
+        self._tracker = tracker
+        self._reader = reader or Record3DReader(device_index)
+        self.source_label = "Record3D USB"
+
+    def read(self) -> tuple[bool, Any]:
+        frame = self._reader.next_frame()
+        height, width = frame.rgb_bgr.shape[:2]
+        # ARKit intrinsics can change slightly with focus/capture mode.  Use
+        # the matrix paired with this exact RGB frame instead of assuming the
+        # median matrix saved by calibration is immutable.
+        self._tracker.calibration = CameraCalibration.from_dict({
+            "image_size_px": [width, height],
+            "camera_matrix": frame.camera_matrix.tolist(),
+            "distortion_coefficients": [0.0, 0.0, 0.0, 0.0, 0.0],
+            "approximate": False,
+        })
+        return True, frame.rgb_bgr
+
+    def get(self, property_id: int) -> float:
+        if property_id == cv2.CAP_PROP_FPS:
+            return 30.0
+        return 0.0
+
+    def release(self) -> None:
+        self._reader.close()
 
 
 class FeedbackClient:
@@ -704,6 +742,11 @@ def main(argv: list[str] | None = None) -> int:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--input", type=Path, help="input image or video")
     source.add_argument("--camera", type=int, help="OpenCV camera index")
+    source.add_argument(
+        "--record3d-device",
+        type=int,
+        help="Record3D USB device index (uses per-frame iPhone intrinsics)",
+    )
     parser.add_argument("--pose-output", type=Path,
                         help="JSON for an image, JSONL for video")
     parser.add_argument("--annotated-output", type=Path,
@@ -762,7 +805,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--max-frames must be positive")
     if args.frame_step <= 0:
         parser.error("--frame-step must be positive")
-    if args.camera is not None and args.frame_step != 1:
+    if args.input is None and args.frame_step != 1:
         parser.error("--frame-step is only supported with --input video")
     if args.feedback_hz <= 0.0:
         parser.error("--feedback-hz must be positive")
@@ -806,6 +849,29 @@ def main(argv: list[str] | None = None) -> int:
             camera_cycle=args.camera_cycle,
             processing_width=args.processing_width,
             frame_step=args.frame_step,
+            operator_supported=args.robot_supported,
+        )
+    if args.record3d_device is not None:
+        capture = Record3DTrackingCapture(args.record3d_device, tracker)
+        max_frames = args.max_frames
+        if args.duration is None and not args.preview and max_frames is None:
+            max_frames = 1
+        return _process_capture(
+            tracker,
+            capture,
+            pose_output=args.pose_output,
+            annotated_output=args.annotated_output,
+            raw_output=args.raw_output,
+            duration_s=args.duration,
+            max_frames=max_frames,
+            camera_mode=True,
+            feedback=feedback,
+            preview=args.preview,
+            summary_output=args.summary_output,
+            camera_index=None,
+            camera_cycle=args.camera_cycle,
+            processing_width=args.processing_width,
+            frame_step=1,
             operator_supported=args.robot_supported,
         )
     if args.duration is None and not args.preview:

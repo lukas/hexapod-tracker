@@ -3,7 +3,8 @@
 Camera-only AprilTag tracking and visualization tools extracted from
 [`lukas/hexapod`](https://github.com/lukas/hexapod). The package detects
 tag36h11 markers, estimates calibrated body and joint poses, tracks colored
-foot tips, analyzes recorded gait motion, and serves the local camera UI.
+foot tips, analyzes recorded gait motion, serves the local camera UI, and can
+use an iPhone LiDAR stream to make fixed-camera calibration repeatable.
 
 The standalone package never commands motors. Its optional web-server survey
 hooks are disabled unless the consuming robot project supplies an explicit
@@ -50,6 +51,47 @@ uv run hexapod-track configs/apriltag_pose_config_20260831.json \
 The main calibration and tag-map files live in `configs/`. See
 [`docs/HOUSING_POSE.md`](docs/HOUSING_POSE.md) for coordinate conventions,
 mount calibration, multi-camera behavior, and output formats.
+
+## iPhone LiDAR-assisted calibration
+
+Generate the included-size calibration target (or use the checked-in copy):
+
+```sh
+uv run hexapod-calibration-board \
+  --svg configs/rgbd_calibration_board.svg \
+  --manifest configs/rgbd_calibration_board.json
+```
+
+Print the SVG at **100% / actual size**, mount it flat on a rigid matte board,
+and verify that a black tag square is 70 mm. Lock the iPhone in its final
+tracking position, open Record3D 1.10 or newer in USB-streaming mode, then run:
+
+```sh
+uv run --with cmake uv sync --extra dev --extra rgbd
+uv run hexapod-rgbd-calibrate \
+  configs/apriltag_pose_config_20260831.json \
+  --board configs/rgbd_calibration_board.json \
+  --frames 30 \
+  --output artifacts/rgbd-calibration.json \
+  --updated-config artifacts/apriltag_pose_config_rgbd.json \
+  --preview
+```
+
+The command detects the mapped tag corners, robustly fits the LiDAR floor
+plane, jointly refines the camera pose, rejects moved/bad frames, and writes
+measured stream intrinsics plus a fixed `world_from_camera` transform. It does
+not connect to or move the robot. After calibration, use the same Record3D RGB
+stream so its lens/crop and per-frame ARKit intrinsics stay matched:
+
+```sh
+uv run hexapod-track artifacts/apriltag_pose_config_rgbd.json \
+  --record3d-device 0 --preview
+```
+
+The board may leave the image after calibration as long as neither the phone
+nor the board-defined world frame moves. See
+[`docs/RGBD_CALIBRATION.md`](docs/RGBD_CALIBRATION.md) for setup, quality gates,
+offline fixtures, coordinate conventions, and limitations.
 
 ## Web UI and tests
 

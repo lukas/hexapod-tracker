@@ -8,7 +8,8 @@ from hexapod_tracker.paths import CONFIG_DIR
 
 from hexapod_tracker.paths import CONFIG_DIR as _CFG
 import json as _json
-FLOOR_TAGS_IN_MAP = _json.loads((_CFG / "floor_tag_map.json").read_text())["tags"]
+_FM = _json.loads((_CFG / "floor_tag_map.json").read_text())
+FLOOR_TAGS_IN_MAP = [t for t in _FM["tags"] if int(t["id"]) in set(int(i) for i in _FM["active_anchor_ids"])]   # the layout mirrors the active anchors
 
 
 def load_config(name):

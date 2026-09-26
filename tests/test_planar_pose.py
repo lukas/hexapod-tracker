@@ -492,11 +492,16 @@ def test_plate_check_reports_the_rigid_residual_through_a_homography():
     assert exact["tags"] == 20 and exact["rms_mm"] < 0.01
     assert "offset_mm" not in exact                          # plate not in the map yet: shape only
     # once surveyed into the map, the check also reports where this camera puts the plate vs the map
-    fm2 = {**fm, "tags": plate_tag_entries(plate, (-300.0, 500.0, 7.0), source="t"), "active_anchor_ids": list(est.plate_tags)}
+    fixed = {**plate, "fixed": True}
+    fm2 = {**fm, "plates": [fixed], "tags": plate_tag_entries(fixed, (-300.0, 500.0, 7.0), source="t"), "active_anchor_ids": list(est.plate_tags)}
     est2 = PlanarPoseEstimator(fm2, {"parts": []})
+    assert est2.active_anchor_ids == sorted(est.plate_tags) or set(est2.active_anchor_ids) == set(est.plate_tags)
+    # the same plate declared movable (the default) is never a floor anchor, whatever active_anchor_ids says
+    loose = PlanarPoseEstimator({**fm2, "plates": [plate]}, {"parts": []})
+    assert loose.active_anchor_ids == [] and 400 in loose.plate_tags
     placed = est2.plate_check(tags, H, None)["p"]
     assert placed["offset_norm_mm"] < 0.01 and abs(placed["heading_error_deg"]) < 0.01
-    fm3 = {**fm2, "tags": plate_tag_entries(plate, (-310.0, 500.0, 7.0), source="t")}
+    fm3 = {**fm2, "tags": plate_tag_entries(fixed, (-310.0, 500.0, 7.0), source="t")}
     moved = PlanarPoseEstimator(fm3, {"parts": []}).plate_check(tags, H, None)["p"]
     assert abs(moved["offset_norm_mm"] - 10.0) < 0.05
     tags[419] = tags[419] + np.array([[3.0, 0.0]] * 4)       # one tag nudged ~2 mm in the picture

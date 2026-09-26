@@ -192,7 +192,11 @@ class PlanarPoseEstimator:
         active_ids = floor_map.get("active_anchor_ids")
         if active_ids is None:
             active_ids = [tag["id"] for tag in floor_map["tags"] if "yaw_degrees" in tag]
-        self.active_anchor_ids = [int(tag_id) for tag_id in active_ids]
+        # A plate is a hand-held target (lens calibration, plate_check) unless its block says "fixed":
+        # only then may its tags act as floor anchors; a movable plate's last surveyed pose is stale
+        # the moment somebody lifts it.
+        movable = {tid for tid, (plate, _c, _r) in self.plate_tags.items() if not plate.get("fixed")}
+        self.active_anchor_ids = [int(tag_id) for tag_id in active_ids if int(tag_id) not in movable]
         self.anchors = {
             int(tag["id"]): tag
             for tag in floor_map["tags"]
@@ -330,9 +334,9 @@ class PlanarPoseEstimator:
             fitted = (rot @ lc.T).T + meas.mean(axis=0)
             err = np.linalg.norm(fitted - meas, axis=1)
             entry = {"tags": len(ids), "rms_mm": round(float(np.sqrt(np.mean(err ** 2))), 2), "max_mm": round(float(err.max()), 2)}
-            # and where the camera puts the plate versus its surveyed pose in the map (the ruler's position)
+            # and, for a FIXED plate, where the camera puts it versus its surveyed pose (the ruler's position)
             base_id = plate_tag_id(plate, 0, 0)
-            if base_id in self.anchors:
+            if plate.get("fixed") and base_id in self.anchors:
                 expected = np.array([self.anchor_corners_for_view(t, camera_index).mean(axis=0) if self.anchor_corners_for_view(t, camera_index) is not None
                                      else self.anchor_corners(t).mean(axis=0) for t in ids])
                 shift = meas.mean(axis=0) - expected.mean(axis=0)

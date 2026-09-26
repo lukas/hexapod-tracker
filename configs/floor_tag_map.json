@@ -16,27 +16,7 @@
   112,
   115,
   116,
-  118,
-  400,
-  401,
-  402,
-  403,
-  404,
-  405,
-  406,
-  407,
-  408,
-  409,
-  410,
-  411,
-  412,
-  413,
-  414,
-  415,
-  416,
-  417,
-  418,
-  419
+  118
  ],
  "measurement_convention": "Coordinates are tag centers. Adjacent occupied grid sites are 304.8 mm (one foot) apart as specified by the operator.",
  "coordinate_frame": {
@@ -666,7 +646,8 @@
   "2026-09-19: tags [106, 110, 111, 115, 116, 118] positions solved by joint camera survey (fixed: [100, 101, 102, 103, 104, 105, 112]); total reprojection rms 1.31 px over 5 cameras.",
   "2026-09-19: tags [106, 110, 111, 115, 116, 118] positions solved by joint camera survey (fixed: [100, 101, 102, 103, 104, 105, 112]); total reprojection rms 1.30 px over 5 cameras.",
   "2026-09-26: tag_black_square_size 27.2 -> 27.0 (Lukas measured the anchors at exactly 27 mm); a tag entry may now carry its own black_square_size and a non-zero center z; the 'plates' block declares rigid tag plates (survey_tags.py solves a plate as one body, adopting its tags from the lab model on first sight).",
-  "2026-09-26: tags [106, 110, 111, 115, 116, 118] positions and plates ['plate50'] solved by joint camera survey (fixed: [100, 101, 102, 103, 104, 105, 112]); total reprojection rms 1.36 px over 6 cameras."
+  "2026-09-26: tags [106, 110, 111, 115, 116, 118] positions and plates ['plate50'] solved by joint camera survey (fixed: [100, 101, 102, 103, 104, 105, 112]); total reprojection rms 1.36 px over 6 cameras.",
+  "2026-09-26: plate50 set fixed=false after it was carried around for the ceiling lens calibration (a movable plate cannot be a floor anchor); its tags left the active anchors."
  ],
  "reference_anchor_ids": [
   100,
@@ -706,7 +687,9 @@
     ],
     "solved": "2026-09-26 13:03",
     "tag_reprojection_rms_px": 1.05
-   }
+   },
+   "fixed": false,
+   "fixed_note": "false = a hand-held target: lens calibration (calibrate_from_floor.py --target plate) and the plate_check shape test in every floor fit / drift check; its tags are NOT floor anchors and its stored pose is only the last survey. Set true (and re-run the tag survey with its ids in --free) to use it as fixed floor geometry."
   }
  ]
 }

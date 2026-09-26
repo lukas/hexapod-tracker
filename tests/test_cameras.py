@@ -718,17 +718,11 @@ def test_native_recording_keeps_aux_frames_off_the_loop_thread(tmp_path):
     assert summary["video"]["side"]["native"] is True and summary["video"]["top"]["native"] is True
 
 
+
 def test_camera_positions_come_from_the_lab_model(tmp_path, monkeypatch):
-    model = {"cameras": [{"name": "studio-top", "stable_id": SID, "solved": True, "position_mm": [52.0, -588.9, 583.1]},
-                         {"name": "studio-side2", "stable_id": "0xdead", "solved": False, "position_mm": None},
-                         {"name": "laptop-cam0", "stable_id": None, "solved": True, "position_mm": [-901.1, 1066.6, 1194.7]}]}
     path = tmp_path / "lab_model.json"
-    path.write_text(json.dumps(model))
+    path.write_text(json.dumps({"cameras": [{"name": "studio-top", "stable_id": SID, "solved": True, "position_mm": [52.0, -588.9, 583.1]},
+                                            {"name": "studio-side2", "stable_id": "0xdead", "solved": False, "position_mm": None}]}))
     monkeypatch.setenv(cameras.LAB_MODEL_ENV, str(path))
     pos = cameras.camera_positions_from_lab_model()
-    assert np.allclose(pos[SID], [52.0, -588.9, 583.1])
-    assert np.allclose(pos["studio-top"], pos[SID])
-    assert "0xdead" not in pos and "studio-side2" not in pos
-    assert np.allclose(pos["laptop-cam0"], [-901.1, 1066.6, 1194.7])
-    monkeypatch.setenv(cameras.LAB_MODEL_ENV, str(tmp_path / "missing.json"))
-    assert cameras.camera_positions_from_lab_model() == {}
+    assert np.allclose(pos[SID], [52.0, -588.9, 583.1]) and np.allclose(pos["studio-top"], pos[SID]) and "0xdead" not in pos

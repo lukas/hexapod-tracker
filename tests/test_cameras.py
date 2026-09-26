@@ -21,12 +21,23 @@ from hexapod_tracker.paths import CONFIG_DIR
 FLOOR = json.loads((CONFIG_DIR / "floor_tag_map.json").read_text())
 TAG_MM = float(FLOOR["tag_black_square_size"])
 SID = "0x520000032e46678"
+# the synthetic scene is a plane: only the anchors lying on the floor (z = 0) are rendered; the ones that must be
+# seen are the photographed reference anchors (the surveyed ones at x = -600 mm fall outside the 1280 px frame)
+FLOOR_PLANE_ANCHORS = sorted(int(t["id"]) for t in FLOOR["tags"] if "yaw_degrees" in t and int(t["id"]) in FLOOR["active_anchor_ids"]
+                             and (len(t["center"]) < 3 or abs(float(t["center"][2])) < 1e-6))
+FLOOR_ANCHORS = sorted(int(t) for t in FLOOR["reference_anchor_ids"] if int(t) in FLOOR_PLANE_ANCHORS)
+
+
+@pytest.fixture(autouse=True)
+def _no_lab_model(monkeypatch, tmp_path):
+    """Keep the real ~/.hexapod/lab_model.json (solved camera positions) out of these synthetic scenes."""
+    monkeypatch.setenv(cameras.LAB_MODEL_ENV, str(tmp_path / "no-lab-model.json"))
 
 
 def _anchor_corners(tag: dict) -> np.ndarray:
     cx, cy = float(tag["center"][0]), float(tag["center"][1])
     yaw = np.radians(float(tag["yaw_degrees"]))
-    h = TAG_MM / 2.0
+    h = float(tag.get("black_square_size") or TAG_MM) / 2.0
     local = np.array([[-h, h], [h, h], [h, -h], [-h, -h]])           # corner0->1 is +x, 3->0 is +y
     rot = np.array([[np.cos(yaw), -np.sin(yaw)], [np.sin(yaw), np.cos(yaw)]])
     return local @ rot.T + np.array([cx, cy])
@@ -56,11 +67,15 @@ class SyntheticScene:
 
     def render(self) -> np.ndarray:
         img = np.full((self.height, self.width, 3), 200, dtype=np.uint8)
-        tags = [(int(t["id"]), _anchor_corners(t)) for t in FLOOR["tags"] if "yaw_degrees" in t and int(t["id"]) not in self.hidden]
+        tags = [(int(t["id"]), _anchor_corners(t)) for t in FLOOR["tags"]
+                if int(t["id"]) in FLOOR_PLANE_ANCHORS and int(t["id"]) not in self.hidden]
         if self.chassis is not None:
             x, y, yaw = self.chassis
             tags.append((0, _anchor_corners({"center": [x, y], "yaw_degrees": yaw})))
         for tid, world in tags:
+            dst_check = self.project(world)
+            if (dst_check < 0).any() or (dst_check[:, 0] >= self.width).any() or (dst_check[:, 1] >= self.height).any():
+                continue                                               # off the picture: nothing to render
             marker = cv2.aruco.generateImageMarker(self.dictionary, tid, 160, borderBits=1)
             # marker image corners in the same order as the tag's world corners (0 top-left .. 3 bottom-left)
             src = np.array([[0, 0], [159, 0], [159, 159], [0, 159]], dtype=np.float32)
@@ -174,7 +189,7 @@ def test_rig_opens_by_role_detects_and_releases(registry):
     with rig:
         obs = rig.observe()
         assert [o.role for o in obs] == ["top"] and obs[0].frame is not None
-        assert 0 in obs[0].tags and set(FLOOR["active_anchor_ids"]) <= set(obs[0].tags)
+        assert 0 in obs[0].tags and set(FLOOR_ANCHORS) <= set(obs[0].tags)
         det = rig.detections_doc(obs)
         cam = det["cameras"][0]
         assert cam["index"] == 0 and cam["role"] == "top" and cam["width"] == 1280 and cam["height"] == 720
@@ -183,7 +198,7 @@ def test_rig_opens_by_role_detects_and_releases(registry):
         marker = poses["markers"]["0"]
         assert marker["status"] == "tracked"
         assert abs(marker["position_mm"]["x"] - 150.0) < 6 and abs(marker["position_mm"]["y"] - 120.0) < 6
-        assert abs(marker["rotation_degrees"]["yaw"] - 30.0) < 2.0
+        assert abs(marker["rotation_degrees"]["yaw"] - 30.0) < 3.0      # a 27 px synthetic tag: corner noise is ~2 deg of yaw
     assert rig.cameras[0].capture is None                              # released
     assert not rig.opened
 
@@ -200,16 +215,16 @@ def test_floor_fit_is_saved_with_quality_and_used_when_anchors_are_hidden(regist
     with _rig(doc, scene) as rig:
         saved, report = rig.fit_floor("top", frames=5, interval_s=0.0, sleep=lambda s: None)
     assert saved["quality"] == "good" and saved["reprojection_rms_px"] < 1.5
-    assert sorted(saved["anchor_ids"]) == sorted(FLOOR["active_anchor_ids"]) and saved["image_size"] == [1280, 720]
+    assert set(FLOOR_ANCHORS) <= set(saved["anchor_ids"]) and saved["image_size"] == [1280, 720]
     assert report["robot_tags_seen"] == [0] and saved["floor_map_digest"]
     H = np.asarray(saved["homography"])
     assert np.allclose(H / H[2, 2], scene.H / scene.H[2, 2], atol=2e-3, rtol=2e-2)
     doc["cameras"][SID]["floor"] = saved
     # now every floor tag is covered: the saved fit must still place the chassis tag
-    scene.hidden = set(FLOOR["active_anchor_ids"])
+    scene.hidden = set(FLOOR_PLANE_ANCHORS)
     with _rig(doc, scene) as rig:
         obs = rig.observe()
-        assert not any(t in obs[0].tags for t in FLOOR["active_anchor_ids"])
+        assert not any(t in obs[0].tags for t in FLOOR_PLANE_ANCHORS)
         poses = rig.poses_doc(obs)
     marker = poses["markers"]["0"]
     assert marker["status"] == "tracked" and abs(marker["position_mm"]["x"] + 100.0) < 6
@@ -235,7 +250,7 @@ def test_floor_check_passes_on_the_fitted_scene_and_fails_after_the_camera_is_bu
 def test_fit_refuses_with_too_few_anchors(registry):
     doc = cameras.load_registry(registry)
     scene = SyntheticScene()
-    scene.hidden = set(FLOOR["active_anchor_ids"]) - {100, 103}
+    scene.hidden = set(FLOOR_PLANE_ANCHORS) - {100, 103}
     with _rig(doc, scene) as rig, pytest.raises(RuntimeError, match="need 3"):
         rig.fit_floor("top", frames=2, interval_s=0.0, sleep=lambda s: None)
 
@@ -323,7 +338,7 @@ def test_a_saved_fit_beats_a_one_anchor_refit(registry):
         saved, _ = rig.fit_floor("top", frames=3, interval_s=0.0, sleep=lambda s: None)
     doc["cameras"][SID]["floor"] = saved
     # only anchor 103 stays visible, and the camera has been bumped so a 1-tag refit would be wrong
-    scene.hidden = set(FLOOR["active_anchor_ids"]) - {103}
+    scene.hidden = set(FLOOR_PLANE_ANCHORS) - {103}
     with _rig(doc, scene) as rig:
         obs = rig.observe()
         assert 103 in obs[0].tags
@@ -701,3 +716,19 @@ def test_native_recording_keeps_aux_frames_off_the_loop_thread(tmp_path):
     # the aux camera was read for its ~4 detections and ~2 previews, not once per state
     assert caps["side"].read_calls <= 10 < summary["states"]
     assert summary["video"]["side"]["native"] is True and summary["video"]["top"]["native"] is True
+
+
+def test_camera_positions_come_from_the_lab_model(tmp_path, monkeypatch):
+    model = {"cameras": [{"name": "studio-top", "stable_id": SID, "solved": True, "position_mm": [52.0, -588.9, 583.1]},
+                         {"name": "studio-side2", "stable_id": "0xdead", "solved": False, "position_mm": None},
+                         {"name": "laptop-cam0", "stable_id": None, "solved": True, "position_mm": [-901.1, 1066.6, 1194.7]}]}
+    path = tmp_path / "lab_model.json"
+    path.write_text(json.dumps(model))
+    monkeypatch.setenv(cameras.LAB_MODEL_ENV, str(path))
+    pos = cameras.camera_positions_from_lab_model()
+    assert np.allclose(pos[SID], [52.0, -588.9, 583.1])
+    assert np.allclose(pos["studio-top"], pos[SID])
+    assert "0xdead" not in pos and "studio-side2" not in pos
+    assert np.allclose(pos["laptop-cam0"], [-901.1, 1066.6, 1194.7])
+    monkeypatch.setenv(cameras.LAB_MODEL_ENV, str(tmp_path / "missing.json"))
+    assert cameras.camera_positions_from_lab_model() == {}

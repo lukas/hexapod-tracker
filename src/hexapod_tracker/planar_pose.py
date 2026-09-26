@@ -117,6 +117,43 @@ class CameraCalibration:
         }
 
 
+def plate_tag_id(plate: dict[str, Any], col: int, row: int) -> int:
+    """Tag id at (col, row) of a rigid plate: base_id + col * rows + row (ids run down each column)."""
+    return int(plate["base_id"]) + col * int(plate["rows"]) + row
+
+
+def plate_local_center(plate: dict[str, Any], col: int, row: int) -> np.ndarray:
+    """Tag centre in the plate frame (mm): +u along columns, +v along rows, origin at base_id."""
+    pitch = float(plate["pitch_mm"])
+    return np.array([col * pitch, row * pitch], dtype=np.float64)
+
+
+def plate_tag_pose(plate: dict[str, Any], pose: Sequence[float], col: int, row: int) -> tuple[np.ndarray, float]:
+    """Floor centre (x, y) and yaw of one plate tag from the plate pose (x0, y0, heading_deg):
+    the base tag's centre and the floor heading of the column axis."""
+    x0, y0, heading = float(pose[0]), float(pose[1]), float(pose[2])
+    a = math.radians(heading)
+    rot = np.array([[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]])
+    center = np.array([x0, y0]) + rot @ plate_local_center(plate, col, row)
+    yaw = heading + float(plate.get("tag_yaw_in_plate_deg", 0.0))
+    yaw = (yaw + 180.0) % 360.0 - 180.0
+    return center, yaw
+
+
+def plate_tag_entries(plate: dict[str, Any], pose: Sequence[float], *, source: str) -> list[dict[str, Any]]:
+    """Floor-map tag entries for every tag of a plate at ``pose`` (own size, z = the plate thickness)."""
+    out = []
+    for col in range(int(plate["cols"])):
+        for row in range(int(plate["rows"])):
+            center, yaw = plate_tag_pose(plate, pose, col, row)
+            out.append({"id": plate_tag_id(plate, col, row), "plate": plate.get("name"), "plate_col_row": [col, row],
+                        "center": [round(float(center[0]), 2), round(float(center[1]), 2), round(float(plate.get("z_mm", 0.0)), 2)],
+                        "yaw_degrees": round(float(yaw), 3), "black_square_size": float(plate["black_square_size"]),
+                        "center_uncertainty_mm": float(plate.get("pose_uncertainty_mm", 3.0)),
+                        "yaw_uncertainty_degrees": float(plate.get("pose_uncertainty_deg", 0.5)), "source": source})
+    return out
+
+
 class PlanarPoseEstimator:
     """Calibrate each view from fixed tags and fuse ground-projected poses."""
 
@@ -137,7 +174,21 @@ class PlanarPoseEstimator:
         # marker in the view. Held for at most hold_calibration_s.
         self.hold_calibration_s = 3600.0
         self._held: dict[int, tuple[CameraCalibration, float, tuple[int, int]]] = {}
+        # Default black-square size; a tag entry may carry its own "black_square_size" (the
+        # 50 mm plate tags) and a non-zero center z (a tag on a plate lying on the floor).
         self.tag_size_mm = float(floor_map["tag_black_square_size"])
+        # camera index -> [x, y, z] mm in the floor frame, when known (from the lab model).  Needed
+        # to use a raised anchor in a floor homography: its corners are slid down the camera ray
+        # onto z = 0 first.  Without a position raised anchors stay out of the homography paths.
+        self.camera_positions_mm: dict[int, np.ndarray] = {}
+        # Rigid tag plates (a printed board of tags with exact pitch): the map's "plates" block is
+        # the single source of that geometry; plate_tags maps every plate tag id -> (plate, col, row).
+        self.plates: list[dict[str, Any]] = [dict(p) for p in (floor_map.get("plates") or [])]
+        self.plate_tags: dict[int, tuple[dict[str, Any], int, int]] = {}
+        for plate in self.plates:
+            for col in range(int(plate["cols"])):
+                for row in range(int(plate["rows"])):
+                    self.plate_tags[plate_tag_id(plate, col, row)] = (plate, col, row)
         active_ids = floor_map.get("active_anchor_ids")
         if active_ids is None:
             active_ids = [tag["id"] for tag in floor_map["tags"] if "yaw_degrees" in tag]
@@ -213,10 +264,90 @@ class PlanarPoseEstimator:
                 ),
             )
 
+    def anchor_size_mm(self, tag_id: int) -> float:
+        """Black-square edge of one anchor: its own ``black_square_size`` or the map default."""
+        return float(self.anchors[tag_id].get("black_square_size") or self.tag_size_mm)
+
+    def anchor_height_mm(self, tag_id: int) -> float:
+        """z of the anchor's face above the floor plane (0 for a tag stuck to the floor)."""
+        center = self.anchors[tag_id]["center"]
+        return float(center[2]) if len(center) > 2 and center[2] is not None else 0.0
+
+    def anchor_corners_3d(self, tag_id: int) -> np.ndarray:
+        """4x3 corners in the floor frame, for PnP paths (exact for raised anchors)."""
+        xy = self.anchor_corners(tag_id)
+        return np.column_stack([xy, np.full(len(xy), self.anchor_height_mm(tag_id))])
+
+    def anchor_corners_for_view(self, tag_id: int, camera_index: int | None) -> np.ndarray | None:
+        """4x2 corners usable in the z = 0 homography of one camera.
+
+        A tag on the floor is returned as is.  A raised tag (plate) is slid down the rays from the
+        camera centre to the floor plane, which is exactly where a plane homography of z = 0 sees
+        it.  None when the tag is raised and this camera's position is unknown."""
+        z = self.anchor_height_mm(tag_id)
+        xy = self.anchor_corners(tag_id)
+        if abs(z) < 1e-6:
+            return xy
+        cam = self.camera_positions_mm.get(int(camera_index)) if camera_index is not None else None
+        if cam is None:
+            return None
+        cam = np.asarray(cam, dtype=np.float64)
+        if cam[2] <= z:
+            return None
+        s = cam[2] / (cam[2] - z)          # ray from the camera through the raised point, hitting z = 0
+        return cam[:2] + (xy - cam[:2]) * s
+
+    def plate_check(self, tags: dict[str, np.ndarray] | dict[int, np.ndarray], homography: np.ndarray,
+                    camera_index: int | None) -> dict[str, Any] | None:
+        """How well the plate's exact geometry survives a trip through ``homography``: the detected plate
+        tag centres, mapped to the floor, fitted by one rigid pose of the plate; rms / max residual in mm.
+        A ruler laid over the camera model.  None without a plate or fewer than 4 of its tags in view."""
+        if not self.plates:
+            return None
+        inverse = np.linalg.inv(homography)
+        out: dict[str, Any] = {}
+        for plate in self.plates:
+            seen = [t for t in tags if int(t) in self.plate_tags and self.plate_tags[int(t)][0] is plate]
+            if len(seen) < 4:
+                continue
+            centres = {int(t): _project(np.asarray(tags[t], dtype=np.float64).reshape(4, 2), inverse).mean(axis=0) for t in seen}
+            # the plate face is raised: compare in the z = 0 picture of it the homography actually sees
+            s = 1.0
+            cam = self.camera_positions_mm.get(int(camera_index)) if camera_index is not None else None
+            z = float(plate.get("z_mm", 0.0))
+            if cam is not None and cam[2] > z > 0:
+                s = cam[2] / (cam[2] - z)
+            ids = sorted(centres)
+            local = np.array([plate_local_center(plate, *self.plate_tags[t][1:]) * s for t in ids])
+            meas = np.array([centres[t] for t in ids])
+            # closed-form rigid fit (Procrustes without scale): rotation from the SVD of the cross-covariance
+            lc, mc = local - local.mean(axis=0), meas - meas.mean(axis=0)
+            u, _sv, vt = np.linalg.svd(lc.T @ mc)
+            rot = (u @ vt).T
+            if np.linalg.det(rot) < 0:
+                u[:, -1] *= -1
+                rot = (u @ vt).T
+            fitted = (rot @ lc.T).T + meas.mean(axis=0)
+            err = np.linalg.norm(fitted - meas, axis=1)
+            entry = {"tags": len(ids), "rms_mm": round(float(np.sqrt(np.mean(err ** 2))), 2), "max_mm": round(float(err.max()), 2)}
+            # and where the camera puts the plate versus its surveyed pose in the map (the ruler's position)
+            base_id = plate_tag_id(plate, 0, 0)
+            if base_id in self.anchors:
+                expected = np.array([self.anchor_corners_for_view(t, camera_index).mean(axis=0) if self.anchor_corners_for_view(t, camera_index) is not None
+                                     else self.anchor_corners(t).mean(axis=0) for t in ids])
+                shift = meas.mean(axis=0) - expected.mean(axis=0)
+                heading_meas = math.degrees(math.atan2(rot[1, 0], rot[0, 0]))
+                heading_map = float(self.anchors[base_id]["yaw_degrees"]) - float(plate.get("tag_yaw_in_plate_deg", 0.0))
+                entry.update({"offset_mm": [round(float(shift[0]), 2), round(float(shift[1]), 2)],
+                              "offset_norm_mm": round(float(np.linalg.norm(shift)), 2),
+                              "heading_error_deg": round(_angle_difference_degrees(heading_meas, heading_map), 3)})
+            out[str(plate.get("name"))] = entry
+        return out or None
+
     def anchor_corners(self, tag_id: int) -> np.ndarray:
         anchor = self.anchors[tag_id]
         center = np.asarray(anchor["center"][:2], dtype=np.float64)
-        half = self.tag_size_mm / 2.0
+        half = self.anchor_size_mm(tag_id) / 2.0
         # OpenCV returns marker corners in canonical top-left, top-right,
         # bottom-right, bottom-left order.  In the tag frame (+Y toward the
         # printed top), that is (-X,+Y), (+X,+Y), (+X,-Y), (-X,-Y).
@@ -234,16 +365,27 @@ class PlanarPoseEstimator:
         )
         return center + offsets @ rotation.T
 
+    def homography_anchors(self, tags: dict[int, np.ndarray], camera_index: int | None) -> list[int]:
+        """Visible active anchors this camera's floor homography may use (raised ones only when
+        the camera position is known, see anchor_corners_for_view)."""
+        return [tag_id for tag_id in self.active_anchor_ids
+                if tag_id in tags and self.anchor_corners_for_view(tag_id, camera_index) is not None]
+
     def _fit_homography(
         self,
         tags: dict[int, np.ndarray],
         anchor_ids: list[int],
+        camera_index: int | None = None,
     ) -> np.ndarray | None:
         if not anchor_ids:
             return None
-        world = np.concatenate([self.anchor_corners(tag_id) for tag_id in anchor_ids])
+        world = np.concatenate([self.anchor_corners_for_view(tag_id, camera_index) for tag_id in anchor_ids])
         image = np.concatenate([tags[tag_id] for tag_id in anchor_ids])
-        method = cv2.RANSAC if len(world) > 4 else 0
+        # RANSAC guards a handful of anchors against one misdetection.  With a rigid plate in view (80
+        # exact corners in one patch) its 3 px consensus just picks the plate or the anchors and drops
+        # the rest, so every point is fitted by least squares instead.
+        has_plate = any(tag_id in self.plate_tags for tag_id in anchor_ids)
+        method = cv2.RANSAC if (len(world) > 4 and not has_plate) else 0
         homography, _mask = cv2.findHomography(
             world.astype(np.float32), image.astype(np.float32), method, 3.0
         )
@@ -253,12 +395,13 @@ class PlanarPoseEstimator:
 
     def _calibrate_camera(self, snapshot: dict[str, Any]) -> CameraCalibration | None:
         tags = snapshot["tags"]
-        visible = [tag_id for tag_id in self.active_anchor_ids if tag_id in tags]
-        homography = self._fit_homography(tags, visible)
+        camera_index = snapshot.get("index")
+        visible = self.homography_anchors(tags, camera_index)
+        homography = self._fit_homography(tags, visible, camera_index)
         if homography is None:
             return None
         inverse = np.linalg.inv(homography)
-        world = np.concatenate([self.anchor_corners(tag_id) for tag_id in visible])
+        world = np.concatenate([self.anchor_corners_for_view(tag_id, camera_index) for tag_id in visible])
         image = np.concatenate([tags[tag_id] for tag_id in visible])
         image_residual = _project(world, homography) - image
         world_residual = _project(image, inverse) - world
@@ -270,11 +413,11 @@ class PlanarPoseEstimator:
         if len(visible) >= 2:
             for held_out in visible:
                 training = [tag_id for tag_id in visible if tag_id != held_out]
-                trial = self._fit_homography(tags, training)
+                trial = self._fit_homography(tags, training, camera_index)
                 if trial is None:
                     continue
                 estimated = _project(tags[held_out], np.linalg.inv(trial))
-                expected = self.anchor_corners(held_out)
+                expected = self.anchor_corners_for_view(held_out, camera_index)
                 leave_position.append(
                     float(np.linalg.norm(estimated.mean(axis=0) - expected.mean(axis=0)))
                 )
@@ -545,8 +688,7 @@ class PlanarPoseEstimator:
         visible = [tag_id for tag_id in self.active_anchor_ids if tag_id in snapshot["tags"]]
         if len(visible) < 2:
             return None
-        world_xy = np.concatenate([self.anchor_corners(tag_id) for tag_id in visible])
-        world = np.column_stack([world_xy, np.zeros(len(world_xy), dtype=np.float64)])
+        world = np.concatenate([self.anchor_corners_3d(tag_id) for tag_id in visible])
         image = np.concatenate([snapshot["tags"][tag_id] for tag_id in visible])
         solved, rvec, _tvec = cv2.solvePnP(
             world.astype(np.float32),

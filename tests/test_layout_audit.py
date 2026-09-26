@@ -6,6 +6,10 @@ import numpy as np
 from hexapod_tracker.layout_audit import audit_images, validate_layout
 from hexapod_tracker.paths import CONFIG_DIR
 
+from hexapod_tracker.paths import CONFIG_DIR as _CFG
+import json as _json
+FLOOR_TAGS_IN_MAP = _json.loads((_CFG / "floor_tag_map.json").read_text())["tags"]
+
 
 def load_config(name):
     return json.loads((CONFIG_DIR / name).read_text(encoding="utf-8"))
@@ -26,7 +30,7 @@ def test_hexapod_1_layout_matches_consumer_configs():
     # Every mount is either carried by a tag or declared as a gap; 37 is the
     # full complement (1 chassis + 12 lids + 24 yoke faces).
     assert len(ids) + len(layout.get("unresolved_mounts", [])) == 37
-    assert len(layout["floor"]["tags"]) == 13   # 7 photographed + 6 camera-surveyed grid tags (2026-09-19)
+    assert len(layout["floor"]["tags"]) == len(FLOOR_TAGS_IN_MAP)   # 7 photographed + 6 camera-surveyed grid tags (2026-09-19)   # every floor-map tag (13 grid anchors + the 20-tag plate) is mirrored
 
 
 def _minimal_layout(**overrides):

@@ -86,3 +86,18 @@ def test_entry_is_identity_keyed_and_upsert_replaces_by_stable_id():
     assert updated["cameras"]["elp_4k_u3"]["camera_matrix"][0][0] == 4280.0
     added = upsert_entry(updated, "ov9281", {**entry, "stable_id": "0x41100000c456366"})
     assert set(added["cameras"]) == {"elp_4k_u3", "ov9281"}
+
+
+def test_pooled_rms_accepts_three_dimensional_world_points():
+    from hexapod_tracker.fit_intrinsics import pooled_rms
+    rng = np.random.default_rng(3)
+    K = np.array([[1000.0, 0, 640.0], [0, 1000.0, 360.0], [0, 0, 1]])
+    world = np.array([[x, y, z] for x, y in [(0, 0), (300, 0), (0, 300), (300, 300), (150, 150)]
+                      for z in (0.0,)] + [[150.0, 450.0, 3.0]] * 1, dtype=np.float64)
+    world = np.vstack([world, [[-300.0, 150.0, 3.0], [600.0, 150.0, 3.0], [150.0, -300.0, 3.0]]])
+    rvec = np.array([np.pi, 0.0, 0.0]); tvec = np.array([-150.0, 150.0, 1500.0])
+    image, _ = cv2.projectPoints(world, rvec, tvec, K, np.zeros(5))
+    image = image.reshape(-1, 2) + rng.normal(0, 0.05, (len(world), 2))
+    assert pooled_rms(1000.0, (1280, 720), [(world, image)]) < 0.2
+    # the same corners flattened to z = 0 still solve (planar path), just less exactly
+    assert pooled_rms(1000.0, (1280, 720), [(world[:, :2], image)]) < 5.0

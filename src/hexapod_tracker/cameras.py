@@ -73,6 +73,28 @@ DEFAULT_PREFERRED_SIZES = ((1920, 1440), (1920, 1080), (1280, 720))
 DEFAULT_PROCESSING_WIDTH = 1280
 UVC_UTIL_ENV = "HEXAPOD_UVC_UTIL"
 DEFAULT_UVC_UTIL = Path.home() / ".hexapod" / "bin" / "uvc-util"     # built from github.com/jtfrey/uvc-util
+LAB_MODEL_ENV = "HEXAPOD_LAB_MODEL_FILE"
+DEFAULT_LAB_MODEL = Path("~/.hexapod/lab_model.json")     # solved camera poses (robot-lab lab_model.py); positions
+                                                          # let a raised anchor (the 50 mm plate) join a floor homography
+
+
+def camera_positions_from_lab_model(path: Path | None = None) -> dict[str, np.ndarray]:
+    """stable_id (and studio-<role> name) -> [x, y, z] mm of every solved camera in the lab model; {} if absent."""
+    p = Path(os.environ.get(LAB_MODEL_ENV) or (path or DEFAULT_LAB_MODEL)).expanduser()
+    try:
+        model = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, np.ndarray] = {}
+    for cam in model.get("cameras") or []:
+        pos = cam.get("position_mm")
+        if not cam.get("solved") or not pos or len(pos) < 3:
+            continue
+        xyz = np.asarray(pos[:3], dtype=np.float64)
+        for key in (cam.get("stable_id"), cam.get("name")):
+            if key:
+                out[str(key)] = xyz
+    return out
 MIN_ANCHORS_TO_REFIT = 3     # fewer visible floor anchors than this: keep the saved floor fit
 FFMPEG = os.environ.get("HEXAPOD_FFMPEG", "ffmpeg")
 
@@ -512,6 +534,13 @@ class Rig:
         self.estimator = PlanarPoseEstimator(self.configs["floor_map"], self.configs["part_map"],
                                              self.configs["robot_layout"], calibration_for_slots(self.cameras))
         self.estimator.hold_calibration_s = 1e9          # a run is shorter than any sensible hold
+        positions = camera_positions_from_lab_model()
+        for cam in self.cameras:
+            pos = positions.get(cam.stable_id)
+            if pos is None:
+                pos = positions.get(f"studio-{cam.role}")
+            if pos is not None:
+                self.estimator.camera_positions_mm[cam.index] = pos
         self.state_seq = 0
         self.opened = False
 
@@ -642,7 +671,11 @@ class Rig:
         if size is None:
             raise RuntimeError(f"{role}: no frames")
         tags = median_tags(obs_list, need=max(1, (len(obs_list) + 1) // 2))
-        anchors = [t for t in self.estimator.active_anchor_ids if t in tags]
+        anchors = self.estimator.homography_anchors(tags, cam.index)
+        raised_skipped = [t for t in self.estimator.active_anchor_ids if t in tags and t not in anchors]
+        if raised_skipped:
+            self.log(f"{role}: raised anchors {raised_skipped} seen but this camera has no solved position in the lab "
+                     f"model; run the camera survey (lab_model.py) first to use them in the floor fit")
         if len(anchors) < 3:
             raise RuntimeError(f"{role}: only floor anchors {anchors} seen (need 3+ of {self.estimator.active_anchor_ids})")
         cal = self.estimator._calibrate_camera({"index": cam.index, "width": size[0], "height": size[1], "tags": tags})
@@ -651,7 +684,11 @@ class Rig:
         floor_path = Path(self.configs["paths"]["floor_map"])
         saved = floor_fit_to_json(cal, size, floor_map_path=str(floor_path), floor_map_digest=file_digest(floor_path),
                                   frames=len(obs_list), clock=self.clock)
+        plate = self.estimator.plate_check(tags, np.asarray(saved["homography"], dtype=np.float64), cam.index)
+        if plate:
+            saved["plate_check"] = plate
         report = {"role": role, "stable_id": cam.stable_id, "anchors_seen": anchors, "frames_used": len(obs_list),
+                  "raised_anchors_skipped": raised_skipped, "plate_check": plate,
                   "robot_tags_seen": sorted(t for t in tags if t not in self.estimator.anchors),
                   "quality": cal.quality, "reprojection_rms_px": saved["reprojection_rms_px"],
                   "leave_one_anchor_out_position_mm": saved["leave_one_anchor_out_position_mm"]}
@@ -669,7 +706,7 @@ class Rig:
                 obs_list.append(cam.detect(frame))
             sleep(interval_s)
         tags = median_tags(obs_list, need=max(1, (len(obs_list) + 1) // 2))
-        anchors = [t for t in self.estimator.active_anchor_ids if t in tags]
+        anchors = self.estimator.homography_anchors(tags, cam.index)
         report: dict[str, Any] = {"role": role, "stable_id": cam.stable_id, "frames": len(obs_list),
                                   "anchors_seen": anchors, "robot_tags_seen": sorted(t for t in tags if t not in self.estimator.anchors),
                                   "saved_fit": bool(saved), "ok": False}
@@ -680,7 +717,7 @@ class Rig:
             report["reason"] = "no floor anchor visible"
             return report
         H = np.asarray(saved["homography"], dtype=np.float64)
-        world = np.concatenate([self.estimator.anchor_corners(t) for t in anchors])
+        world = np.concatenate([self.estimator.anchor_corners_for_view(t, cam.index) for t in anchors])
         image = np.concatenate([tags[t] for t in anchors])
         pts = cv2.perspectiveTransform(world.reshape(-1, 1, 2).astype(np.float64), H).reshape(-1, 2)
         residual = np.linalg.norm(pts - image, axis=1)
@@ -689,6 +726,7 @@ class Rig:
         report["ok"] = report["drift_rms_px"] <= drift_px
         if not report["ok"]:
             report["reason"] = "anchors moved in the picture: the camera was bumped or the floor map changed; refit"
+        report["plate_check"] = self.estimator.plate_check(tags, H, cam.index)
         return report
 
 

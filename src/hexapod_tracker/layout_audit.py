@@ -400,7 +400,7 @@ def audit_side_orientations(
 
 
 def _floor_corners(tag: dict[str, Any], tag_size_mm: float) -> np.ndarray:
-    half = tag_size_mm / 2.0
+    half = float(tag.get("black_square_size") or tag_size_mm) / 2.0
     offsets = np.asarray(
         [[-half, half], [half, half], [half, -half], [-half, -half]],
         dtype=np.float64,

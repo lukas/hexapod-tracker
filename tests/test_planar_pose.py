@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from hexapod_tracker.planar_pose import PlanarPoseEstimator
+from hexapod_tracker.planar_pose import PlanarPoseEstimator, plate_tag_entries, plate_tag_id, plate_tag_pose
 
 
 def corners(center, yaw_degrees, size=27.0):
@@ -392,3 +392,114 @@ def test_fixed_camera_keeps_its_floor_calibration_while_anchors_are_hidden():
     estimator.hold_calibration_s = -1.0
     third = estimator.estimate([{"index": 2, "width": 1280, "height": 800, "tags": image({7: corners((310, 250), 20)})}])
     assert third["calibration"]["cameras"]["2"]["status"] == "uncalibrated" and "7" not in third["markers"]
+
+
+def _plate_floor_map():
+    """Two floor anchors plus a 50 mm tag sitting 3 mm up on a plate (own black_square_size, z in center)."""
+    return {
+        "tag_black_square_size": 27.0,
+        "active_anchor_ids": [12, 13, 400],
+        "coordinate_frame": {"origin": "tag 12"},
+        "tags": [
+            {"id": 12, "center": [0, 0, 0], "yaw_degrees": 0},
+            {"id": 13, "center": [0, 600, 0], "yaw_degrees": 10},
+            {"id": 400, "center": [300, 100, 3.0], "yaw_degrees": 90, "black_square_size": 50.0},
+        ],
+    }
+
+
+def test_anchor_corners_use_per_tag_size_and_height():
+    est = PlanarPoseEstimator(_plate_floor_map(), {"parts": []})
+    assert est.anchor_size_mm(12) == 27.0
+    assert est.anchor_size_mm(400) == 50.0
+    small = est.anchor_corners(12)
+    big = est.anchor_corners(400)
+    assert abs(np.linalg.norm(small[1] - small[0]) - 27.0) < 1e-6
+    assert abs(np.linalg.norm(big[1] - big[0]) - 50.0) < 1e-6
+    assert est.anchor_height_mm(400) == 3.0
+    assert est.anchor_corners_3d(400).shape == (4, 3)
+    assert np.allclose(est.anchor_corners_3d(400)[:, 2], 3.0)
+    assert np.allclose(est.anchor_corners_3d(12)[:, 2], 0.0)
+
+
+def test_raised_anchor_is_flattened_along_the_camera_ray_or_excluded():
+    est = PlanarPoseEstimator(_plate_floor_map(), {"parts": []})
+    # without a camera position the raised tag cannot join a z = 0 homography
+    assert est.anchor_corners_for_view(400, 0) is None
+    assert est.homography_anchors({12: None, 13: None, 400: None}, 0) == [12, 13]
+    # with one, its corners slide down the rays onto the floor: farther from the nadir by z / (h - z)
+    est.camera_positions_mm[0] = np.array([0.0, 0.0, 603.0])
+    flat = est.anchor_corners_for_view(400, 0)
+    raised = est.anchor_corners(400)
+    assert np.allclose(flat, raised * 603.0 / 600.0)
+    assert est.homography_anchors({12: None, 13: None, 400: None}, 0) == [12, 13, 400]
+    # a floor tag is untouched
+    assert np.allclose(est.anchor_corners_for_view(12, 0), est.anchor_corners(12))
+
+
+def test_homography_fit_with_a_raised_plate_tag_recovers_a_floor_marker():
+    """Render the scene with a real pinhole camera (so the plate really is 3 mm up), then fit."""
+    floor_map = _plate_floor_map()
+    est = PlanarPoseEstimator(floor_map, {"parts": []})
+    cam_pos = np.array([150.0, 250.0, 900.0])
+    est.camera_positions_mm[0] = cam_pos
+    K = np.array([[1200.0, 0, 640.0], [0, 1200.0, 400.0], [0, 0, 1]])
+    R = np.diag([1.0, -1.0, -1.0])                       # looking straight down, image y flipped
+    t = -R @ cam_pos
+
+    def project(pts3):
+        p = (R @ pts3.T).T + t
+        return (K @ p.T).T[:, :2] / p[:, 2:3]
+
+    image_tags = {tid: project(est.anchor_corners_3d(tid)) for tid in (12, 13, 400)}
+    image_tags[16] = project(np.column_stack([corners((125, 240), 32), np.zeros(4)]))
+    payload = est.estimate([{"index": 0, "width": 1280, "height": 800, "frame_age_s": 0.01, "tags": image_tags}])
+    marker = payload["markers"]["16"]
+    assert abs(marker["position_mm"]["x"] - 125.0) < 0.1
+    assert abs(marker["position_mm"]["y"] - 240.0) < 0.1
+    assert payload["calibration"]["cameras"]["0"]["anchor_ids"] == [12, 13, 400]
+
+
+def test_plate_geometry_is_derived_from_the_map_block():
+    plate = {"name": "p", "base_id": 400, "cols": 5, "rows": 4, "pitch_mm": 62.5, "black_square_size": 50.0,
+             "z_mm": 3.0, "tag_yaw_in_plate_deg": 90.0}
+    assert plate_tag_id(plate, 0, 0) == 400
+    assert plate_tag_id(plate, 1, 0) == 404          # ids run down each column
+    assert plate_tag_id(plate, 4, 3) == 419
+    center, yaw = plate_tag_pose(plate, (100.0, 200.0, 0.0), 2, 1)
+    assert np.allclose(center, [225.0, 262.5])
+    assert yaw == 90.0
+    center, yaw = plate_tag_pose(plate, (0.0, 0.0, 90.0), 1, 0)    # columns now run along +y
+    assert np.allclose(center, [0.0, 62.5])
+    assert yaw == 180.0 or yaw == -180.0
+    entries = plate_tag_entries(plate, (0.0, 0.0, 0.0), source="test")
+    assert len(entries) == 20 and entries[0]["center"][2] == 3.0 and entries[0]["black_square_size"] == 50.0
+    est = PlanarPoseEstimator({"tag_black_square_size": 27.0, "active_anchor_ids": [], "tags": [], "plates": [plate]}, {"parts": []})
+    assert est.plate_tags[419][1:] == (4, 3)
+
+
+def test_plate_check_reports_the_rigid_residual_through_a_homography():
+    plate = {"name": "p", "base_id": 400, "cols": 5, "rows": 4, "pitch_mm": 62.5, "black_square_size": 50.0,
+             "z_mm": 0.0, "tag_yaw_in_plate_deg": 90.0}
+    fm = {"tag_black_square_size": 27.0, "active_anchor_ids": [], "tags": [], "plates": [plate]}
+    est = PlanarPoseEstimator(fm, {"parts": []})
+    H = np.asarray([[1.4, 0.15, 300], [-0.1, 1.1, 100], [0.0002, 0.0003, 1]], dtype=np.float64)
+    tags = {}
+    for tid, (_p, c, r) in est.plate_tags.items():
+        center, yaw = plate_tag_pose(plate, (-300.0, 500.0, 7.0), c, r)
+        tags[tid] = cv2.perspectiveTransform(corners(center, yaw, 50.0)[None].astype(np.float64), H)[0]
+    exact = est.plate_check(tags, H, None)["p"]
+    assert exact["tags"] == 20 and exact["rms_mm"] < 0.01
+    assert "offset_mm" not in exact                          # plate not in the map yet: shape only
+    # once surveyed into the map, the check also reports where this camera puts the plate vs the map
+    fm2 = {**fm, "tags": plate_tag_entries(plate, (-300.0, 500.0, 7.0), source="t"), "active_anchor_ids": list(est.plate_tags)}
+    est2 = PlanarPoseEstimator(fm2, {"parts": []})
+    placed = est2.plate_check(tags, H, None)["p"]
+    assert placed["offset_norm_mm"] < 0.01 and abs(placed["heading_error_deg"]) < 0.01
+    fm3 = {**fm2, "tags": plate_tag_entries(plate, (-310.0, 500.0, 7.0), source="t")}
+    moved = PlanarPoseEstimator(fm3, {"parts": []}).plate_check(tags, H, None)["p"]
+    assert abs(moved["offset_norm_mm"] - 10.0) < 0.05
+    tags[419] = tags[419] + np.array([[3.0, 0.0]] * 4)       # one tag nudged ~2 mm in the picture
+    bent = est.plate_check(tags, H, None)["p"]
+    assert 0.3 < bent["rms_mm"] < 3.0 and bent["max_mm"] > bent["rms_mm"]
+    assert est.plate_check({400: tags[400]}, H, None) is None

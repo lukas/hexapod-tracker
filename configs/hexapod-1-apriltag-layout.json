@@ -190,19 +190,19 @@
     ],
     "world_from_tag": {
      "translation_m": [
-      -0.3052,
-      -0.001,
+      -0.3047,
+      -0.0033,
       0.0
      ],
      "quaternion_xyzw": [
       0.0,
       0.0,
-      -0.718527,
-      0.6954991
+      -0.7171843,
+      0.6968835
      ]
     },
-    "yaw_deg": -91.866,
-    "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 2 cameras (laptop-cam0, laptop-cam1); nominal grid site [-1, 0], measured 1 mm from it"
+    "yaw_deg": -91.645,
+    "source": "2026-09-26: camera survey (survey_tags.py) against the seven photographed anchors, 4 cameras (studio-ceiling, studio-top, laptop-cam0, laptop-cam1); nominal grid site [-1, 0], measured 3 mm from it"
    },
    {
     "id": 111,
@@ -212,19 +212,19 @@
     ],
     "world_from_tag": {
      "translation_m": [
-      -0.2992,
-      0.3012,
+      -0.2975,
+      0.3015,
       0.0
      ],
      "quaternion_xyzw": [
       0.0,
       0.0,
-      -0.7188001,
-      0.6952169
+      -0.7121118,
+      0.7020661
      ]
     },
-    "yaw_deg": -91.911,
-    "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 4 cameras (studio-side2, studio-top, laptop-cam0, laptop-cam1); nominal grid site [-1, 1], measured 7 mm from it"
+    "yaw_deg": -90.814,
+    "source": "2026-09-26: camera survey (survey_tags.py) against the seven photographed anchors, 5 cameras (studio-ceiling, studio-side2, studio-top, laptop-cam0, laptop-cam1); nominal grid site [-1, 1], measured 8 mm from it"
    },
    {
     "id": 115,
@@ -234,19 +234,19 @@
     ],
     "world_from_tag": {
      "translation_m": [
-      -0.6106,
-      0.0023,
+      -0.6065,
+      0.0055,
       0.0
      ],
      "quaternion_xyzw": [
       0.0,
       0.0,
-      -0.7160096,
-      0.6980904
+      -0.713226,
+      0.7009342
      ]
     },
-    "yaw_deg": -91.452,
-    "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 2 cameras (laptop-cam0, laptop-cam1); nominal grid site [-2, 0], measured 3 mm from it"
+    "yaw_deg": -90.996,
+    "source": "2026-09-26: camera survey (survey_tags.py) against the seven photographed anchors, 3 cameras (studio-ceiling, laptop-cam0, laptop-cam1); nominal grid site [-2, 0], measured 6 mm from it"
    },
    {
     "id": 118,
@@ -256,19 +256,19 @@
     ],
     "world_from_tag": {
      "translation_m": [
-      -0.6055,
-      0.3066,
+      -0.6015,
+      0.3072,
       0.0
      ],
      "quaternion_xyzw": [
       0.0,
       0.0,
-      -0.7116767,
-      0.7025071
+      -0.7155525,
+      0.6985589
      ]
     },
-    "yaw_deg": -90.743,
-    "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 3 cameras (studio-side2, laptop-cam0, laptop-cam1); nominal grid site [-2, 1], measured 4 mm from it"
+    "yaw_deg": -91.377,
+    "source": "2026-09-26: camera survey (survey_tags.py) against the seven photographed anchors, 3 cameras (studio-ceiling, laptop-cam0, laptop-cam1); nominal grid site [-2, 1], measured 8 mm from it"
    },
    {
     "id": 106,
@@ -278,19 +278,19 @@
     ],
     "world_from_tag": {
      "translation_m": [
-      -0.5966,
-      0.6147,
+      -0.593,
+      0.6131,
       0.0
      ],
      "quaternion_xyzw": [
       0.0,
       0.0,
-      -0.7109591,
-      0.7032334
+      -0.7078037,
+      0.7064092
      ]
     },
-    "yaw_deg": -90.626,
-    "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 2 cameras (laptop-cam0, laptop-cam1); nominal grid site [-2, 2], measured 14 mm from it"
+    "yaw_deg": -90.113,
+    "source": "2026-09-26: camera survey (survey_tags.py) against the seven photographed anchors, 3 cameras (studio-ceiling, studio-top, laptop-cam1); nominal grid site [-2, 2], measured 17 mm from it"
    },
    {
     "id": 116,
@@ -300,19 +300,399 @@
     ],
     "world_from_tag": {
      "translation_m": [
-      -0.9025,
-      0.6186,
+      -0.8964,
+      0.6187,
       0.0
      ],
      "quaternion_xyzw": [
       0.0,
       0.0,
-      -0.7128344,
-      0.7013324
+      -0.7180534,
+      0.695988
      ]
     },
-    "yaw_deg": -90.932,
-    "source": "2026-09-19: camera survey (survey_tags.py) against the seven photographed anchors, 1 cameras (laptop-cam1); nominal grid site [-3, 2], measured 15 mm from it"
+    "yaw_deg": -91.788,
+    "source": "2026-09-26: camera survey (survey_tags.py) against the seven photographed anchors, 2 cameras (studio-ceiling, laptop-cam1); nominal grid site [-3, 2], measured 20 mm from it"
+   },
+   {
+    "id": 400,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.41876,
+      0.54588,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 401,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.41762,
+      0.60837,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 402,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.41648,
+      0.67086,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 403,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.41535,
+      0.73335,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 404,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.35627,
+      0.54474,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 405,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.35513,
+      0.60723,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 406,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.354,
+      0.66972,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 407,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.35286,
+      0.73221,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 408,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.29378,
+      0.5436,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 409,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.29264,
+      0.60609,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 410,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.29151,
+      0.66858,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 411,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.29037,
+      0.73107,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 412,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.23129,
+      0.54247,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 413,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.23015,
+      0.60496,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 414,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.22902,
+      0.66745,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 415,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.22788,
+      0.72994,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 416,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.1688,
+      0.54133,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 417,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.16766,
+      0.60382,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 418,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.16653,
+      0.66631,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
+   },
+   {
+    "id": 419,
+    "grid": null,
+    "world_from_tag": {
+     "translation_m": [
+      -0.16539,
+      0.7288,
+      0.003
+     ],
+     "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.7006416,
+      0.7135134
+     ]
+    },
+    "yaw_deg": 88.957,
+    "source": "2026-09-26: rigid plate plate50 surveyed by survey_tags.py against the fixed anchors, 6 cameras (studio-ceiling, studio-side, studio-side2, studio-top, laptop-cam0, laptop-cam1); tag geometry from the map's plates block (pitch 62.5 mm, 50.0 mm squares, z 3.0 mm)"
    }
   ],
   "position_uncertainty_m": 0.005,

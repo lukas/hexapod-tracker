@@ -75,8 +75,12 @@ def pooled_rms(f: float, image_size: tuple[int, int], observations: Sequence[tup
     total = 0.0
     count = 0
     for world_xy, image in observations:
-        obj = np.hstack([world_xy, np.zeros((len(world_xy), 1))]).astype(np.float64)
-        ok, rvec, tvec = cv2.solvePnP(obj, image, K, zeros, flags=cv2.SOLVEPNP_IPPE)
+        obj = np.asarray(world_xy, dtype=np.float64)
+        if obj.shape[1] == 2:                       # planar corners; callers may also pass x, y, z (raised plate tags)
+            obj = np.hstack([obj, np.zeros((len(obj), 1))])
+        image = np.asarray(image, dtype=np.float64).reshape(-1, 2)
+        flags = cv2.SOLVEPNP_IPPE if np.ptp(obj[:, 2]) < 1e-6 else cv2.SOLVEPNP_SQPNP   # IPPE needs coplanar points
+        ok, rvec, tvec = cv2.solvePnP(obj, image, K, zeros, flags=flags)
         if not ok:
             continue
         ok, rvec, tvec = cv2.solvePnP(obj, image, K, zeros, rvec, tvec, True, cv2.SOLVEPNP_ITERATIVE)
@@ -210,7 +214,9 @@ def collect_observations_from(grab: "Callable[[], np.ndarray]", frames: int, int
         gray = grab()
         size = (gray.shape[1], gray.shape[0])
         corners = {int(k): np.asarray(v, dtype=np.float64).reshape(4, 2) for k, v in detect_tag_corners(gray, detector).items()}
-        visible = [tag for tag in estimator.active_anchor_ids if tag in corners]
+        # single-plane method: only anchors lying in the z = 0 plane
+        visible = [tag for tag in estimator.active_anchor_ids
+                   if tag in corners and abs(estimator.anchor_height_mm(tag)) < 1e-6]
         if len(visible) >= 3:
             seen.update(visible)
             world = np.concatenate([estimator.anchor_corners(tag) for tag in visible])

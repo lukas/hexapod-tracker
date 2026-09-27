@@ -348,7 +348,7 @@ def test_topology_watch_holds_while_a_lease_or_an_armed_robot_says_so(monkeypatc
     for kwargs in ({"leases": True}, {"armed": True}):
         watch, exits = _watch(monkeypatch, discovered={"a", "b"}, **kwargs)
         watch.start()
-        time.sleep(0.1)
+        time.sleep(0.05)
         watch.stop()
         watch.join(timeout=1.0)
         assert exits == [], kwargs
@@ -366,7 +366,7 @@ def test_topology_watch_does_nothing_while_the_rig_matches(monkeypatch):
 
     watch, exits = _watch(monkeypatch, discovered={"a"})
     watch.start()
-    time.sleep(0.1)
+    time.sleep(0.05)
     watch.stop()
     watch.join(timeout=1.0)
     assert exits == []

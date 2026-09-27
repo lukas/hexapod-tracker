@@ -36,4 +36,9 @@ hexapod-rgbd-calibrate = "hexapod_tracker.rgbd_calibrate:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -n 4"   # pytest-xdist: 4 workers is the sweet spot on the Mac Studio (1.9 s; 32 workers 2.5 s, serial 4.7 s)
+
+[dependency-groups]
+dev = [
+    "pytest-xdist>=3.8.0",
+]

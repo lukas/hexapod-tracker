@@ -161,7 +161,7 @@ def test_replay_of_the_2026_09_11_pass_reproduces_the_installed_layout():
     expected = json.loads((FIXTURE / "expected_layout.json").read_text())
     # the layout that was installed when this pass ran; its horizontal tags seed the focal fit
     backup = json.loads((FIXTURE / "previous_layout.json").read_text())
-    floor = json.loads((CONFIG_DIR / "floor_tag_map.json").read_text())
+    floor = json.loads((FIXTURE / "floor_tag_map.json").read_text())     # the 7-anchor map of that day, not today's
     floor_ids = {int(t["id"]) for t in floor["tags"]}
     link_of = tc.resolve_links(tc.votes_from_reports([report]), lambda m: None)
     derived = tc.derive_layout(tc.tags_only({c: {"tags": t} for c, t in zero.items()}), sizes, link_of, backup,
@@ -185,13 +185,17 @@ def test_replay_of_the_2026_09_11_pass_reproduces_the_installed_layout():
 
 
 def test_installed_layout_keeps_what_the_replay_established():
-    """Later passes may add tags and refine azimuths, but never contradict this one."""
+    """Later passes may add tags, refine azimuths and RE-TAPE a face (a new id on the same frame, e.g. leg 5's
+    lids 4/14 became 114/117 on 2026-09-12), but never contradict this one."""
     installed = json.loads((CONFIG_DIR / "hexapod-1-apriltag-layout.json").read_text())
     expected = json.loads((FIXTURE / "expected_layout.json").read_text())
     got = {t["id"]: t for t in installed["robot_tags"]}
+    faces_now = {(t["frame"], t["kind"], t.get("mount_side")) for t in installed["robot_tags"]}
     for t in expected["robot_tags"]:
         if not t.get("verified", True):
             continue                      # carried faces may be replaced by a seen tag later
+        if t["id"] not in got and (t["frame"], t["kind"], t.get("mount_side")) in faces_now:
+            continue                      # re-taped: another id sits on that face now
         assert t["id"] in got, t["id"]
         assert got[t["id"]]["frame"] == t["frame"] and got[t["id"]].get("mount_side") == t.get("mount_side"), t["id"]
         if t["kind"] == "servo_lid":      # a face's +x token is a single-view call that a later pass may correct

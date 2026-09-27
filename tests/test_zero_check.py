@@ -1,4 +1,6 @@
-"""hexapod-zero-check: the saved 2026-09-11 zero pose agrees with the installed layout; a leg turned in the image is caught."""
+"""hexapod-zero-check: the saved 2026-09-11 zero pose agrees with the layout it was recorded under (leg 5's lids
+were re-taped 4/14 -> 114/117 the next day, so the installed layout cannot see leg 5 in it); a leg turned in the
+image is caught."""
 import json
 import math
 from pathlib import Path
@@ -6,19 +8,19 @@ from pathlib import Path
 import numpy as np
 
 from hexapod_tracker import zero_check as zc
-from hexapod_tracker.paths import CONFIG_DIR
-from hexapod_tracker.tag_calibration import center, load_configs, load_tags
+from hexapod_tracker.tag_calibration import center, load_tags
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tag_calibration_20260911"
 
 
 def _replay():
-    layout, _m, floor = load_configs(CONFIG_DIR)
+    layout = json.loads((FIXTURE / "expected_layout.json").read_text())
+    floor = json.loads((FIXTURE / "floor_tag_map.json").read_text())
     zero, sizes = load_tags(FIXTURE / "zero_tags.json")
     return zero, sizes, layout, floor
 
 
-def test_replay_of_the_installed_zero_pose_agrees_with_the_layout():
+def test_replay_of_the_saved_zero_pose_agrees_with_its_layout():
     zero, sizes, layout, floor = _replay()
     r = zc.check(zero, sizes, layout, floor, 2)
     assert r["ok"] and r["off"] == [] and r["error"] is None

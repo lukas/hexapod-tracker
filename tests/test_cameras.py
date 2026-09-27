@@ -61,11 +61,19 @@ class SyntheticScene:
         self.dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
         self.chassis = chassis                                         # (x_mm, y_mm, yaw_deg) or None
         self.hidden: set[int] = set()
+        self._cache: dict[tuple, np.ndarray] = {}                      # rendered frame per (hidden, chassis): render
+                                                                       # is 30 ms and a session reads ~100 frames
 
     def project(self, pts_mm: np.ndarray) -> np.ndarray:
         return cv2.perspectiveTransform(pts_mm.reshape(-1, 1, 2).astype(np.float64), self.H).reshape(-1, 2)
 
     def render(self) -> np.ndarray:
+        key = (frozenset(self.hidden), self.chassis)
+        if key not in self._cache:
+            self._cache[key] = self._render()
+        return self._cache[key].copy()
+
+    def _render(self) -> np.ndarray:
         img = np.full((self.height, self.width, 3), 200, dtype=np.uint8)
         tags = [(int(t["id"]), _anchor_corners(t)) for t in FLOOR["tags"]
                 if int(t["id"]) in FLOOR_PLANE_ANCHORS and int(t["id"]) not in self.hidden]
